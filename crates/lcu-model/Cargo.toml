@@ -1,0 +1,12 @@
+[package]
+name = "lcu-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VisionActor trait and action parsing for Local Computer Use (M1+)"
+
+[dependencies]
+lcu-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

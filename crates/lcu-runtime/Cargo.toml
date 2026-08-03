@@ -1,0 +1,27 @@
+[package]
+name = "lcu-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Task runtime, private local entry, and policy enforcement for Local Computer Use"
+
+[dependencies]
+lcu-core = { workspace = true }
+lcu-platform = { workspace = true }
+lcu-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true }
+libc = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

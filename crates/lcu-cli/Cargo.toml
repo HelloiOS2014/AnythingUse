@@ -1,0 +1,31 @@
+[package]
+name = "lcu-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lcu — sole external command surface for humans and agents"
+default-run = "lcu"
+
+[[bin]]
+name = "lcu"
+path = "src/main.rs"
+
+[dependencies]
+lcu-core = { workspace = true }
+lcu-runtime = { workspace = true }
+lcu-platform = { workspace = true }
+lcu-platform-macos = { workspace = true }
+lcu-chrome = { workspace = true }
+lcu-model = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"

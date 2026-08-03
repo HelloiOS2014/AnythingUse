@@ -1,0 +1,576 @@
+//! `lcu` — sole external entry for humans and agents.
+//!
+//! Agents never talk to Runtime IPC directly; they only invoke this CLI.
+//! Production path: CLI → private Unix socket → desktop-owned Runtime.
+//! Dev fallback: `LCU_EMBEDDED_RUNTIME=1` embeds Runtime in-process for tests.
+
+use std::path::PathBuf;
+use std::process::ExitCode as StdExitCode;
+use std::sync::Arc;
+
+use clap::{Parser, Subcommand};
+use lcu_core::error::ErrorCode;
+use lcu_core::protocol::{
+    DoctorReport, ExitCode, JsonEnvelope, PermissionCheck, PrivateEntryStatus,
+    PROTOCOL_SCHEMA_VERSION,
+};
+use lcu_core::schema::SchemaDocument;
+use lcu_chrome::{default_chrome_control_sock, ProductBackend};
+use lcu_platform::NullBackend;
+use lcu_platform_macos::MacosBackend;
+use lcu_runtime::ipc::call_runtime_blocking;
+use lcu_runtime::paths::RuntimePaths;
+use lcu_runtime::{InternalRequest, InternalResponse, Runtime};
+use serde::Serialize;
+
+#[derive(Debug, Parser)]
+#[command(name = "lcu", version, about = "Local Computer Use CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Environment and runtime diagnosis.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Submit a natural-language task.
+    Run {
+        goal: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Block until the task reaches a terminal state (or times out).
+        #[arg(long, default_value_t = false)]
+        wait: bool,
+        /// Optional per-task step budget (defaults to Runtime global limit).
+        #[arg(long)]
+        max_steps: Option<u32>,
+        /// Display-only: `human` (default) or `agent`.
+        #[arg(long, default_value = "human")]
+        source: String,
+        /// Display-only source label (e.g. codex, grok). Not authentication.
+        #[arg(long)]
+        source_name: Option<String>,
+    },
+    /// List tasks.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show task status.
+    Status {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a task.
+    Cancel {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause a running task (user takeover boundary).
+    Pause {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume a user-paused task.
+    Resume {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show task result summary (no screenshots).
+    Result {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Watch task events as JSONL lines (poll-based; incremental best-effort).
+    Watch {
+        task_id: String,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        #[arg(long, default_value_t = 200)]
+        interval_ms: u64,
+    },
+    /// Open the GUI approval surface only — never completes approval itself.
+    Approve {
+        approval_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the public command/schema contract version.
+    Schema {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn main() -> StdExitCode {
+    let cli = Cli::parse();
+    match dispatch(cli) {
+        Ok(code) => StdExitCode::from(code.as_i32() as u8),
+        Err(code) => StdExitCode::from(code.as_i32() as u8),
+    }
+}
+
+fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
+    match cli.command {
+        Commands::Schema { json } => {
+            let doc = SchemaDocument::current();
+            if json {
+                print_json(&JsonEnvelope::ok(doc));
+            } else {
+                println!(
+                    "schema_version={} internal_protocol={}",
+                    doc.schema_version, doc.internal_protocol_version
+                );
+            }
+            Ok(ExitCode::Success)
+        }
+        Commands::Doctor { json } => doctor(json),
+        Commands::Run {
+            goal,
+            app,
+            json,
+            wait,
+            max_steps,
+            source,
+            source_name,
+        } => {
+            let resp = call(InternalRequest::SubmitTask {
+                goal,
+                app_id: app,
+                source: Some(source),
+                source_name,
+                max_steps,
+            })?;
+            if wait {
+                wait_for_task(resp, json)
+            } else {
+                handle_task_response(resp, json)
+            }
+        }
+        Commands::List { json } => match call(InternalRequest::List)? {
+            InternalResponse::Tasks { tasks } => {
+                if json {
+                    print_json(&JsonEnvelope::ok(tasks));
+                } else if tasks.is_empty() {
+                    println!("no tasks");
+                } else {
+                    for t in tasks {
+                        println!("{} {:?}", t.task_id.0, t.state);
+                    }
+                }
+                Ok(ExitCode::Success)
+            }
+            other => map_error_response(other, json),
+        },
+        Commands::Status { task_id, json } => {
+            handle_task_response(call(InternalRequest::Status { task_id })?, json)
+        }
+        Commands::Cancel { task_id, json } => {
+            handle_task_response(call(InternalRequest::Cancel { task_id })?, json)
+        }
+        Commands::Pause { task_id, json } => {
+            handle_task_response(call(InternalRequest::Pause { task_id })?, json)
+        }
+        Commands::Resume { task_id, json } => {
+            handle_task_response(call(InternalRequest::Resume { task_id })?, json)
+        }
+        Commands::Result { task_id, json } => {
+            handle_task_response(call(InternalRequest::Result { task_id })?, json)
+        }
+        Commands::Watch {
+            task_id,
+            seconds,
+            interval_ms,
+        } => watch_task(task_id, seconds, interval_ms),
+        Commands::Approve { approval_id, json } => {
+            // Contract: never complete approval in CLI.
+            match call(InternalRequest::OpenApprovalUi { approval_id })? {
+                InternalResponse::ApprovalUi { launch } => {
+                    if !launch.gui_only {
+                        emit_error(
+                            json,
+                            ErrorCode::InternalError,
+                            "approval path must be GUI-only",
+                        );
+                        return Err(ExitCode::InternalError);
+                    }
+                    if json {
+                        print_json(&JsonEnvelope::ok(launch));
+                    } else {
+                        println!("{}", launch.message);
+                    }
+                    Ok(ExitCode::WaitingUser)
+                }
+                InternalResponse::Error { code, message } => {
+                    // Even on error, never invent a CLI approval success.
+                    emit_error(json, code, message);
+                    Err(code.exit_code())
+                }
+                other => map_error_response(other, json),
+            }
+        }
+    }
+}
+
+fn doctor(json: bool) -> Result<ExitCode, ExitCode> {
+    match call(InternalRequest::Doctor) {
+        Ok(InternalResponse::Doctor { report }) => {
+            emit_doctor(report, json);
+            Ok(ExitCode::Success)
+        }
+        Ok(InternalResponse::Error { code, message }) => {
+            emit_error(json, code, message);
+            Err(code.exit_code())
+        }
+        Ok(other) => map_error_response(other, json),
+        Err(ExitCode::RuntimeUnavailable) => {
+            // Offline doctor: report unreachable runtime + surface socket presence (best effort).
+            let paths = resolve_paths();
+            let mac_sock = lcu_platform_macos::client::default_socket_path();
+            let chrome_sock = default_chrome_control_sock().ok();
+            let mac_present = mac_sock.exists();
+            let chrome_present = chrome_sock.as_ref().map(|p| p.exists()).unwrap_or(false);
+            let report = DoctorReport {
+                schema_version: PROTOCOL_SCHEMA_VERSION.to_string(),
+                product: "local-computer-use".into(),
+                platform: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                runtime_reachable: false,
+                private_entry: PrivateEntryStatus {
+                    kind: "unix_socket".into(),
+                    listens_tcp: false,
+                    path: paths.as_ref().map(|p| p.socket.display().to_string()),
+                    directory_mode: None,
+                    socket_mode: None,
+                },
+                permissions: vec![
+                    PermissionCheck {
+                        name: "screen_recording".into(),
+                        state: "not_determined".into(),
+                        required_for: vec!["observe".into()],
+                    },
+                    PermissionCheck {
+                        name: "accessibility".into(),
+                        state: "not_determined".into(),
+                        required_for: vec!["semantic_action".into()],
+                    },
+                    PermissionCheck {
+                        name: "mac_window_service".into(),
+                        state: if mac_present {
+                            "socket_present".into()
+                        } else {
+                            "disconnected".into()
+                        },
+                        required_for: vec!["mac_window_observe".into()],
+                    },
+                    PermissionCheck {
+                        name: "chrome_control_host".into(),
+                        state: if chrome_present {
+                            "socket_present".into()
+                        } else {
+                            "disconnected".into()
+                        },
+                        required_for: vec!["chrome_tab_observe".into()],
+                    },
+                ],
+                blockers: vec![
+                    "lcu-desktop runtime not reachable; start apps/lcu-desktop".into(),
+                ],
+                notes: vec![
+                    "CLI talks only to desktop-owned private socket (or LCU_EMBEDDED_RUNTIME=1 for debug)".into(),
+                    format!(
+                        "mac_window sock={} present={}",
+                        mac_sock.display(),
+                        mac_present
+                    ),
+                    format!(
+                        "chrome_control sock={} present={}",
+                        chrome_sock
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(unresolved)".into()),
+                        chrome_present
+                    ),
+                    "Skill and agents must call only `lcu` (no MCP/Playwright/direct sockets)".into(),
+                ],
+            };
+            emit_doctor(report, json);
+            Ok(ExitCode::RuntimeUnavailable)
+        }
+        Err(code) => Err(code),
+    }
+}
+
+fn emit_doctor(report: DoctorReport, json: bool) {
+    if json {
+        print_json(&JsonEnvelope::ok(report));
+    } else {
+        println!(
+            "Local Computer Use doctor ({}) reachable={}",
+            report.schema_version, report.runtime_reachable
+        );
+        println!(
+            "private_entry kind={} listens_tcp={}",
+            report.private_entry.kind, report.private_entry.listens_tcp
+        );
+        for p in &report.permissions {
+            println!("permission {}={}", p.name, p.state);
+        }
+        for b in &report.blockers {
+            println!("blocker: {b}");
+        }
+        for n in &report.notes {
+            println!("note: {n}");
+        }
+    }
+}
+
+fn handle_task_response(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCode> {
+    match resp {
+        InternalResponse::Task { task } => {
+            if json {
+                print_json(&JsonEnvelope::ok(task));
+            } else {
+                println!("task {} state={:?}", task.task_id.0, task.state);
+            }
+            Ok(ExitCode::Success)
+        }
+        other => map_error_response(other, json),
+    }
+}
+
+/// Poll task status until terminal, waiting-user, or timeout (~10 min default).
+fn wait_for_task(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCode> {
+    use std::time::{Duration, Instant};
+
+    let task_id = match resp {
+        InternalResponse::Task { task } => {
+            if !json {
+                println!(
+                    "task {} accepted state={:?}; waiting for product worker…",
+                    task.task_id.0, task.state
+                );
+            }
+            task.task_id.0
+        }
+        other => return map_error_response(other, json),
+    };
+
+    let timeout = std::env::var("LCU_WAIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600u64);
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let mut last_steps = u32::MAX;
+
+    while Instant::now() < deadline {
+        match call(InternalRequest::Status {
+            task_id: task_id.clone(),
+        })? {
+            InternalResponse::Task { task } => {
+                if task.step_count != last_steps {
+                    if !json {
+                        println!(
+                            "task {} state={:?} steps={}",
+                            task.task_id.0, task.state, task.step_count
+                        );
+                    }
+                    last_steps = task.step_count;
+                }
+                if task.state.is_terminal() {
+                    if json {
+                        print_json(&JsonEnvelope::ok(&task));
+                    } else {
+                        println!(
+                            "task {} finished state={:?} steps={} summary={:?} error={:?}",
+                            task.task_id.0, task.state, task.step_count, task.summary, task.error
+                        );
+                    }
+                    return match task.state {
+                        lcu_core::task::TaskState::Succeeded => Ok(ExitCode::Success),
+                        lcu_core::task::TaskState::Cancelled
+                        | lcu_core::task::TaskState::Failed => Err(ExitCode::TaskFailed),
+                        _ => Err(ExitCode::InternalError),
+                    };
+                }
+                // Park states: still "running" from user POV but need interaction.
+                if matches!(
+                    task.state,
+                    lcu_core::task::TaskState::WaitingApproval
+                        | lcu_core::task::TaskState::PausedByUser
+                ) {
+                    if json {
+                        print_json(&JsonEnvelope::ok(&task));
+                    } else {
+                        println!(
+                            "task {} parked state={:?} (approve/resume/cancel as needed)",
+                            task.task_id.0, task.state
+                        );
+                    }
+                    return Ok(ExitCode::WaitingUser);
+                }
+            }
+            other => return map_error_response(other, json),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    emit_error(
+        json,
+        ErrorCode::InternalError,
+        format!("wait timed out after {timeout}s for task {task_id}"),
+    );
+    Err(ExitCode::InternalError)
+}
+
+fn watch_task(task_id: String, seconds: u64, interval_ms: u64) -> Result<ExitCode, ExitCode> {
+    use std::io::{stdout, Write};
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut last_state = String::new();
+    let mut last_steps = u32::MAX;
+    while Instant::now() < deadline {
+        match call(InternalRequest::Status {
+            task_id: task_id.clone(),
+        })? {
+            InternalResponse::Task { task } => {
+                let state = format!("{:?}", task.state);
+                if state != last_state || task.step_count != last_steps {
+                    let line = serde_json::json!({
+                        "task_id": task.task_id.0,
+                        "state": state,
+                        "step_count": task.step_count,
+                        "summary": task.summary,
+                        "error": task.error,
+                    });
+                    println!("{line}");
+                    let _ = stdout().flush();
+                    last_state = state;
+                    last_steps = task.step_count;
+                }
+                if task.state.is_terminal() {
+                    return Ok(ExitCode::Success);
+                }
+            }
+            other => return map_error_response(other, true),
+        }
+        std::thread::sleep(Duration::from_millis(interval_ms.max(50)));
+    }
+    Ok(ExitCode::Success)
+}
+
+fn map_error_response(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCode> {
+    match resp {
+        InternalResponse::Error { code, message } => {
+            emit_error(json, code, message);
+            Err(code.exit_code())
+        }
+        _ => {
+            emit_error(
+                json,
+                ErrorCode::InternalError,
+                "unexpected runtime response",
+            );
+            Err(ExitCode::InternalError)
+        }
+    }
+}
+
+fn call(request: InternalRequest) -> Result<InternalResponse, ExitCode> {
+    if embedded_enabled() {
+        return embedded_call(request);
+    }
+    let paths = resolve_paths().ok_or(ExitCode::RuntimeUnavailable)?;
+    call_runtime_blocking(&paths.socket, request).map_err(|err| {
+        emit_error(true, err.code(), err.to_string());
+        err.code().exit_code()
+    })
+}
+
+fn embedded_enabled() -> bool {
+    // Sealed in release builds: product CLI must talk to desktop-owned Runtime only.
+    if cfg!(not(debug_assertions)) {
+        return false;
+    }
+    matches!(
+        std::env::var("LCU_EMBEDDED_RUNTIME").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+fn embedded_call(request: InternalRequest) -> Result<InternalResponse, ExitCode> {
+    // Process-local Runtime for unit/dev only — not the production architecture.
+    use std::sync::OnceLock;
+    static RT: OnceLock<Arc<Runtime>> = OnceLock::new();
+    let runtime = RT.get_or_init(|| {
+        let root = std::env::var_os("LCU_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("lcu-embedded-{}", std::process::id()))
+            });
+        let paths = RuntimePaths::from_root(root);
+        let backend = build_product_backend();
+        let rt = Arc::new(Runtime::new(paths, backend).expect("embedded runtime"));
+        rt.start_scheduler();
+        rt
+    });
+    Ok(runtime.handle_internal(request))
+}
+
+/// Same backend factory as `lcu-desktop` (mac window service + Chrome product backend).
+fn build_product_backend() -> Arc<dyn lcu_platform::PlatformBackend> {
+    if !cfg!(target_os = "macos") {
+        return Arc::new(NullBackend);
+    }
+    let mac = MacosBackend::new();
+    let _ = mac.ensure_service();
+    match ProductBackend::with_defaults(Arc::new(mac)) {
+        Ok(p) => Arc::new(p),
+        Err(_) => Arc::new(MacosBackend::new()),
+    }
+}
+
+fn resolve_paths() -> Option<RuntimePaths> {
+    if let Some(dir) = std::env::var_os("LCU_RUNTIME_DIR") {
+        return Some(RuntimePaths::from_root(dir));
+    }
+    RuntimePaths::default_user().ok()
+}
+
+fn print_json<T: Serialize>(value: &T) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).expect("json serialize")
+    );
+}
+
+fn emit_error(json: bool, code: ErrorCode, message: impl Into<String>) {
+    let message = message.into();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&JsonEnvelope::<()>::err(
+                code.json_status(),
+                code,
+                message
+            ))
+            .expect("json")
+        );
+    } else {
+        eprintln!("error[{code}]: {message}");
+    }
+}
+
+

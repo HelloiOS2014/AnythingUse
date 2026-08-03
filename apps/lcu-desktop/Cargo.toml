@@ -1,0 +1,27 @@
+[package]
+name = "lcu-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop-owned single-instance Runtime host (Tauri shell lands in M1/M5)"
+
+[[bin]]
+name = "lcu-desktop"
+path = "src/main.rs"
+
+[dependencies]
+lcu-core = { workspace = true }
+lcu-runtime = { workspace = true }
+lcu-platform = { workspace = true }
+lcu-platform-macos = { workspace = true }
+lcu-chrome = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+# Menubar tray host (Tauri shell can replace later without changing Runtime)
+tray-icon = "0.21"
+muda = "0.17"
+winit = "0.30"

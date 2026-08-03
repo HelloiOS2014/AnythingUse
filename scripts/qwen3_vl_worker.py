@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Local Qwen3-VL worker for LCU M1.
+
+Protocol: one JSON request per stdin line, one JSON response per stdout line.
+Requests:
+  {"op":"warmup"}
+  {"op":"propose","goal":"...","observation":{...},"image_path":"...optional..."}
+Responses always include "ok": true/false.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+from typing import Any
+
+MODEL_DIR = Path(
+    os.environ.get(
+        "LCU_MODEL_DIR",
+        str(Path(__file__).resolve().parents[1] / "models" / "Qwen3-VL-4B-Instruct"),
+    )
+)
+
+_model = None
+_processor = None
+_device = None
+_load_ms = None
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def load_model() -> None:
+    global _model, _processor, _device, _load_ms
+    if _model is not None:
+        return
+    t0 = time.time()
+    import torch
+    from transformers import AutoModelForImageTextToText, Qwen3VLProcessor
+
+    if not MODEL_DIR.exists():
+        raise FileNotFoundError(f"model dir missing: {MODEL_DIR}")
+
+    # ensure video preprocessor exists (some downloads omit it)
+    video_cfg = MODEL_DIR / "video_preprocessor_config.json"
+    image_cfg = MODEL_DIR / "preprocessor_config.json"
+    if not video_cfg.exists() and image_cfg.exists():
+        import json as _json
+        pre = _json.loads(image_cfg.read_text())
+        video_cfg.write_text(
+            _json.dumps(
+                {
+                    "size": pre.get("size"),
+                    "patch_size": pre.get("patch_size", 16),
+                    "temporal_patch_size": pre.get("temporal_patch_size", 2),
+                    "merge_size": pre.get("merge_size", 2),
+                    "image_mean": pre.get("image_mean"),
+                    "image_std": pre.get("image_std"),
+                    "processor_class": "Qwen3VLProcessor",
+                    "video_processor_type": "Qwen3VLVideoProcessor",
+                },
+                indent=2,
+            )
+        )
+
+    if torch.backends.mps.is_available():
+        _device = torch.device("mps")
+        dtype = torch.float16
+    else:
+        _device = torch.device("cpu")
+        dtype = torch.float32
+
+    log(f"loading model from {MODEL_DIR} device={_device} dtype={dtype}")
+    _processor = Qwen3VLProcessor.from_pretrained(str(MODEL_DIR), trust_remote_code=True)
+    _model = AutoModelForImageTextToText.from_pretrained(
+        str(MODEL_DIR),
+        dtype=dtype,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+    )
+    _model.to(_device)
+    _model.eval()
+    _load_ms = int((time.time() - t0) * 1000)
+    log(f"model ready in {_load_ms} ms")
+
+
+ACTION_SCHEMA = """
+Return ONLY one JSON object (no markdown) with this shape:
+{"action": <Action>, "effect_claim": string|null, "expected_effect": string|null, "confidence": number}
+
+Action must be one of:
+{"kind":"semantic","type":"invoke","element_id":"eN"}
+{"kind":"semantic","type":"set_value","element_id":"eN","value":"..."}
+{"kind":"semantic","type":"focus","element_id":"eN"}
+{"kind":"semantic","type":"scroll","element_id":null,"delta_x":0,"delta_y":-0.3}
+{"kind":"wait","milliseconds":500}
+{"kind":"done","summary":"..."}
+{"kind":"fail","reason":"..."}
+{"kind":"request_user","reason":"..."}
+
+Rules:
+- Prefer semantic element_id from the provided list.
+- Never invent element ids.
+- Avoid destructive actions (delete/trash/pay/send) unless goal requires.
+- One action only.
+- Do NOT emit observe. Each request already includes the latest screenshot and elements.
+- For typing into an editor/document, prefer set_value on a real text field id from Elements (never the placeholder eN).
+- element_id MUST be copied exactly from Elements (e.g. "e0","e3"); inventing ids fails.
+- When the goal is already satisfied or verifiable from the screenshot/title/elements, emit {"kind":"done","summary":"..."}.
+- If an element value already contains the text the goal asks for, emit done immediately — do not set_value again.
+- Emit done only when the fresh observation proves every part of the entire Goal is complete and no work remains. Last action is history: one successful set_value or one field never proves the whole Goal. Never repeat a satisfied action; take the next unfinished action, or request_user/fail if blocked.
+- Do not repeat the same action with the same arguments. Pick done/fail/wait or a different element.
+"""
+
+
+def build_prompt(
+    goal: str,
+    observation: dict[str, Any],
+    *,
+    step: int | None = None,
+    last_action_summary: str | None = None,
+) -> str:
+    elements = observation.get("elements") or []
+    compact = []
+    # Cap tree size hard: VL + long AX on MPS often stalls and emits truncated JSON.
+    for e in elements[:16]:
+        compact.append(
+            {
+                "id": e.get("id"),
+                "role": (e.get("role") or "")[:32],
+                "label": (e.get("label") or "")[:48] or None,
+                "value": (e.get("value") or "")[:48] or None,
+            }
+        )
+    step_line = f"Step: {step}\n" if step is not None else ""
+    last_line = (
+        f"Last action: {last_action_summary}\n"
+        if last_action_summary
+        else "Last action: (none — first step)\n"
+    )
+    # Schema first so early tokens are valid JSON even if generation is cut short.
+    return (
+        f"{ACTION_SCHEMA}\n"
+        f"Goal: {goal}\n"
+        f"{step_line}"
+        f"{last_line}"
+        f"Current observation is fresh (screenshot + elements below).\n"
+        f"App: {observation.get('app_id')} title={observation.get('window_title')}\n"
+        f"Elements:\n{json.dumps(compact, ensure_ascii=False)}\n"
+        f"Output ONE complete JSON object only. Start with {{\"action\": and close all braces."
+    )
+
+
+def normalize_action_payload(obj: dict[str, Any]) -> dict[str, Any]:
+    """Coerce common model-sloppy shapes into {action: {kind, ...}, ...}.
+
+    Seen in the wild:
+      {"action": "semantic", "type": "invoke", "element_id": "el_0"}
+    Should become:
+      {"action": {"kind": "semantic", "type": "invoke", "element_id": "el_0"}}
+    """
+    if not isinstance(obj, dict):
+        return obj
+    action = obj.get("action", obj)
+    if isinstance(action, str) and action.strip():
+        # Flattened: kind was stored in "action", fields live at top level.
+        kind = action.strip()
+        rebuilt: dict[str, Any] = {"kind": kind}
+        for k in (
+            "type",
+            "element_id",
+            "value",
+            "delta_x",
+            "delta_y",
+            "milliseconds",
+            "summary",
+            "reason",
+            "text",
+            "x",
+            "y",
+            "button",
+            "keys",
+        ):
+            if k in obj and k != "action":
+                rebuilt[k] = obj[k]
+        out = {k: v for k, v in obj.items() if k not in rebuilt and k != "action"}
+        out["action"] = rebuilt
+        return out
+    if isinstance(action, dict):
+        return obj
+    # Bare action object without wrapper.
+    if "kind" in obj and "action" not in obj:
+        return {"action": obj}
+    return obj
+
+
+def extract_json(text: str) -> dict[str, Any]:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:].strip()
+    def _valid(obj: dict[str, Any]) -> dict[str, Any]:
+        obj = normalize_action_payload(obj)
+        action = obj.get("action", obj)
+        if isinstance(action, dict):
+            kind = action.get("kind")
+            if not kind:
+                raise ValueError("incomplete action kind")
+            return obj
+        raise ValueError(f"action is not an object after normalize: {type(action).__name__}")
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return _valid(json.loads(text[start : end + 1]))
+        except Exception:
+            pass
+    # Truncated generation (common on short max_new_tokens / max_time).
+    chunk = text[start:] if start >= 0 else text
+    for closer in ("}}", '"}', "}}}", '"}}'):
+        try:
+            return _valid(json.loads(chunk + closer))
+        except Exception:
+            continue
+    raise ValueError(f"no json object in model output: {text[:200]}")
+
+
+def _resize_image(path: str) -> str:
+    """Downscale large window captures so MPS generate does not hang for minutes."""
+    from PIL import Image
+
+    # Smaller default: large captures dominate MPS prefill and starve generation.
+    max_side = int(os.environ.get("LCU_VLM_MAX_IMAGE", "512"))
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    scale = min(1.0, float(max_side) / float(max(w, h)))
+    if scale < 1.0:
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        img = img.resize((nw, nh), Image.Resampling.BILINEAR)
+        out = Path(path).with_suffix(".vlm.jpg")
+        img.save(out, format="JPEG", quality=85)
+        try:
+            os.chmod(out, 0o600)
+        except OSError:
+            pass
+        log(f"resized image {w}x{h} -> {nw}x{nh} path={out}")
+        return str(out)
+    return path
+
+
+def _cleanup_resized(resized_path: str | None, image_path: str | None) -> None:
+    if resized_path and resized_path != image_path:
+        try:
+            Path(resized_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def propose(req: dict[str, Any]) -> dict[str, Any]:
+    load_model()
+    import torch
+
+    goal = req.get("goal") or ""
+    observation = req.get("observation") or {}
+    image_path = req.get("image_path")
+    step = req.get("step")
+    if step is not None:
+        try:
+            step = int(step)
+        except (TypeError, ValueError):
+            step = None
+    last_action_summary = req.get("last_action_summary")
+    if last_action_summary is not None:
+        last_action_summary = str(last_action_summary)[:240]
+    prompt = build_prompt(
+        goal,
+        observation,
+        step=step,
+        last_action_summary=last_action_summary,
+    )
+    # Single total wall budget for one propose (attempt + optional JSON retry).
+    # Retry must consume remaining time only — never re-grant a full 180s.
+    max_new = int(req.get("max_new_tokens") or int(os.environ.get("LCU_VLM_MAX_NEW", "512")))
+    total_budget = float(
+        req.get("max_time")
+        or os.environ.get("LCU_VLM_MAX_TIME")
+        or os.environ.get("LCU_VLM_PROPOSE_SECS")
+        or "120"
+    )
+    total_budget = max(15.0, total_budget)
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    resized_path = None
+    # Product default: multimodal. Parent Rust must env_remove LCU_VLM_NO_IMAGE in
+    # release; only explicit request no_image=true is a debug opt-out.
+    force_no = req.get("no_image") is True
+    use_image = not force_no
+    try:
+        if use_image and image_path and Path(image_path).exists():
+            try:
+                resized_path = _resize_image(str(image_path))
+                content.insert(0, {"type": "image", "image": resized_path})
+                log(f"propose mode=multimodal image={resized_path}")
+            except Exception as e:
+                raise RuntimeError(
+                    f"image preprocess failed (product requires screenshot): {e}"
+                ) from e
+        elif use_image:
+            raise RuntimeError(
+                "product VLM requires image_path; missing or unreadable screenshot "
+                "(debug only: set request no_image=true)"
+            )
+        else:
+            log("propose mode=text-only (explicit request no_image)")
+
+        messages = [{"role": "user", "content": content}]
+
+        log(
+            f"propose start goal_len={len(goal)} elements={len(observation.get('elements') or [])} "
+            f"step={step} last={last_action_summary!r} max_new={max_new} total_budget={total_budget}"
+        )
+        t0 = time.time()
+        inputs = _processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(_device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        n_tokens = int(inputs["input_ids"].shape[-1]) if "input_ids" in inputs else -1
+        log(f"propose tokens={n_tokens} generating…")
+
+        def _remaining() -> float:
+            return max(5.0, total_budget - (time.time() - t0))
+
+        def _generate(n_new: int, wall: float) -> str:
+            with torch.inference_mode():
+                out_ids = _model.generate(
+                    **inputs,
+                    max_new_tokens=n_new,
+                    do_sample=False,
+                    max_time=max(5.0, wall),
+                )
+            prompt_len = inputs["input_ids"].shape[-1]
+            gen = out_ids[0][prompt_len:]
+            return _processor.batch_decode([gen], skip_special_tokens=True)[0]
+
+        text = _generate(max_new, _remaining())
+        latency_ms = int((time.time() - t0) * 1000)
+        log(
+            f"propose done latency_ms={latency_ms} remaining={_remaining():.1f}s "
+            f"out_chars={len(text)} raw={text[:200]!r}"
+        )
+
+        try:
+            parsed = extract_json(text)
+        except Exception as e1:
+            remaining = _remaining()
+            if remaining < 10.0:
+                log(f"json parse failed ({e1}); no time left for retry remaining={remaining:.1f}s")
+                raise RuntimeError(
+                    f"VLM output illegal / unparseable: {e1}; raw={text[:300]!r}"
+                ) from e1
+            # One re-generate using only remaining budget (not a fresh 180s grant).
+            log(
+                f"json parse failed ({e1}); retrying once with more tokens "
+                f"remaining_budget={remaining:.1f}s"
+            )
+            text2 = _generate(max(max_new, 768), remaining)
+            latency_ms = int((time.time() - t0) * 1000)
+            log(f"propose retry done latency_ms={latency_ms} out_chars={len(text2)}")
+            try:
+                parsed = extract_json(text2)
+                text = text2
+            except Exception as e2:
+                log(f"json parse failed after retry ({e2}); refusing salvage")
+                raise RuntimeError(
+                    f"VLM output illegal / unparseable: {e2}; raw={text2[:300]!r}"
+                ) from e2
+        action = parsed.get("action", parsed)
+        log(f"propose action={action!r} total_latency_ms={latency_ms}")
+        return {
+            "ok": True,
+            "raw_text": text,
+            "action": action,
+            "effect_claim": parsed.get("effect_claim"),
+            "expected_effect": parsed.get("expected_effect"),
+            "confidence": parsed.get("confidence", 0.5),
+            "latency_ms": latency_ms,
+            "load_ms": _load_ms,
+            "device": str(_device),
+            "model_dir": str(MODEL_DIR),
+            "salvaged": False,
+            "step": step,
+            "last_action_summary": last_action_summary,
+        }
+    finally:
+        _cleanup_resized(resized_path, image_path)
+
+
+def handle(req: dict[str, Any]) -> dict[str, Any]:
+    op = req.get("op")
+    if op == "warmup":
+        load_model()
+        return {
+            "ok": True,
+            "load_ms": _load_ms,
+            "device": str(_device),
+            "model_dir": str(MODEL_DIR),
+        }
+    if op == "propose":
+        return propose(req)
+    if op == "ping":
+        return {"ok": True, "pong": True}
+    return {"ok": False, "error": f"unknown op {op}"}
+
+
+def main() -> None:
+    log(f"qwen3_vl_worker starting model_dir={MODEL_DIR}")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+            resp = handle(req)
+        except Exception as e:
+            resp = {
+                "ok": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()[-2000:],
+            }
+        print(json.dumps(resp, ensure_ascii=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()

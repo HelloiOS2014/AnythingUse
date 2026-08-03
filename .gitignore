@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/target/
+.venv/
+/models/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local runtime / secrets (never commit)
+.lcu/
+**/Application Support/LocalComputerUse/
+*.keychain-db
+*.p12
+*.pem
+*.mobileprovision
+
+# Build / packaging artifacts
+/dist/
+/artifacts/
+*.dmg
+*.pkg
+*.app/
+
+# Reports generated during development (keep intentional fixtures)
+/reports/local/
+/benchmarks/local/
+/test-results/local/
+/tmp/

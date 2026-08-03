@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "LCU Chrome Control",
+  "version": "0.2.1",
+  "description": "D3 product Chrome surface: debugger/CDP, Native Messaging, task tab groups, tab lease. No Playwright, no AX.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAixYEQjLyLeGu/Ap5xLBpj3qsqpGTDMMzQhzdvh8Bgm7pQzaS8X8VBTSAhAlMD/IV7qRkEnV8r7NsxbBcuk0BEnFtNqOcAAap6VDKzSdTkBaJ/FehFBvMkBKLumnLCwQez1KCqU23ntgzv/ur2+kbL6jnGlPW4Tt2Yo2Mfip+zayx04sstvFN1vJyECloGQzU1hzgCua+pIa0zVFzKc4iMcfc8nsR6V3jRSkaRIid4sYaKwibJsviDbA8S5F693Lf6ZBtYck+kCHT3gVPPFtA2Us1xlih8wQCL4qOap3XSpuEiqOsMc9YuqqG4h0zuwJSmZlJlwqj+9b2h7bw9EN4qwIDAQAB",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "debugger",
+    "nativeMessaging",
+    "tabs",
+    "tabGroups",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "LCU Chrome Control"
+  }
+}

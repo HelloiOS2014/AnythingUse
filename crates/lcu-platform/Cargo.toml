@@ -1,0 +1,11 @@
+[package]
+name = "lcu-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-agnostic backend trait for Local Computer Use"
+
+[dependencies]
+lcu-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

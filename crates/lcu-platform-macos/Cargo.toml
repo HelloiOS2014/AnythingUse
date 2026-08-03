@@ -1,0 +1,19 @@
+[package]
+name = "lcu-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS platform backend — thin adapter to native macos-window-service (Unix socket JSON)"
+
+[dependencies]
+lcu-core = { workspace = true }
+lcu-platform = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+dirs = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+serde_json = { workspace = true }

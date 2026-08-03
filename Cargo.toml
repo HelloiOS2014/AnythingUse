@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lcu-core",
+    "crates/lcu-platform",
+    "crates/lcu-platform-macos",
+    "crates/lcu-chrome",
+    "crates/lcu-model",
+    "crates/lcu-runtime",
+    "crates/lcu-cli",
+    "apps/lcu-desktop",
+]
+default-members = [
+    "crates/lcu-core",
+    "crates/lcu-platform",
+    "crates/lcu-platform-macos",
+    "crates/lcu-chrome",
+    "crates/lcu-model",
+    "crates/lcu-runtime",
+    "crates/lcu-cli",
+    "apps/lcu-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+authors = ["Local Computer Use"]
+repository = "local"
+rust-version = "1.85"
+
+[workspace.dependencies]
+lcu-core = { path = "crates/lcu-core" }
+lcu-platform = { path = "crates/lcu-platform" }
+lcu-platform-macos = { path = "crates/lcu-platform-macos" }
+lcu-chrome = { path = "crates/lcu-chrome" }
+lcu-model = { path = "crates/lcu-model" }
+lcu-runtime = { path = "crates/lcu-runtime" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
+dirs = "6"
+tempfile = "3"
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }

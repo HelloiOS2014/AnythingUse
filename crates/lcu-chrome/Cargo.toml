@@ -1,0 +1,19 @@
+[package]
+name = "lcu-chrome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ChromeTab surface adapter: Unix private-entry client to the Chrome Native Messaging host (D3)"
+
+[dependencies]
+lcu-core = { workspace = true }
+lcu-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }

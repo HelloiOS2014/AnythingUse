@@ -1,0 +1,9 @@
+{
+  "name": "com.lcu.chrome_control",
+  "description": "LCU Chrome Control native messaging host (D3 product)",
+  "path": "__HOST_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://dcmfagbbcdpbmggmpngkhegbidepcogk/"
+  ]
+}
