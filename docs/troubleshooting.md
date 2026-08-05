@@ -23,7 +23,9 @@
 - Chrome must be running so Native Messaging can launch the host
 - Socket: `~/Library/Application Support/LocalComputerUse/chrome-control.sock` (no TCP)
 
-## Task stuck in `waiting_approval`
+## Task stuck in `waiting_user`
+
+Wire name is `waiting_user` (legacy alias `waiting_approval` may appear in older logs).
 
 - Run `lcu approve <id>` only opens UI; complete approval in the GUI.
 - Agents cannot approve.

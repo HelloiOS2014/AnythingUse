@@ -1,6 +1,8 @@
-# D3 Chrome Control — product Chrome surface
+# Chrome control (AnythingUse)
 
-Productized Chrome backend for Local Computer Use: **real user Chrome**, **MV3 extension + `chrome.debugger`/CDP**, **Native Messaging**, **task tab group + tab lease**, mapped to `ChromeTab` / `ControlState`.
+Product Chrome backend for AnythingUse / LCU: **real user Chrome**, **MV3 extension + `chrome.debugger`/CDP**, **Native Messaging**, **task tab group + tab lease**, mapped to `ChromeTab` / `ControlState`.
+
+(Historical milestone label: Wave D3 — not a separate product.)
 
 ## Invariants
 

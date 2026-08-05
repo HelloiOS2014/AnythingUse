@@ -1,6 +1,8 @@
-# macos-window-service (D2)
+# macos-window-service
 
-Productized P1 macOS window control: **per-user private Unix socket + JSON lines**.
+AnythingUse **macOS window** control surface: **per-user private Unix socket + JSON lines**.
+
+(Historical milestone labels: Wave D2 / P1 spike — not separate products.)
 
 ## Role
 

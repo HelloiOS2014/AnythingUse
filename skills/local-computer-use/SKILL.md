@@ -1,13 +1,15 @@
 ---
 name: local-computer-use
-description: Operate the user's real Mac desktop apps (including installed Chrome) only through the `lcu` CLI. No Playwright, no DOM control, no MCP control plane, no private socket access.
+description: Operate AnythingUse (local Computer Use) on the user's real Mac desktop apps and installed Chrome only through the `lcu` CLI. No Playwright, no DOM control, no MCP control plane, no private socket access.
 ---
 
-# Local Computer Use Skill
+# AnythingUse Skill (`lcu`)
+
+Skill directory name `local-computer-use` is historical. Product name is **AnythingUse**; the only agent control surface is the **`lcu`** CLI.
 
 ## When to use
 
-Use this skill when the user wants an agent to operate **real** desktop applications on this machine via Local Computer Use.
+Use this skill when the user wants an agent to operate **real** desktop applications on this machine via AnythingUse / `lcu`.
 
 ## Hard rules (never break)
 
@@ -23,7 +25,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 
 | Command | Purpose |
 |---|---|
-| `lcu doctor [--json]` | Permissions, runtime reachability, private entry, **mac_window + chrome_tab surface connectivity** |
+| `lcu doctor [--json]` | Permissions, runtime reachability, private entry, **`mac_window_service` + `chrome_control_host` connectivity** |
 | `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--json]` | Submit a task (source is display-only) |
 | `lcu list [--json]` | List global queue tasks |
 | `lcu status <task-id> [--json]` | Task state |
@@ -75,7 +77,9 @@ macOS tasks do not activate the target window; user takeover of the same window 
 
 ## References
 
+- `docs/status.md` — delivery boundary (v3.2)
 - `docs/command-contract.md` — full contract
 - `docs/user-guide.md` — human setup (including Chrome extension install)
 - `docs/privacy.md` — data retention
 - `docs/troubleshooting.md` — common failures
+- `docs/architecture.md` — components and lifecycle

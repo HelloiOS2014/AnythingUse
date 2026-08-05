@@ -1,5 +1,7 @@
 # AnythingUse Architecture
 
+CLI and on-disk paths still use the **LCU** / `LocalComputerUse` codename; see [Delivery status](status.md) for the naming map.
+
 ## Design goals
 
 AnythingUse provides one local command surface for user- and Agent-originated control tasks. The current product targets macOS applications and Chrome, while keeping the endpoint boundary small enough to support other platforms later.
@@ -19,7 +21,7 @@ The architecture prioritizes:
 flowchart TB
     subgraph Callers
         HUMAN["Human shell or app"]
-        AGENT["Agent using Local Computer Use Skill"]
+        AGENT["Agent using AnythingUse Skill (lcu)"]
     end
 
     HUMAN --> CLI
@@ -62,19 +64,23 @@ stateDiagram-v2
     [*] --> queued
     queued --> running
     running --> waiting_user: approval required
-    waiting_user --> queued: approved
+    waiting_user --> running: approved
     running --> paused: same-target takeover
-    paused --> queued: resume
+    paused --> running: resume
     running --> succeeded: explicit Done + re-observe
     running --> failed: invalid action / target lost / limit
-    queued --> canceled
-    running --> canceled
+    queued --> cancelled
+    running --> cancelled
+    waiting_user --> cancelled
+    paused --> cancelled
     succeeded --> [*]
     failed --> [*]
-    canceled --> [*]
+    cancelled --> [*]
 ```
 
-The scheduler executes one automatic task at a time. `waiting_user` and user-paused tasks do not hold the execution slot.
+Wire state names match the Runtime JSON: `waiting_user` (Rust variant `WaitingApproval`; legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), and `cancelled`.
+
+The scheduler executes one automatic task at a time. `waiting_user` and user-paused tasks do **not** hold the execution slot; after approval or resume the task returns to `running` (it is not re-queued as a new job).
 
 ## Execution loop
 

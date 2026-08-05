@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download Qwen3-VL-4B-Instruct weights for M1 model spike.
+# Download Qwen3-VL-4B-Instruct weights for the local AnythingUse / lcu VLM actor.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

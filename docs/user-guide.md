@@ -1,8 +1,8 @@
-# Local Computer Use — User Guide (macOS)
+# AnythingUse — User Guide (macOS)
 
 ## What this is
 
-Local Computer Use runs a single-instance Runtime on your Mac. Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
+**AnythingUse** (CLI / data root still branded **LCU** / `LocalComputerUse`) runs a single-instance Runtime on your Mac. Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
 
 Execution surfaces:
 
@@ -17,6 +17,16 @@ Tasks enter one serial FIFO queue. `waiting_user` and user-paused tasks release 
 - Screen Recording + Accessibility for the **macos-window-service** / `lcu-desktop` host
 - Optional Chrome surface: install native host + load unpacked extension (see below)
 - Optional: local Qwen3-VL weights under `models/Qwen3-VL-4B-Instruct` for VLM mode
+
+### Local model weights (optional)
+
+```bash
+# requires `hf` CLI or python package huggingface_hub
+./scripts/download_qwen3_vl.sh
+# override: LCU_MODEL_DIR=... LCU_MODEL_REPO=...
+```
+
+Without weights, doctor and CLI still work; VLM propose path needs the model tree and a Python env with the project’s vision stack (see `.venv` / model worker).
 
 ## Install (dev)
 

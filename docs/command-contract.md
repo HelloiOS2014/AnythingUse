@@ -2,7 +2,8 @@
 
 Schema version: `1.0.0`  
 Internal private IPC protocol version: `1`  
-Status: product surface (macOS window + Chrome tab)
+Status: product surface (macOS window + Chrome tab)  
+Product: **AnythingUse** (binary remains `lcu`)
 
 ## Principles
 
@@ -62,6 +63,8 @@ Surface permissions (connectivity):
 Submit a high-level natural-language task.
 
 `source` and `source-name` are display metadata, not authentication. Tasks enter one serial FIFO queue; `waiting_user` and user-paused tasks release the execution slot.
+
+Task wire states include `queued`, `running`, `waiting_user` (legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), `succeeded`, `failed`, `cancelled`. After GUI approval or user resume, the task returns to `running` (not a new `queued` enqueue).
 
 Task success requires an explicit model `Done` and a successful re-observation of the target. A successful action, repeated action, step count, or queued state is not completion.
 

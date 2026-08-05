@@ -9,6 +9,8 @@ AnythingUse is a local-first control layer for humans and Agents. It is designed
 
 中文简介：AnythingUse 是一个面向用户与 Agent 的本地多端控制层。当前实现 macOS Computer Use，后续将逐步扩展到更多系统与设备。
 
+**Naming:** product name is **AnythingUse**. The public CLI is still `lcu`, crates and sockets use the historical **LCU** / `LocalComputerUse` codename (data root: `~/Library/Application Support/LocalComputerUse`). Treat them as one product.
+
 ## Why AnythingUse
 
 Computer-use systems often take over the foreground desktop, move the real pointer, or force Agents into a browser-specific API. AnythingUse takes a different approach:
@@ -70,13 +72,16 @@ See [Architecture](docs/architecture.md) for the component and task-lifecycle de
 - Rust toolchain
 - Screen Recording and Accessibility permissions
 - Optional: Chrome plus the AnythingUse extension
-- Optional: Qwen3-VL weights at `models/Qwen3-VL-4B-Instruct`
+- Optional: Qwen3-VL weights at `models/Qwen3-VL-4B-Instruct` (`./scripts/download_qwen3_vl.sh`)
 
 ### Build
 
 ```bash
 cargo build -p lcu-cli -p lcu-desktop --release
 (cd native/macos-window-service && swift build -c release)
+
+# optional local VLM weights
+./scripts/download_qwen3_vl.sh
 ```
 
 ### Start and diagnose
@@ -139,31 +144,37 @@ Repeated actions, step count, or a successful write do not complete the whole go
 
 ## Roadmap
 
-- **Now:** macOS window control, real Chrome control, local VLM, CLI, Agent Skill.
+- **Now (v3.2, on `main`):** macOS window control, real Chrome control, local VLM, CLI, Agent Skill. See [Delivery status](docs/status.md).
 - **Next:** signed macOS packaging and Windows compatibility.
 - **Later:** additional computers, mobile devices, remote hosts, or other controllable endpoints where a strict target and safe action model can be provided.
 
-Roadmap items describe direction, not release commitments.
+Roadmap items describe direction, not release commitments. MCP, Playwright, public TCP, and long Top100/soak gates are **not** current product surfaces or freeze blockers.
 
 ## Repository map
 
 ```text
 apps/lcu-desktop/             Runtime host and approval UI
 crates/lcu-cli/               Public command surface
+crates/lcu-core/              Shared contracts (actions, risk, task state, protocol)
+crates/lcu-platform/          PlatformBackend trait + null backend
 crates/lcu-runtime/           Queue, state, policy, and execution loop
 crates/lcu-model/             Local VLM actor and action validation
 crates/lcu-platform-macos/    Rust adapter for macOS control
 crates/lcu-chrome/            Chrome backend adapter
 native/macos-window-service/  Swift window-targeted service
 native/chrome-control/        Extension and Native Messaging host
-skills/local-computer-use/    Agent-facing Skill
+skills/local-computer-use/    Agent-facing Skill (directory name historical)
+scripts/                      Model download and helper scripts
 ```
 
 ## Documentation
 
+- [Delivery status](docs/status.md)
 - [Architecture](docs/architecture.md)
 - [User guide](docs/user-guide.md)
 - [`lcu` command contract](docs/command-contract.md)
 - [Privacy](docs/privacy.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md)
+- [macOS window service](native/macos-window-service/README.md)
+- [Chrome control](native/chrome-control/README.md)

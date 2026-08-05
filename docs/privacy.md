@@ -1,5 +1,7 @@
 # Privacy
 
+Product: **AnythingUse**. Runtime data root on macOS defaults to `~/Library/Application Support/LocalComputerUse` (override with `LCU_RUNTIME_ROOT`).
+
 ## Data that stays local
 
 | Kind | Location | Notes |
