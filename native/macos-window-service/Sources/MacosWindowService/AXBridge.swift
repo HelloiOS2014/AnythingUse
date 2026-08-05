@@ -3,9 +3,113 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+// macOS Accessibility SPI used by native Computer Use implementations to route
+// keyboard events into an app's out-of-process renderer instead of its shell PID.
+@_silgen_name("_AXUIElementGetActualPid")
+private func lcuAXUIElementGetActualPid(
+    _ element: AXUIElement,
+    _ pid: UnsafeMutablePointer<pid_t>
+) -> AXError
+
 /// Accessibility tree read + semantic actions + synthetic in-app focus.
 /// Never activates the application or raises it to system frontmost.
 enum AXBridge {
+    /// Keeps the compatibility fallback enabled only for the duration of one
+    /// service request and restores the caller's previous preference value.
+    final class AccessibilityEnablementAssertion {
+        private static let lock = NSLock()
+        private static var fallbackUsers = 0
+        private static var fallbackPreviousValue: Any?
+        private static var fallbackHadValue = false
+        private static let preferenceDomain = "com.apple.universalaccess"
+        private static let preferenceKey = "voiceOverOnOffKey"
+        private static let notification = Notification.Name(
+            "com.apple.universalaccess.VoiceOverSettingsDidChange"
+        )
+
+        private let usesFallback: Bool
+        private var active = true
+
+        fileprivate init(pid: pid_t, allowFallback: Bool) {
+            let app = AXBridge.application(pid: pid)
+            var attributeEnabled = false
+            for attribute in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+                if AXUIElementSetAttributeValue(
+                    app,
+                    attribute as CFString,
+                    kCFBooleanTrue
+                ) == .success {
+                    attributeEnabled = true
+                }
+            }
+
+            usesFallback = allowFallback && !attributeEnabled
+            if usesFallback {
+                Self.acquireFallback()
+            }
+        }
+
+        func disable() {
+            guard active else { return }
+            active = false
+            if usesFallback {
+                Self.releaseFallback()
+            }
+        }
+
+        deinit {
+            disable()
+        }
+
+        private static func acquireFallback() {
+            lock.lock()
+            defer { lock.unlock() }
+
+            if fallbackUsers == 0 {
+                let defaults = UserDefaults(suiteName: preferenceDomain)
+                fallbackPreviousValue = defaults?.object(forKey: preferenceKey)
+                fallbackHadValue = fallbackPreviousValue != nil
+                if (fallbackPreviousValue as? Bool) != true {
+                    defaults?.set(true, forKey: preferenceKey)
+                    // The target process reads this preference through cfprefsd.
+                    // Flush before broadcasting or a short-lived assertion can
+                    // restore the value before Chromium ever observes `true`.
+                    defaults?.synchronize()
+                    DistributedNotificationCenter.default().post(
+                        name: notification,
+                        object: nil
+                    )
+                    // Match the native Computer Use initialization grace period.
+                    usleep(100_000)
+                }
+            }
+            fallbackUsers += 1
+        }
+
+        private static func releaseFallback() {
+            lock.lock()
+            defer { lock.unlock() }
+
+            fallbackUsers = max(0, fallbackUsers - 1)
+            guard fallbackUsers == 0 else { return }
+            if (fallbackPreviousValue as? Bool) != true {
+                let defaults = UserDefaults(suiteName: preferenceDomain)
+                if fallbackHadValue {
+                    defaults?.set(fallbackPreviousValue, forKey: preferenceKey)
+                } else {
+                    defaults?.removeObject(forKey: preferenceKey)
+                }
+                defaults?.synchronize()
+                DistributedNotificationCenter.default().post(
+                    name: notification,
+                    object: nil
+                )
+            }
+            fallbackPreviousValue = nil
+            fallbackHadValue = false
+        }
+    }
+
     struct ElementInfo {
         var role: String
         var subrole: String
@@ -18,6 +122,40 @@ enum AXBridge {
 
     static func application(pid: pid_t) -> AXUIElement {
         AXUIElementCreateApplication(pid)
+    }
+
+    /// Chromium/CEF apps commonly keep their full AX tree disabled until an
+    /// accessibility client opts in. Keep the returned assertion alive while
+    /// reading or acting on the target UI.
+    static func enableAccessibility(
+        pid: pid_t,
+        allowFallback: Bool = false
+    ) -> AccessibilityEnablementAssertion {
+        AccessibilityEnablementAssertion(pid: pid, allowFallback: allowFallback)
+    }
+
+    static func keyboardEventPID(applicationPID: pid_t) -> pid_t {
+        let app = application(pid: applicationPID)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            app,
+            kAXFocusedUIElementAttribute as CFString,
+            &ref
+        ) == .success,
+            let ref
+        else { return applicationPID }
+
+        let focused = ref as! AXUIElement
+        var actualPID: pid_t = applicationPID
+        if lcuAXUIElementGetActualPid(focused, &actualPID) == .success,
+           actualPID > 0
+        {
+            return actualPID
+        }
+        if AXUIElementGetPid(focused, &actualPID) == .success, actualPID > 0 {
+            return actualPID
+        }
+        return applicationPID
     }
 
     /// Match CG window id to an AX window element — **fail closed**.
@@ -145,9 +283,12 @@ enum AXBridge {
 
     /// System-wide element at a global top-left-origin screen point.
     static func elementAtScreenPoint(_ point: CGPoint, expectedPID: pid_t? = nil) -> AXUIElement? {
-        let system = AXUIElementCreateSystemWide()
+        // Restrict hit-testing to the requested application when its pid is known.
+        // The system-wide root follows z-order and would return the user's frontmost
+        // window when it overlaps a background target at the same screen point.
+        let root = expectedPID.map(application(pid:)) ?? AXUIElementCreateSystemWide()
         var ref: AXUIElement?
-        let err = AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &ref)
+        let err = AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &ref)
         guard err == .success, let el = ref else { return nil }
         if let expectedPID {
             var pid: pid_t = 0
@@ -156,6 +297,42 @@ enum AXBridge {
             }
         }
         return el
+    }
+
+    static func editableAtOrAbove(_ element: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement? = element
+        for _ in 0..<12 {
+            guard let el = current else { return nil }
+            let role = copyString(el, kAXRoleAttribute as CFString) ?? ""
+            if role.contains("Text") || role.contains("Field") || role == "AXComboBox" {
+                return el
+            }
+            if role == (kAXWindowRole as String) || role == "AXWindow" {
+                return nil
+            }
+            var parentRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                el,
+                kAXParentAttribute as CFString,
+                &parentRef
+            ) == .success else { return nil }
+            current = parentRef.map { $0 as! AXUIElement }
+        }
+        return nil
+    }
+
+    /// Some custom views return a container for hit-testing. Find only a text
+    /// descendant whose own AX frame contains the requested point.
+    static func editableBelow(_ element: AXUIElement, containing point: CGPoint) -> AXUIElement? {
+        for node in walk(from: element, maxNodes: 80) {
+            let editable = node.role.contains("Text")
+                || node.role.contains("Field")
+                || node.role == "AXComboBox"
+            if editable, let frame = copyFrame(node.element), frame.contains(point) {
+                return node.element
+            }
+        }
+        return nil
     }
 
     static func climbToWindow(from element: AXUIElement) -> AXUIElement? {
@@ -296,19 +473,20 @@ enum AXBridge {
     /// (`pid + windowID`). PID-only frontmost checks are insufficient: they allow
     /// re-keying user window A → agent window B inside the same app.
     ///
-    /// Writing `kAXFocusedUIElement` on a background app often promotes it to
-    /// frontmost (observed with TextEdit). Returns false without mutating when
-    /// the target is not already key.
+    /// Background apps may change their in-process focused element without becoming
+    /// frontmost. If the user is already in that app, require exact target-window proof.
     @discardableResult
     static func syntheticFocus(target: MacWindowTarget, element: AXUIElement) -> Bool {
-        guard FocusGuard.isTargetKeyWindow(target: target) else {
-            return false
-        }
-        guard elementBelongsToTargetWindow(element, target: target) else {
-            return false
+        if FocusGuard.isFrontmost(pid: target.pid) {
+            guard FocusGuard.isTargetKeyWindow(target: target),
+                  elementBelongsToTargetWindow(element, target: target)
+            else {
+                return false
+            }
         }
         let app = application(pid: target.pid)
-        // Focus the element inside the process. Do NOT set kAXFrontmostAttribute.
+        // Background in-process focus is not system frontmost/key ownership.
+        // Do NOT set kAXFrontmostAttribute or raise a window.
         let focused = AXUIElementSetAttributeValue(
             app,
             kAXFocusedUIElementAttribute as CFString,
@@ -337,11 +515,18 @@ enum AXBridge {
         copyString(element, kAXValueAttribute as CFString) ?? ""
     }
 
-    static func press(_ element: AXUIElement) throws {
-        let err = AXUIElementPerformAction(element, kAXPressAction as CFString)
-        guard err == .success else {
-            throw ServiceError.actionFailed("AX press failed: \(err.rawValue)")
+    /// Returns true for AXPress and false when only AXConfirm was accepted.
+    @discardableResult
+    static func press(_ element: AXUIElement) throws -> Bool {
+        let press = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        if press == .success { return true }
+        let confirm = AXUIElementPerformAction(element, kAXConfirmAction as CFString)
+        guard confirm == .success else {
+            throw ServiceError.actionFailed(
+                "AX press/confirm failed: press=\(press.rawValue) confirm=\(confirm.rawValue)"
+            )
         }
+        return false
     }
 
     /// Scroll area: try AXShowMenu-free increment via AXValue on scroll bar, or return false.

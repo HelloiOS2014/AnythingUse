@@ -61,12 +61,21 @@ final class Service {
         lock.lock()
         defer { lock.unlock() }
 
+        let accessibility = AXBridge.enableAccessibility(pid: target.pid)
+        defer { accessibility.disable() }
         var elements: [[String: Any]] = []
         do {
             elements = try store.observeElements(target: target)
         } catch {
             // AX-only may fail; still try capture.
             elements = []
+        }
+        if elements.isEmpty {
+            // Avoid touching the global compatibility preference for ordinary
+            // native apps. Retry only when the canonical AX walk produced no UI.
+            let fallback = AXBridge.enableAccessibility(pid: target.pid, allowFallback: true)
+            defer { fallback.disable() }
+            elements = (try? store.observeElements(target: target)) ?? []
         }
 
         var captureBackend: String?
@@ -117,6 +126,8 @@ final class Service {
     private func semantic(_ params: [String: Any]?) throws -> [String: Any] {
         let target = try resolveTargetRequired(params)
         try ensureNotBlocking(target)
+        let accessibility = AXBridge.enableAccessibility(pid: target.pid)
+        defer { accessibility.disable() }
 
         guard let action = params?["action"] as? [String: Any],
               let type = action["type"] as? String
@@ -132,11 +143,35 @@ final class Service {
             case "invoke":
                 let elementId = try requireString(action, "element_id")
                 let el = try store.resolveElement(target: target, elementId: elementId)
-                // Prefer press without synthetic focus (focus can promote / re-key windows).
-                let focused = AXBridge.syntheticFocus(target: target, element: el)
-                try AXBridge.press(el)
+                let metadata = try store.metadata(for: elementId)
+                if metadata.actions.contains("AXConfirm")
+                    && !metadata.actions.contains("AXPress")
+                    && (metadata.role.contains("Text") || metadata.role.contains("Field"))
+                {
+                    _ = AXBridge.syntheticFocus(target: target, element: el)
+                    let returnPath = try DirectedInput.pressReturn(target: target)
+                    return okAction(
+                        path: returnPath,
+                        detail: "confirm editable \(elementId) with directed Return"
+                    )
+                }
+                if !metadata.actions.contains("AXPress")
+                    && !metadata.actions.contains("AXConfirm")
+                    && metadata.frame.width > 0
+                    && metadata.frame.height > 0
+                {
+                    // Element-bound fallback used by native Computer Use: click the
+                    // observed node through postToPid, never a model-invented point.
+                    let report = try DirectedInput.click(
+                        target: target,
+                        normalizedX: metadata.frame.midX,
+                        normalizedY: metadata.frame.midY
+                    )
+                    return okAction(path: report.path, detail: "invoke \(elementId): \(report.detail)")
+                }
+                let usedPress = try AXBridge.press(el)
                 return okAction(
-                    path: focused ? "ax_press+synthetic_focus" : "ax_press",
+                    path: usedPress ? "ax_press" : "ax_confirm",
                     detail: "invoke \(elementId)"
                 )
 
@@ -144,26 +179,44 @@ final class Service {
                 let elementId = try requireString(action, "element_id")
                 let value = try requireString(action, "value")
                 let el = try store.resolveElement(target: target, elementId: elementId)
+                let metadata = try store.metadata(for: elementId)
+
+                // Editable Chromium-style controls often report AXSetValue success
+                // without dispatching input/change events. Use an element-bound,
+                // process-directed click and real typing so application code sees
+                // the same interaction, while the user's cursor/focus stay put.
+                if (metadata.role.contains("Text") || metadata.role.contains("Field"))
+                    && metadata.frame.width > 0
+                    && metadata.frame.height > 0
+                {
+                    try AXBridge.setValue(el, "")
+                    let click = try DirectedInput.click(
+                        target: target,
+                        normalizedX: metadata.frame.midX,
+                        normalizedY: metadata.frame.midY
+                    )
+                    let typePath = value.isEmpty
+                        ? "empty"
+                        : try DirectedInput.typeUnicode(target: target, text: value)
+                    return okAction(
+                        path: "\(click.path)+\(typePath)",
+                        detail: "set_value \(elementId) len=\(value.count)"
+                    )
+                }
+
                 // Background-first: AX setValue without requiring focus.
-                // syntheticFocus is a no-op unless target is already the key window.
-                let focused = AXBridge.syntheticFocus(target: target, element: el)
                 do {
                     try AXBridge.setValue(el, value)
                     let readback = AXBridge.getValue(el)
                     if readback.contains(value) || readback == value {
-                        return okAction(
-                            path: focused ? "ax_set_value+synthetic_focus" : "ax_set_value",
-                            detail: "set_value \(elementId)"
-                        )
+                        return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
                     }
                 } catch {
                     // Fall through to directed type only when key window proven.
                 }
-                try DirectedInput.typeUnicode(target: target, text: value)
+                _ = try DirectedInput.typeUnicode(target: target, text: value)
                 return okAction(
-                    path: focused
-                        ? "synthetic_focus+cgevent_post_to_pid_type"
-                        : "cgevent_post_to_pid_type",
+                    path: "cgevent_post_to_pid_type",
                     detail: "set_value/type \(elementId) len=\(value.count)"
                 )
 
@@ -207,6 +260,8 @@ final class Service {
     private func targeted(_ params: [String: Any]?) throws -> [String: Any] {
         let target = try resolveTargetRequired(params)
         try ensureNotBlocking(target)
+        let accessibility = AXBridge.enableAccessibility(pid: target.pid)
+        defer { accessibility.disable() }
 
         guard let action = params?["action"] as? [String: Any],
               let type = action["type"] as? String
@@ -225,18 +280,25 @@ final class Service {
 
             case "type_text":
                 let text = try requireString(action, "text")
-                // Synthetic focus only when target is already key window (no-op otherwise).
-                if let editable = DirectedInput.resolveEditable(target: target) {
-                    _ = AXBridge.syntheticFocus(target: target, element: editable)
-                }
-                try DirectedInput.typeUnicode(target: target, text: text)
+                let typePath = try DirectedInput.typeUnicode(target: target, text: text)
                 return okAction(
-                    path: "cgevent_post_to_pid_type",
+                    path: typePath,
                     detail: "typed \(text.count) chars → pid \(target.pid) window_id=\(target.windowID)"
                 )
 
             case "key_combo":
-                throw ServiceError.unsupported("key_combo not implemented in D2 window service")
+                guard let keys = action["keys"] as? [String], keys.count == 1 else {
+                    throw ServiceError.unsupported("only one directed key is supported")
+                }
+                let key = keys[0].uppercased()
+                guard key == "RETURN" || key == "ENTER" else {
+                    throw ServiceError.unsupported("directed key not supported: \(keys[0])")
+                }
+                let returnPath = try DirectedInput.pressReturn(target: target)
+                return okAction(
+                    path: returnPath,
+                    detail: "Return → pid \(target.pid) window_id=\(target.windowID)"
+                )
 
             default:
                 throw ServiceError.unsupported("unknown targeted action type: \(type)")

@@ -49,6 +49,7 @@ pub enum TargetedInput {
         /// Normalized [0,1] coordinates inside the target window image.
         x: f64,
         y: f64,
+        #[serde(default)]
         button: MouseButton,
     },
     TypeText {
@@ -132,5 +133,4 @@ pub struct ProposedAction {
     #[serde(default)]
     pub confidence: f32,
 }
-
 

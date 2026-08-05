@@ -103,6 +103,13 @@ fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String
                     (RiskLevel::R4, "security or finance control".into())
                 } else if is_submit_like(&text) {
                     (RiskLevel::R3, "external submit-like control".into())
+                } else if el.actions.iter().any(|action| action == "AXConfirm")
+                    && (el.role.contains("Text") || el.role.contains("Field"))
+                    && !is_search_like(&text)
+                {
+                    // Return on an arbitrary editable can send/submit content. Only
+                    // recognizable search/filter fields stay navigation-like.
+                    (RiskLevel::R3, "editable confirm may submit content".into())
                 } else {
                     (RiskLevel::R1, "semantic invoke navigation-like".into())
                 }
@@ -160,6 +167,11 @@ fn is_submit_like(text: &str) -> bool {
         "pay", "支付", "purchase", "购买",
     ];
     KEYWORDS.iter().any(|k| text.contains(k))
+}
+
+fn is_search_like(text: &str) -> bool {
+    const KEYWORDS: &[&str] = &["search", "find", "filter", "query", "搜索", "查找", "筛选"];
+    KEYWORDS.iter().any(|keyword| text.contains(keyword))
 }
 
 fn is_security_or_finance(text: &str) -> bool {
@@ -274,4 +286,3 @@ mod tests {
         assert_eq!(j.risk, RiskLevel::R4);
     }
 }
-

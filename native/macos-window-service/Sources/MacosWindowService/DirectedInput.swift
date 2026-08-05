@@ -7,9 +7,9 @@ import Foundation
 /// Rules:
 /// - Prefer AX semantic actions (setValue / press / scroll attributes) on elements
 ///   proven to belong to the target window — never the first arbitrary control.
-/// - `CGEvent.postToPid` is process-scoped only. Use it only when the target window
-///   is already the app's key/focused window (`pid + windowID` proof). Otherwise
-///   return `unsupported` — never risk operating the user's same-app window A.
+/// - `CGEvent.postToPid` is process-scoped only. Background apps may receive it
+///   without activation; if the user is in the same app, require exact key-window
+///   proof so their window A cannot be mistaken for the agent's window B.
 /// - Never call `CGEvent.post(.cghidEventTap)` for mouse moves (would move real cursor).
 /// - Never activate / frontmost the target app; never post-hoc restore focus.
 enum DirectedInput {
@@ -18,37 +18,6 @@ enum DirectedInput {
         var detail: String
         var mouseEventsPosted: Bool
         var keyEventsPosted: Bool
-    }
-
-    /// Best-effort editable discovery inside the **proven** target window only.
-    static func resolveEditable(target: MacWindowTarget) -> AXUIElement? {
-        guard let axWindow = try? AXBridge.axWindow(for: target) else { return nil }
-        if let editable = AXBridge.findEditable(in: axWindow) {
-            return editable
-        }
-        // Hit-test only accepts elements under the target window (AXWindowNumber).
-        let points: [CGPoint] = [
-            CGPoint(x: target.bounds.midX, y: target.bounds.minY + target.bounds.height * 0.45),
-            CGPoint(x: target.bounds.midX, y: target.bounds.minY + target.bounds.height * 0.60),
-            CGPoint(x: target.bounds.minX + target.bounds.width * 0.30, y: target.bounds.midY)
-        ]
-        for p in points {
-            if let hit = AXBridge.elementAtScreenPoint(p, expectedPID: target.pid),
-               AXBridge.elementBelongsToTargetWindow(hit, target: target)
-            {
-                if let editable = AXBridge.findEditable(in: hit) {
-                    return editable
-                }
-                var ref: CFTypeRef?
-                AXUIElementCopyAttributeValue(hit, kAXRoleAttribute as CFString, &ref)
-                let role = ref as? String ?? ""
-                let preferred = ["AXTextArea", "AXTextField", kAXTextAreaRole as String, kAXTextFieldRole as String]
-                if preferred.contains(role) {
-                    return hit
-                }
-            }
-        }
-        return nil
     }
 
     /// Click at the requested normalized window coordinates (or the element under that point).
@@ -63,23 +32,42 @@ enum DirectedInput {
 
         // Path A: AX press on the element under the requested point, only if it belongs
         // to the target window. Skip synthetic focus when not key (press alone).
-        if let hit = AXBridge.elementAtScreenPoint(point, expectedPID: target.pid),
-           AXBridge.elementBelongsToTargetWindow(hit, target: target)
-        {
-            if let pressable = AXBridge.pressableAtOrAbove(hit),
-               AXBridge.elementBelongsToTargetWindow(pressable, target: target)
-            {
-                let focused = AXBridge.syntheticFocus(target: target, element: pressable)
-                try AXBridge.press(pressable)
-                return ActionReport(
-                    path: focused ? "ax_press_at_point+synthetic_focus" : "ax_press_at_point",
-                    detail: String(
-                        format: "pressed element under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
-                        x, y, nx, ny, target.pid, target.windowID
-                    ),
-                    mouseEventsPosted: false,
-                    keyEventsPosted: false
-                )
+        if let hit = AXBridge.elementAtScreenPoint(point, expectedPID: target.pid) {
+            let hitIsInTarget = AXBridge.elementBelongsToTargetWindow(hit, target: target)
+                || WindowResolver.isTopmostProcessWindow(target: target, at: point)
+            if hitIsInTarget {
+                if let editable = AXBridge.editableAtOrAbove(hit)
+                    ?? AXBridge.editableBelow(hit, containing: point),
+                   AXBridge.syntheticFocus(target: target, element: editable)
+                {
+                    // AX focus alone does not dispatch the mouse/input events that
+                    // Chromium-style controls use to update their business state.
+                    // Deliver a real click to the target process without touching
+                    // the global cursor or activating the application.
+                    try postMouseClick(pid: target.pid, point: point)
+                    return ActionReport(
+                        path: "ax_focus_editable_at_point+cgevent_post_to_pid_click",
+                        detail: String(
+                            format: "focused and clicked editable under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
+                            x, y, nx, ny, target.pid, target.windowID
+                        ),
+                        mouseEventsPosted: true,
+                        keyEventsPosted: false
+                    )
+                }
+                if let pressable = AXBridge.pressableAtOrAbove(hit) {
+                    let focused = AXBridge.syntheticFocus(target: target, element: pressable)
+                    try AXBridge.press(pressable)
+                    return ActionReport(
+                        path: focused ? "ax_press_at_point+synthetic_focus" : "ax_press_at_point",
+                        detail: String(
+                            format: "pressed element under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
+                            x, y, nx, ny, target.pid, target.windowID
+                        ),
+                        mouseEventsPosted: false,
+                        keyEventsPosted: false
+                    )
+                }
             }
         }
 
@@ -124,23 +112,41 @@ enum DirectedInput {
 
     // MARK: - CGEvent postToPid helpers (window-bound)
 
-    /// Unicode typing. Prefer AX setValue on a proven editable; CGEvent only when
-    /// the target window is already the app's key window.
+    /// Unicode typing routed to the focused AX element's actual process. Apps with
+    /// out-of-process renderers do not necessarily handle key events on the shell PID.
     ///
     /// Long input re-proves key-window ownership every segment so a user switch
     /// mid-type aborts immediately (never continue dumping into the wrong window).
-    static func typeUnicode(target: MacWindowTarget, text: String) throws {
+    static func typeUnicode(target: MacWindowTarget, text: String) throws -> String {
         try requireKeyWindowForCGEvent(target: target, capability: "type")
-        try postUnicode(target: target, text: text)
+        let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
+        try postUnicode(target: target, eventPID: eventPID, text: text)
+        return eventPID == target.pid
+            ? "cgevent_post_to_pid_type"
+            : "cgevent_post_to_renderer_pid_type"
+    }
+
+    /// Submit an already AX-bound editable without activating its app.
+    static func pressReturn(target: MacWindowTarget) throws -> String {
+        try requireKeyWindowForCGEvent(target: target, capability: "return")
+        let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
+        try postKey(pid: eventPID, virtualKey: 36)
+        return eventPID == target.pid
+            ? "cgevent_post_to_pid_return"
+            : "cgevent_post_to_renderer_pid_return"
     }
 
     /// Fail closed when CGEvent cannot be proven to land on `target.windowID`.
     /// `CGEvent.postToPid` is PID-only; without key-window proof it can hit the
     /// user's same-app window A while the agent intended window B.
     private static func requireKeyWindowForCGEvent(target: MacWindowTarget, capability: String) throws {
+        // A background process cannot receive the user's live keyboard/mouse stream;
+        // postToPid stays inside that process and never activates it. Exact same-app
+        // window isolation is required only when the user is actively in that app.
+        if !FocusGuard.isFrontmost(pid: target.pid) {
+            return
+        }
         // Key window proven by AXWindowNumber or focused-frame == target.bounds.
-        // Does **not** require system frontmost: background apps still have an
-        // internal key window; we only allow postToPid when that key is target.
         if let key = FocusGuard.focusedWindowNumber(pid: target.pid) {
             // Authoritative number present: must equal target — no frame fallback.
             if key == target.windowID {
@@ -164,7 +170,11 @@ enum DirectedInput {
     /// Segment size for mid-type key-window re-proof (characters).
     private static let typeSegmentChars = 24
 
-    private static func postUnicode(target: MacWindowTarget, text: String) throws {
+    private static func postUnicode(
+        target: MacWindowTarget,
+        eventPID: pid_t,
+        text: String
+    ) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ServiceError.actionFailed("CGEventSource create failed")
         }
@@ -184,11 +194,24 @@ enum DirectedInput {
             var utf16 = Array(s.utf16)
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-            down.postToPid(target.pid)
-            up.postToPid(target.pid)
+            down.postToPid(eventPID)
+            up.postToPid(eventPID)
             usleep(8_000)
             index += 1
         }
+    }
+
+    private static func postKey(pid: pid_t, virtualKey: CGKeyCode) throws {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
+        else {
+            throw ServiceError.actionFailed("keyboard event create failed")
+        }
+        down.postToPid(pid)
+        usleep(8_000)
+        up.postToPid(pid)
+        usleep(8_000)
     }
 
     static func postMouseClick(pid: pid_t, point: CGPoint) throws {

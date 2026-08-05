@@ -365,8 +365,18 @@ impl Runtime {
             return Ok(outcome);
         }
 
-        validate_action(&observation, &proposal.action)?;
         ensure_observation_binding(&observation, &proposal.observation_id)?;
+        if let Err(e) = validate_action(&observation, &proposal.action) {
+            // Invalid model output is recoverable feedback, not a product crash.
+            // Existing LoopGuard stops a model that repeats the same invalid action.
+            loop_guard.record_and_check(&proposal.action)?;
+            let valid_ids = observation.element_ids().take(16).collect::<Vec<_>>().join(",");
+            *last_summary = Some(format!(
+                "REJECTED action: {e}; valid_element_ids=[{valid_ids}]. Choose a valid current action"
+            ));
+            self.record_step(task_id)?;
+            return Ok(StepOutcome::Continue);
+        }
         loop_guard.record_and_check(&proposal.action)?;
 
         let evaluated = self.evaluate_action_for_task(

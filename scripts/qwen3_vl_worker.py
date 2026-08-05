@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -94,28 +95,65 @@ Return ONLY one JSON object (no markdown) with this shape:
 {"action": <Action>, "effect_claim": string|null, "expected_effect": string|null, "confidence": number}
 
 Action must be one of:
-{"kind":"semantic","type":"invoke","element_id":"eN"}
-{"kind":"semantic","type":"set_value","element_id":"eN","value":"..."}
-{"kind":"semantic","type":"focus","element_id":"eN"}
-{"kind":"semantic","type":"scroll","element_id":null,"delta_x":0,"delta_y":-0.3}
 {"kind":"wait","milliseconds":500}
 {"kind":"done","summary":"..."}
 {"kind":"fail","reason":"..."}
 {"kind":"request_user","reason":"..."}
 
 Rules:
-- Prefer semantic element_id from the provided list.
 - Never invent element ids.
 - Avoid destructive actions (delete/trash/pay/send) unless goal requires.
 - One action only.
 - Do NOT emit observe. Each request already includes the latest screenshot and elements.
-- For typing into an editor/document, prefer set_value on a real text field id from Elements (never the placeholder eN).
-- element_id MUST be copied exactly from Elements (e.g. "e0","e3"); inventing ids fails.
 - When the goal is already satisfied or verifiable from the screenshot/title/elements, emit {"kind":"done","summary":"..."}.
 - If an element value already contains the text the goal asks for, emit done immediately — do not set_value again.
 - Emit done only when the fresh observation proves every part of the entire Goal is complete and no work remains. Last action is history: one successful set_value or one field never proves the whole Goal. Never repeat a satisfied action; take the next unfinished action, or request_user/fail if blocked.
 - Do not repeat the same action with the same arguments. Pick done/fail/wait or a different element.
 """
+
+TARGETED_ACTIONS = """
+When Elements is empty, these screenshot-targeted actions are also allowed:
+{"kind":"targeted","type":"click","x":0.5,"y":0.5,"button":"left"}
+{"kind":"targeted","type":"type_text","text":"..."}
+{"kind":"targeted","type":"key_combo","keys":["RETURN"]}
+Coordinates are normalized to the current window screenshot: x=0 left, x=1 right,
+y=0 top, y=1 bottom. Use type_text only after the intended field is focused.
+Use RETURN after filling a search/filter field when results require submission.
+"""
+
+
+def select_elements(elements: list[dict[str, Any]], goal: str) -> list[dict[str, Any]]:
+    """Keep the small, useful part of a noisy app-wide AX tree."""
+    quoted_targets = re.findall(r'[“"「](.*?)[”"」]', goal)
+
+    def score(item: tuple[int, dict[str, Any]]) -> tuple[int, int]:
+        index, element = item
+        role = str(element.get("role") or "")
+        actions = element.get("actions") or []
+        text = f"{element.get('label') or ''} {element.get('value') or ''}"
+        frame = element.get("frame") or {}
+        points = 0
+        if any(target and target in text for target in quoted_targets):
+            points += 100
+        if any(name in role for name in ("TextField", "TextArea", "SearchField", "ComboBox")):
+            points += 60
+        if any(action in actions for action in ("AXPress", "AXConfirm")):
+            points += 20
+        if isinstance(frame, dict):
+            width, height = frame.get("width") or 0, frame.get("height") or 0
+        elif isinstance(frame, list) and len(frame) >= 4:
+            width, height = frame[2], frame[3]
+        else:
+            width, height = 0, 0
+        if float(width) > 0 and float(height) > 0:
+            points += 10
+        if role in ("AXMenu", "AXMenuItem", "AXMenuBar", "AXMenuBarItem"):
+            points -= 40
+        return points, -index
+
+    ranked = sorted(enumerate(elements), key=score, reverse=True)
+    keep = {index for index, _ in ranked[:28]}
+    return [element for index, element in enumerate(elements) if index in keep]
 
 
 def build_prompt(
@@ -127,15 +165,39 @@ def build_prompt(
 ) -> str:
     elements = observation.get("elements") or []
     compact = []
+    selected = select_elements(elements, goal)
     # Cap tree size hard: VL + long AX on MPS often stalls and emits truncated JSON.
-    for e in elements[:16]:
+    for e in selected:
         compact.append(
             {
                 "id": e.get("id"),
                 "role": (e.get("role") or "")[:32],
                 "label": (e.get("label") or "")[:48] or None,
                 "value": (e.get("value") or "")[:48] or None,
+                "actions": e.get("actions") or [],
             }
+        )
+    element_ids = [str(e["id"]) for e in compact if e.get("id")]
+    if element_ids:
+        example_id = json.dumps(element_ids[0], ensure_ascii=False)
+        semantic_actions = (
+            "Semantic actions are also allowed; element_id must be copied from "
+            f"Valid element_ids={json.dumps(element_ids, ensure_ascii=False)}:\n"
+            f'{{"kind":"semantic","type":"invoke","element_id":{example_id}}}\n'
+            f'{{"kind":"semantic","type":"set_value","element_id":{example_id},"value":"..."}}\n'
+            f'{{"kind":"semantic","type":"focus","element_id":{example_id}}}\n'
+            '{"kind":"semantic","type":"scroll","element_id":null,"delta_x":0,"delta_y":-0.3}\n'
+            "Elements contains usable AX controls, so targeted click/type_text is "
+            "forbidden for this observation. Use semantic actions. After setting "
+            "a search/filter field, invoke that same element only when its actions "
+            "include AXConfirm and the results have not refreshed."
+        )
+    else:
+        semantic_actions = (
+            "Elements is empty. Semantic actions are forbidden because no valid "
+            "element_id exists. Use targeted click/type_text from the screenshot, "
+            "or fail/request_user if safe progress is impossible.\n"
+            f"{TARGETED_ACTIONS}"
         )
     step_line = f"Step: {step}\n" if step is not None else ""
     last_line = (
@@ -146,6 +208,7 @@ def build_prompt(
     # Schema first so early tokens are valid JSON even if generation is cut short.
     return (
         f"{ACTION_SCHEMA}\n"
+        f"{semantic_actions}\n"
         f"Goal: {goal}\n"
         f"{step_line}"
         f"{last_line}"

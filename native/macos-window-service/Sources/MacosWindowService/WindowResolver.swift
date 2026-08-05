@@ -135,6 +135,34 @@ enum WindowResolver {
         (try? resolve(pid: pid, windowID: windowID)) != nil
     }
 
+    /// CGWindowList is front-to-back. Restricting that order to one process lets
+    /// application-scoped AX hit-testing prove which same-process window owns a point,
+    /// even when the app omits AXWindowNumber and usable AX window parents.
+    static func isTopmostProcessWindow(
+        target: MacWindowTarget,
+        at point: CGPoint
+    ) -> Bool {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        for info in raw {
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == target.pid,
+                  (info[kCGWindowLayer as String] as? Int ?? 0) == 0,
+                  let windowID = info[kCGWindowNumber as String] as? UInt32,
+                  let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = boundsDict["X"] as? CGFloat,
+                  let y = boundsDict["Y"] as? CGFloat,
+                  let width = boundsDict["Width"] as? CGFloat,
+                  let height = boundsDict["Height"] as? CGFloat
+            else { continue }
+            if CGRect(x: x, y: y, width: width, height: height).contains(point) {
+                return windowID == target.windowID
+            }
+        }
+        return false
+    }
+
     private static func bundleId(for pid: pid_t) -> String? {
         NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
     }
