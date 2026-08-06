@@ -158,30 +158,16 @@ enum AXBridge {
         return applicationPID
     }
 
-    /// Make `target` the process's focused/main AX window without activating the app.
-    /// Only meaningful for background apps; foreground apps go through the strict
-    /// FocusGuard path. Never sets kAXFrontmostAttribute (would steal system focus).
-    @discardableResult
-    static func makeKeyWindowInProcess(target: MacWindowTarget) -> Bool {
-        guard let axWindow = try? axWindow(for: target) else { return false }
-        let app = application(pid: target.pid)
-        if AXUIElementSetAttributeValue(
-            app,
-            kAXFocusedWindowAttribute as CFString,
-            axWindow
-        ) == .success {
-            return true
-        }
-        return AXUIElementSetAttributeValue(
-            app,
-            kAXMainWindowAttribute as CFString,
-            axWindow
-        ) == .success
-    }
-
     /// Prove the process's focused/main AX window is the target window.
     /// Independent of system frontmost: background apps keep an in-process key
     /// window that CGEvent.postToPid keyboard events would route into.
+    ///
+    /// Never *set* focused/main window attributes on a background app: macOS
+    /// promotes the app to frontmost when a background app's key window is
+    /// reassigned (same effect as kAXFocusedUIElement on TextEdit), which is a
+    /// user-visible focus steal. Keyboard delivery therefore only ever proves,
+    /// and relies on the app switching its key window as a side effect of a
+    /// directed click (mouse path) — never on our writes.
     static func proofOfProcessKeyWindow(target: MacWindowTarget) -> Bool {
         if let key = FocusGuard.focusedWindowNumber(pid: target.pid) {
             return key == target.windowID

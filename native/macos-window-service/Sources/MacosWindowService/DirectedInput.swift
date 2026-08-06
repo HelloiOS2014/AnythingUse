@@ -141,18 +141,22 @@ enum DirectedInput {
 
     /// Keyboard lead-in: before delivering any keyboard event, the process key
     /// window must be the target window (keyboard routes by key window, not by
-    /// coordinates). Foreground apps pass through the strict gate unchanged;
-    /// background apps get an in-process lead-in attempt and fail closed when
-    /// the app refuses it.
+    /// coordinates). Foreground apps pass through the strict gate unchanged.
+    ///
+    /// Background apps: only *prove* — never reassign the process key window.
+    /// Writing focused/main window attributes on a background app promotes it
+    /// to frontmost (a visible focus steal); the window can become key only as
+    /// a side effect of a directed click (the semantic set_value path clicks
+    /// the element first, which switches the in-process key window without
+    /// activating the app). Pure keyboard delivery to a background window that
+    /// is not already key is refused.
     private static func establishKeyboardLead(target: MacWindowTarget) throws {
         if FocusGuard.isFrontmost(pid: target.pid) { return }
-        if AXBridge.proofOfProcessKeyWindow(target: target) { return }
-        guard AXBridge.makeKeyWindowInProcess(target: target),
-              AXBridge.proofOfProcessKeyWindow(target: target)
-        else {
+        guard AXBridge.proofOfProcessKeyWindow(target: target) else {
             throw ServiceError.unsupported(
                 "keyboard refused for background pid=\(target.pid) window_id=\(target.windowID): "
-                    + "cannot make target the process key window without activating; fail-closed"
+                    + "target is not the process key window and we never re-key a background "
+                    + "app (would steal frontmost); click the element first or fail-closed"
             )
         }
     }
