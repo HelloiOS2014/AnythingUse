@@ -115,10 +115,13 @@ enum DirectedInput {
     /// Unicode typing routed to the focused AX element's actual process. Apps with
     /// out-of-process renderers do not necessarily handle key events on the shell PID.
     ///
+    /// Keyboard events route by the process key window, so delivery requires the
+    /// target window to *be* the key window: foreground apps must pass the strict
+    /// key-window gate, background apps get an in-process key-window lead-in first.
     /// Long input re-proves key-window ownership every segment so a user switch
     /// mid-type aborts immediately (never continue dumping into the wrong window).
     static func typeUnicode(target: MacWindowTarget, text: String) throws -> String {
-        try requireKeyWindowForCGEvent(target: target, capability: "type")
+        try establishKeyboardLead(target: target)
         let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
         try postUnicode(target: target, eventPID: eventPID, text: text)
         return eventPID == target.pid
@@ -128,12 +131,46 @@ enum DirectedInput {
 
     /// Submit an already AX-bound editable without activating its app.
     static func pressReturn(target: MacWindowTarget) throws -> String {
-        try requireKeyWindowForCGEvent(target: target, capability: "return")
+        try establishKeyboardLead(target: target)
         let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
         try postKey(pid: eventPID, virtualKey: 36)
         return eventPID == target.pid
             ? "cgevent_post_to_pid_return"
             : "cgevent_post_to_renderer_pid_return"
+    }
+
+    /// Keyboard lead-in: before delivering any keyboard event, the process key
+    /// window must be the target window (keyboard routes by key window, not by
+    /// coordinates). Foreground apps pass through the strict gate unchanged;
+    /// background apps get an in-process lead-in attempt and fail closed when
+    /// the app refuses it.
+    private static func establishKeyboardLead(target: MacWindowTarget) throws {
+        if FocusGuard.isFrontmost(pid: target.pid) { return }
+        if AXBridge.proofOfProcessKeyWindow(target: target) { return }
+        guard AXBridge.makeKeyWindowInProcess(target: target),
+              AXBridge.proofOfProcessKeyWindow(target: target)
+        else {
+            throw ServiceError.unsupported(
+                "keyboard refused for background pid=\(target.pid) window_id=\(target.windowID): "
+                    + "cannot make target the process key window without activating; fail-closed"
+            )
+        }
+    }
+
+    /// Per-segment re-proof for keyboard delivery. Foreground: identical to the
+    /// mouse gate. Background: the in-process key window must still be the
+    /// target (a user switching apps may re-key the process to their window).
+    private static func requireKeyboardTargetProof(target: MacWindowTarget, capability: String) throws {
+        if FocusGuard.isFrontmost(pid: target.pid) {
+            try requireKeyWindowForCGEvent(target: target, capability: capability)
+            return
+        }
+        guard AXBridge.proofOfProcessKeyWindow(target: target) else {
+            throw ServiceError.unsupported(
+                "\(capability) via CGEvent.postToPid refused: process key window not proven "
+                    + "== target (background pid=\(target.pid) window_id=\(target.windowID)); fail-closed"
+            )
+        }
     }
 
     /// Fail closed when CGEvent cannot be proven to land on `target.windowID`.
@@ -182,7 +219,7 @@ enum DirectedInput {
         for ch in text.unicodeScalars {
             if index % typeSegmentChars == 0 {
                 // Re-confirm target is still the process key window before each segment.
-                try requireKeyWindowForCGEvent(target: target, capability: "type")
+                try requireKeyboardTargetProof(target: target, capability: "type")
             }
             let s = String(ch)
             guard

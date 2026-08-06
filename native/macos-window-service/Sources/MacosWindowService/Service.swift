@@ -189,12 +189,15 @@ final class Service {
                     && metadata.frame.width > 0
                     && metadata.frame.height > 0
                 {
-                    try AXBridge.setValue(el, "")
+                    // Click first: it is the main fail-closed rejection point
+                    // (key-window gate), and a rejected click must not have cleared
+                    // the user's content. Clear only after the click landed.
                     let click = try DirectedInput.click(
                         target: target,
                         normalizedX: metadata.frame.midX,
                         normalizedY: metadata.frame.midY
                     )
+                    try AXBridge.setValue(el, "")
                     let typePath = value.isEmpty
                         ? "empty"
                         : try DirectedInput.typeUnicode(target: target, text: value)

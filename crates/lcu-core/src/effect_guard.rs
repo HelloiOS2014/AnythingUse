@@ -143,8 +143,24 @@ fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String
         }
         Action::Semantic(SemanticAction::Focus { .. }) => (RiskLevel::R0, "focus only".into()),
         Action::Semantic(SemanticAction::Scroll { .. }) => (RiskLevel::R1, "scroll".into()),
-        Action::Targeted(TargetedInput::TypeText { .. }) => {
-            (RiskLevel::R2, "targeted text entry".into())
+        Action::Targeted(TargetedInput::TypeText { text }) => {
+            // Same content classification as SetValue: targeted typing has no
+            // element context, but the text itself can be a credential. Without
+            // this check a model could type a password/OTP/card number and
+            // bypass the R4 gate that SetValue enforces.
+            if is_security_or_finance(text)
+                || text.to_lowercase().contains("password")
+                || text.to_lowercase().contains("passwd")
+                || text.to_lowercase().contains("otp")
+                || text.contains("验证码")
+                || text.contains("信用卡")
+                || text.to_lowercase().contains("card number")
+                || looks_like_secret_value(text)
+            {
+                (RiskLevel::R4, "credential or sensitive typed text".into())
+            } else {
+                (RiskLevel::R2, "targeted text entry".into())
+            }
         }
         Action::Targeted(TargetedInput::Click { .. })
         | Action::Targeted(TargetedInput::KeyCombo { .. }) => {
@@ -284,5 +300,33 @@ mod tests {
             task_authorized_max_risk: RiskLevel::R4,
         });
         assert_eq!(j.risk, RiskLevel::R4);
+    }
+
+    #[test]
+    fn targeted_type_text_classifies_secrets_as_r4() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("button");
+
+        fn judge(guard: &StaticEffectGuard, obs: &AppObservation, text: &str) -> RiskLevel {
+            let action = Action::Targeted(TargetedInput::TypeText {
+                text: text.into(),
+            });
+            guard.judge(&EffectContext {
+                observation: obs,
+                action: &action,
+                model_effect_claim: None,
+                task_authorized_max_risk: RiskLevel::R4,
+            }).risk
+        }
+
+        // Plain text stays R2 (auto-executable).
+        assert_eq!(judge(&guard, &obs, "hello world"), RiskLevel::R2);
+        // Credential-like text is elevated to R4 (requires user takeover).
+        assert_eq!(judge(&guard, &obs, "password hunter2"), RiskLevel::R4);
+        assert_eq!(judge(&guard, &obs, "OTP 123456"), RiskLevel::R4);
+        assert_eq!(judge(&guard, &obs, "验证码 8888"), RiskLevel::R4);
+        assert_eq!(judge(&guard, &obs, "信用卡 4111111111111111"), RiskLevel::R4);
+        // 6-digit numeric OTP shape triggers the secret heuristic.
+        assert_eq!(judge(&guard, &obs, "482913"), RiskLevel::R4);
     }
 }
