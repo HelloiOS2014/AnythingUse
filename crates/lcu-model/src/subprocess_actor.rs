@@ -535,3 +535,88 @@ impl Drop for SubprocessVisionActor {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ModelObservation, ModelTaskContext};
+    use std::sync::Arc;
+
+    const STUB: &str = r#"#!/usr/bin/env python3
+import json, sys, os
+with open(os.environ["LCU_SPAWN_MARK"], "a") as f:
+    f.write("spawn\n")
+for line in sys.stdin:
+    req = json.loads(line)
+    op = req.get("op")
+    if op == "warmup":
+        sys.stdout.write(json.dumps({"ok": True, "load_ms": 1, "device": "cpu", "model_dir": "x"}) + "\n")
+    elif op == "propose":
+        sys.stdout.write(json.dumps({"ok": True, "action": {"kind": "wait", "milliseconds": 1}, "latency_ms": 1}) + "\n")
+    else:
+        sys.stdout.write(json.dumps({"ok": True}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    fn sample_obs() -> ModelObservation {
+        ModelObservation {
+            observation_id: "obs_1".into(),
+            app_id: "com.example.App".into(),
+            window_title: "t".into(),
+            elements: vec![],
+            image_png: None,
+            image_width: 10,
+            image_height: 10,
+        }
+    }
+
+    #[test]
+    fn concurrent_warmups_spawn_single_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub_worker.py");
+        std::fs::write(&stub, STUB).unwrap();
+        let mark = dir.path().join("spawns.txt");
+        std::fs::write(&mark, "").unwrap();
+        let model_dir = dir.path().join("model");
+        std::fs::create_dir(&model_dir).unwrap();
+
+        // The child inherits the parent env; LCU_SPAWN_MARK tells the stub where
+        // to record spawns. Rust 2024 env APIs are set via unsafe; use the
+        // simple pre-Rust-2024 set_var (edition 2021, safe).
+        std::env::set_var("LCU_SPAWN_MARK", &mark);
+
+        let actor = Arc::new(SubprocessVisionActor::new(
+            "python3",
+            stub,
+            model_dir,
+        ));
+        let h1 = {
+            let a = actor.clone();
+            std::thread::spawn(move || a.warm_up())
+        };
+        let h2 = {
+            let a = actor.clone();
+            std::thread::spawn(move || a.warm_up())
+        };
+        h1.join().unwrap().unwrap();
+        h2.join().unwrap().unwrap();
+
+        let spawns = std::fs::read_to_string(&mark).unwrap().lines().count();
+        assert_eq!(
+            spawns, 1,
+            "concurrent warmups must spawn exactly one worker process, got {spawns}"
+        );
+
+        // Worker survived (slot not clobbered): a follow-up propose succeeds.
+        // The product path requires an image; the stub never reads the file, so
+        // a fake image_path summary satisfies the check.
+        let ctx = ModelTaskContext {
+            goal: "g".into(),
+            step: 0,
+            last_action_summary: Some("image_path=/tmp/stub.png".into()),
+        };
+        let proposal = actor.propose_action(&sample_obs(), &ctx).unwrap();
+        assert!(matches!(proposal.action, Action::Wait { .. }));
+    }
+}
