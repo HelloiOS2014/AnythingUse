@@ -121,6 +121,13 @@ pub struct SubprocessVisionActor {
     worker_script: PathBuf,
     model_dir: PathBuf,
     child: Mutex<Option<Worker>>,
+    /// Serializes warm-up and propose requests. The worker protocol is one
+    /// request/one response over stdin/stdout: two concurrent callers (the
+    /// desktop warm thread and the task worker) would each spawn a second
+    /// python process (double ~4GB model load), clobber the slot, and drop a
+    /// live Child without kill/wait (orphan). Holding this lock for the whole
+    /// request makes the child slot single-consumer by construction.
+    busy: Mutex<()>,
     last_load_ms: Mutex<Option<u64>>,
     last_latency_ms: Mutex<Option<u64>>,
 }
@@ -152,6 +159,7 @@ impl SubprocessVisionActor {
             worker_script: worker_script.into(),
             model_dir: model_dir.into(),
             child: Mutex::new(None),
+            busy: Mutex::new(()),
             last_load_ms: Mutex::new(None),
             last_latency_ms: Mutex::new(None),
         }
@@ -267,6 +275,9 @@ impl SubprocessVisionActor {
     /// Send one JSON line and wait for one response line with a hard wall-clock timeout.
     fn request_json(&self, req: serde_json::Value) -> LcuResult<serde_json::Value> {
         let timeout = request_timeout();
+        // Serialize the whole request against warm_up/propose concurrency: see
+        // `busy` doc on the struct. Lock order is busy → child, never reversed.
+        let _busy = self.busy.lock().expect("busy lock");
         self.ensure_worker()?;
 
         let mut guard = self.child.lock().expect("lock");

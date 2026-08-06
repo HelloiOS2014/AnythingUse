@@ -262,6 +262,25 @@ def normalize_action_payload(obj: dict[str, Any]) -> dict[str, Any]:
     return obj
 
 
+def _ends_inside_string(text: str) -> bool:
+    """True if `text` ends in the middle of an unterminated JSON string.
+
+    Scans honoring backslash escapes so a literal `\"` inside a string does
+    not flip the in-string state.
+    """
+    in_str = False
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+        elif ch == '"':
+            in_str = not in_str
+    return in_str
+
+
 def extract_json(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
@@ -287,6 +306,14 @@ def extract_json(text: str) -> dict[str, Any]:
             pass
     # Truncated generation (common on short max_new_tokens / max_time).
     chunk = text[start:] if start >= 0 else text
+    if _ends_inside_string(chunk):
+        # A cut inside a string value cannot be repaired safely: padding would
+        # turn it into valid JSON with a silently truncated value (e.g.
+        # "value":"submit applic -> "applic"), and that mangled action would be
+        # executed as if it were the model's real intent. Fail to trigger retry.
+        raise ValueError(
+            f"no json object in model output (truncated inside a string): {text[:200]}"
+        )
     for closer in ("}}", '"}', "}}}", '"}}'):
         try:
             return _valid(json.loads(chunk + closer))

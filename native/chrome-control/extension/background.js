@@ -986,6 +986,29 @@ async function endTask(params = {}) {
   // Ensure flag is cleared even if detach was already external.
   current.debuggerAttached = false;
 
+  // Final close decision, adjacent to the close itself. Between the active-tab
+  // recheck above and here there was an await (safeDetach); the user may have
+  // clicked the task tab in that window (onActivated sets taken_over). Re-read
+  // the lease state and the live active tab: either one matching means keep.
+  if (closeTab) {
+    const finalTakenOver = lease?.controlState === "taken_over";
+    if (finalTakenOver) {
+      closeTab = false;
+      log("endTask: user took over during detach — keep tab", tabId);
+    } else {
+      try {
+        const active = await getActiveTab();
+        if (active?.id === tabId) {
+          closeTab = false;
+          log("endTask: task tab became active during detach — keep tab", tabId);
+        }
+      } catch (err) {
+        closeTab = false;
+        log("endTask: final active-tab recheck failed — refuse close", err?.message || err);
+      }
+    }
+  }
+
   if (closeTab) {
     await safeUngroupAndClose(tabId, groupId);
   }
