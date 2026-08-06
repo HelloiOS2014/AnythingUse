@@ -37,8 +37,15 @@ Wire name is `waiting_user` (legacy alias `waiting_approval` may appear in older
 
 ## VLM slow or OOM on 16GB
 
-- Cold load ~2–3 minutes on MPS fp16.
+- Cold load ~2–3 minutes on MPS fp16 (warmup absorbs the first-inference compile; the first real propose is then fast).
+- Per-propose budget is 180s (`LCU_VLM_MAX_TIME` / `LCU_VLM_PROPOSE_SECS`); the Rust hard timeout is 240s (`LCU_VLM_TIMEOUT_SECS`).
+- A failed propose is retried once automatically (VLM failures are frequently transient); two consecutive failures fail the task.
+- Generation stops as soon as the emitted JSON action is complete — a truncated action is refused and retried, never executed.
 - Close heavy apps; do not run parallel reloads.
+
+## Task shows `paused` after a crash / restart
+
+Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered to `paused` on restart (with its step budget rebuilt) so the user decides — `lcu resume` or `lcu cancel`. Recovered paused tasks do not occupy queue slots.
 
 ## Target unexpectedly becomes frontmost
 

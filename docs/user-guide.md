@@ -61,6 +61,15 @@ cd native/macos-window-service && swift build -c release && cd ../..
 
 Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `lcu watch`, or `lcu result` to follow it. `waiting_user` requires human action; resume a user-paused task only after the user is ready.
 
+## Decision maker
+
+The decision maker is pluggable; both receive the same data surface (compact elements + scaled screenshot) and their proposals flow through the same safety pipeline.
+
+- **Local VLM (default)**: `lcu-desktop` runs the Qwen3-VL subprocess automatically. Requires the weights under `models/Qwen3-VL-4B-Instruct` (see above).
+- **Agent-driven**: start the Runtime with `LCU_VISION_ACTOR=agent lcu-desktop &`, submit a goal with `lcu run`, then drive the loop with `lcu decide <task-id> --wait --json` (fetch observation) and `lcu act <task-id> --observation-id <obs> --action '<json>'` (submit a decision). Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
+
+Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).
+
 ## Privacy defaults
 
 - Screenshots are not stored in SQLite and are not printed to stdout.

@@ -73,10 +73,17 @@ stateDiagram-v2
     running --> cancelled
     waiting_user --> cancelled
     paused --> cancelled
+    queued --> paused: process restart recovery
+    running --> paused: process restart recovery
+    waiting_user --> paused: process restart recovery
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
 ```
+
+On startup, any non-terminal task left by a dead process is recovered to
+`paused` (with a rebuilt step budget), so the user decides via resume/cancel;
+recovered paused tasks do not occupy queue slots.
 
 Wire state names match the Runtime JSON: `waiting_user` (Rust variant `WaitingApproval`; legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), and `cancelled`.
 

@@ -27,9 +27,9 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Observe and operate a specific application window without activating it |
 | Chrome | Use the user's real Chrome profile through an extension, Native Messaging, and an inactive task tab |
-| Local model | Qwen3-VL subprocess actor for screenshot + accessibility-tree reasoning |
-| Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
-| Safety | Effect-based risk checks, GUI-bound approval, target takeover detection |
+| Decision maker | Pluggable: local Qwen3-VL subprocess (default) **or** the external Agent itself (`LCU_VISION_ACTOR=agent` + `lcu decide`/`lcu act`), same data surface and safety pipeline |
+| Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery (leftover tasks are recovered to `paused` for the user to decide) |
+| Safety | Effect-based risk checks, GUI-bound approval, target takeover detection, fail-closed keyboard/window isolation |
 | Agent access | Bundled Skill that invokes only the public `lcu` CLI |
 | Persistence | Local SQLite task and event state |
 
@@ -57,10 +57,15 @@ natural-language goal
         ↓
       lcu CLI
         ↓
-local Runtime: observe → propose → guard → act → observe
+local Runtime: observe → decide → guard → act → observe
         ↓
 macOS window or Chrome task tab
 ```
+
+`decide` is the pluggable step: either the local VLM subprocess proposes an
+action, or — with `LCU_VISION_ACTOR=agent` — an external Agent fetches the
+observation (`lcu decide`) and submits it (`lcu act`). Both flow through the
+same validation, risk, and approval gates.
 
 See [Architecture](docs/architecture.md) for the component and task-lifecycle details.
 

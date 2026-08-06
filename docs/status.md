@@ -10,10 +10,10 @@ Command / data root codename: **LCU** / `LocalComputerUse`
 macOS core Computer Use is implemented and on `main`:
 
 - Humans and Agents share the public `lcu` CLI; Agents use the bundled Skill only.
-- One serial FIFO queue per login user, with pause, resume, cancel, GUI approval, and SQLite recovery.
+- One serial FIFO queue per login user, with pause, resume, cancel, GUI approval, and SQLite recovery (leftover tasks from a dead process are recovered to `paused` for the user to decide; recovered tasks do not occupy queue slots).
 - macOS: strict window identity (PID + `CGWindowID`); no activate-as-strategy; same-window takeover pauses.
 - Chrome: real user Chrome via extension + Native Messaging + inactive task tab (not Playwright).
-- Local VLM path: Qwen3-VL subprocess actor (optional weights under `models/`).
+- Pluggable decision maker: local Qwen3-VL subprocess (default) or the external Agent itself (`LCU_VISION_ACTOR=agent`, `lcu decide`/`lcu act`) — identical data surface and safety pipeline.
 - Task `succeeded` only after explicit model `Done` and successful re-observation of the target.
 
 Hard product boundaries (not optional):
