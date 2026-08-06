@@ -8,7 +8,7 @@ pub mod loop_guard;
 pub mod subprocess_actor;
 pub mod validate;
 
-pub use loop_guard::{require_done_evidence, LoopGuard, LoopGuardConfig};
+pub use loop_guard::{LoopGuard, LoopGuardConfig};
 pub use subprocess_actor::SubprocessVisionActor;
 pub use validate::{compress_elements_for_model, ensure_observation_binding, validate_action};
 

@@ -103,20 +103,6 @@ impl LoopGuard {
     }
 }
 
-/// Reject Done without verifiable evidence (M4 gate).
-pub fn require_done_evidence(summary: &str, evidence: Option<&str>) -> LcuResult<()> {
-    let summary_ok = summary.trim().len() >= 8;
-    let evidence_ok = evidence.map(|e| e.trim().len() >= 4).unwrap_or(false);
-    if summary_ok && evidence_ok {
-        Ok(())
-    } else {
-        Err(LcuError::coded(
-            ErrorCode::InvalidRequest,
-            "done requires summary (>=8 chars) and verifiable evidence",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

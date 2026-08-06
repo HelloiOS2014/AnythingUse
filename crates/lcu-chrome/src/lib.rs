@@ -9,10 +9,8 @@
 //! This crate intentionally does **not** call macOS AX or AppleScript.
 
 pub mod product;
-pub mod surface_handle;
 
 pub use product::ProductBackend;
-pub use surface_handle::{probe_chrome, ChromeProbe};
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

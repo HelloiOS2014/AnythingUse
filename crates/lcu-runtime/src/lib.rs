@@ -9,7 +9,6 @@ pub mod loop_step;
 pub mod paths;
 pub mod private_entry;
 pub mod redact;
-pub mod screenshot_lifecycle;
 pub mod single_instance;
 pub mod sqlite_store;
 pub mod worker;

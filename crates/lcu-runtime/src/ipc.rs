@@ -55,9 +55,24 @@ async fn handle_connection(runtime: Arc<Runtime>, stream: UnixStream) -> LcuResu
         return Ok(());
     };
 
-    let request: InternalRequest = serde_json::from_str(&line).map_err(|e| {
-        LcuError::coded(ErrorCode::InvalidRequest, format!("bad request json: {e}"))
-    })?;
+    let request: InternalRequest = match serde_json::from_str(&line) {
+        Ok(r) => r,
+        Err(e) => {
+            // The Chrome native-messaging host pushes fire-and-forget event
+            // frames ({type:...}, no method) to announce control-state changes.
+            // They are not InternalRequests; answering them is impossible and
+            // they must not spam InvalidRequest warnings. The host closes the
+            // connection right after writing, so no response is expected.
+            if line.contains("\"type\"") && !line.contains("\"method\"") {
+                tracing::debug!(line_len = line.len(), "ignoring non-request event frame");
+                return Ok(());
+            }
+            return Err(LcuError::coded(
+                ErrorCode::InvalidRequest,
+                format!("bad request json: {e}"),
+            ));
+        }
+    };
     let response = runtime.handle_internal(request);
     let mut out = serde_json::to_string(&response).map_err(|e| {
         LcuError::coded(ErrorCode::InternalError, format!("serialize response: {e}"))

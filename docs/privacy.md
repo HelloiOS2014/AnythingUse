@@ -13,8 +13,8 @@ Product: **AnythingUse**. Runtime data root on macOS defaults to `~/Library/Appl
 
 ## What Agents see
 
-Only `lcu` JSON fields: task id, state, summary/error, doctor flags.  
-Agents do **not** receive screenshots, full AX trees, or model chain-of-thought.
+Only `lcu` JSON fields: task id, goal, state, summary/error, step count, app selector, and doctor flags.  
+Agents do **not** receive screenshots, full AX trees, model chain-of-thought, or approval internals.
 
 ## What we do not do by default
 

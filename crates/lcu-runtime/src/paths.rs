@@ -11,7 +11,6 @@ use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 pub struct RuntimePaths {
     pub root: PathBuf,
     pub socket: PathBuf,
-    pub db: PathBuf,
     pub logs: PathBuf,
 }
 
@@ -20,7 +19,6 @@ impl RuntimePaths {
         let root = root.into();
         Self {
             socket: root.join("runtime.sock"),
-            db: root.join("runtime.sqlite3"),
             logs: root.join("logs"),
             root,
         }

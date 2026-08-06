@@ -80,7 +80,7 @@ stateDiagram-v2
 
 Wire state names match the Runtime JSON: `waiting_user` (Rust variant `WaitingApproval`; legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), and `cancelled`.
 
-The scheduler executes one automatic task at a time. `waiting_user` and user-paused tasks do **not** hold the execution slot; after approval or resume the task returns to `running` (it is not re-queued as a new job).
+The scheduler executes one automatic task at a time. `waiting_user` and user-paused tasks do **not** hold the execution slot; after approval or resume the task returns to `running` and is re-enqueued on the same FIFO (state goes back to `running`, not to `queued`).
 
 ## Execution loop
 

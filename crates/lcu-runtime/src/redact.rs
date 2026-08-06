@@ -13,6 +13,10 @@ const SENSITIVE_KEYS: &[&str] = &[
     "image_b64",
     "screenshot",
     "authorization",
+    // Action payload fields that carry model-typed content (set_value value,
+    // type_text text): they can hold credentials and must not hit logs verbatim.
+    "value",
+    "text",
 ];
 
 /// Recursively redact sensitive keys in a JSON value for structured logging.
@@ -36,20 +40,3 @@ pub fn redact_value(v: &Value) -> Value {
         other => other.clone(),
     }
 }
-
-/// Redact a free-form message that might embed secrets.
-pub fn redact_message(msg: &str) -> String {
-    let mut s = msg.to_string();
-    for key in ["Bearer ", "password=", "secret=", "token="] {
-        if let Some(idx) = s.find(key) {
-            let value_start = idx + key.len();
-            let value_end = s[value_start..]
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-                .map(|i| value_start + i)
-                .unwrap_or(s.len());
-            s.replace_range(idx..value_end, &format!("{key}[REDACTED]"));
-        }
-    }
-    s
-}
-

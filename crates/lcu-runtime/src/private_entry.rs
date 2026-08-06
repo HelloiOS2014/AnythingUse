@@ -70,16 +70,6 @@ impl PrivateEntry {
             socket_mode,
         }
     }
-
-    pub fn reject_if_tcp_requested(listen_tcp: bool) -> LcuResult<()> {
-        if listen_tcp {
-            return Err(LcuError::coded(
-                ErrorCode::InvalidRequest,
-                "private entry must not listen on TCP",
-            ));
-        }
-        Ok(())
-    }
 }
 
 fn mode_octal(path: &PathBuf) -> Option<String> {

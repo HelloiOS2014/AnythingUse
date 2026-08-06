@@ -466,7 +466,13 @@ fn watch_task(task_id: String, seconds: u64, interval_ms: u64) -> Result<ExitCod
             task_id: task_id.clone(),
         })? {
             InternalResponse::Task { task } => {
-                let state = format!("{:?}", task.state);
+                // Wire state name (waiting_user / paused / ...), not the Rust
+                // Debug variant (WaitingApproval / PausedByUser) — the JSON
+                // serde rename is the machine contract.
+                let state = serde_json::to_value(&task.state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| format!("{:?}", task.state));
                 if state != last_state || task.step_count != last_steps {
                     let line = serde_json::json!({
                         "task_id": task.task_id.0,

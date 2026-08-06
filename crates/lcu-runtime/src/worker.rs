@@ -278,11 +278,17 @@ impl Runtime {
         };
         let propose_ms = propose_t0.elapsed().as_millis() as u64;
 
+        // Action payloads may embed model-typed content (set_value value,
+        // type_text text); log only the redacted shape so credentials never
+        // land in runtime logs verbatim.
+        let redacted_action = serde_json::to_value(&proposal.action)
+            .map(|v| crate::redact::redact_value(&v))
+            .ok();
         tracing::info!(
             task_id = %task_id.0,
             step,
             propose_ms,
-            action = ?proposal.action,
+            action = ?redacted_action,
             last_action_summary = ?last_summary,
             actor = self.actor.name(),
             "product step model proposal"
