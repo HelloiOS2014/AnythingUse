@@ -542,11 +542,19 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
                 }
                 return Ok(ExitCode::Success);
             }
-            InternalResponse::Error {
-                code: ErrorCode::TaskNotFound,
-                ..
-            } if wait && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(200));
+            InternalResponse::Error { code, message }
+                if wait && Instant::now() < deadline =>
+            {
+                // Retry the normal intermediate states: the worker may still be
+                // resolving/observing (no observation yet) or not have reached
+                // the decision step. Only a genuine error should surface.
+                let retriable = code == ErrorCode::TaskNotFound
+                    || (code == ErrorCode::InvalidRequest && message.contains("no observation yet"));
+                if retriable {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                return map_error_response(InternalResponse::Error { code, message }, json);
             }
             other => return map_error_response(other, json),
         }
