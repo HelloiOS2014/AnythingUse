@@ -154,11 +154,12 @@ pub fn run_gated_step(
     lcu_model::validate_action(&before, &proposal.action)?;
     lcu_model::ensure_observation_binding(&before, &proposal.observation_id)?;
 
-    let evaluated = runtime.evaluate_action_for_task(
+    // This dev-gated loop never stores a pending action, so evaluation must not
+    // register an approval — that would create a ghost nobody can consume.
+    let evaluated = runtime.reevaluate_action_for_task(
         Some(task_id),
         &before,
         &proposal.action,
-        proposal.effect_claim.as_deref(),
         RiskLevel::R4,
         Some(caller),
     )?;

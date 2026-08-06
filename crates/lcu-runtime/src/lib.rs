@@ -27,7 +27,9 @@ use lcu_core::protocol::{
     DoctorReport, InternalProtocolVersion, PermissionCheck, PROTOCOL_SCHEMA_VERSION,
 };
 use lcu_core::risk::RiskLevel;
-use lcu_core::task::{TaskCommand, TaskEvent, TaskId, TaskRecord, TaskStateMachine};
+use lcu_core::task::{
+    TaskCommand, TaskEvent, TaskId, TaskRecord, TaskState, TaskStateMachine,
+};
 use lcu_core::types::CallerIdentity;
 use lcu_model::VisionActor;
 use lcu_platform::{PermissionFlag, PlatformBackend};
@@ -76,7 +78,7 @@ impl Runtime {
         if let Err(e) = backend.ensure_surfaces() {
             tracing::warn!(error = %e, "ensure_surfaces at runtime start");
         }
-        Ok(Self {
+        let runtime = Self {
             paths,
             entry,
             store: Mutex::new(store),
@@ -89,7 +91,12 @@ impl Runtime {
             scheduler: TaskScheduler::default(),
             pending: Mutex::new(HashMap::new()),
             current_target: Mutex::new(None),
-        })
+        };
+        // A previous process may have crashed with tasks in flight. They have no
+        // worker and no budget behind them after restart; pause them so the user
+        // decides (resume/cancel) instead of letting them squat queue slots.
+        runtime.recover_stale_tasks();
+        Ok(runtime)
     }
 
     /// Test constructor: in-memory SQLite + FakeActor (no real VLM).
@@ -197,7 +204,10 @@ impl Runtime {
         let active = self
             .list_tasks()
             .into_iter()
-            .filter(|t| !t.state.is_terminal())
+            // PausedByUser tasks release the execution slot and do not consume
+            // worker time; excluding them keeps recovered/paused tasks from
+            // permanently filling the queue.
+            .filter(|t| !t.state.is_terminal() && t.state != TaskState::PausedByUser)
             .count() as u32;
         if active >= self.limits.max_queue_depth {
             return Err(LcuError::coded(
@@ -283,16 +293,25 @@ impl Runtime {
 
     /// Desktop GUI: approve the pending binding (R3 only — R4 uses takeover).
     pub fn approve_pending_in_gui(&self, approval_id: &str) -> LcuResult<()> {
-        {
+        let (is_takeover, has_pending) = {
             let pending = self.pending.lock().expect("pending lock");
-            if let Some(p) = pending.values().find(|p| p.approval_id == approval_id) {
-                if p.risk.requires_user_takeover() {
-                    return Err(LcuError::coded(
-                        ErrorCode::PermissionDenied,
-                        "R4 requires begin_takeover then complete_takeover; not plain approve",
-                    ));
-                }
-            }
+            let entry = pending.values().find(|p| p.approval_id == approval_id);
+            (
+                entry.map(|p| p.risk.requires_user_takeover()),
+                entry.is_some(),
+            )
+        };
+        if !has_pending {
+            return Err(LcuError::coded(
+                ErrorCode::ApprovalInvalid,
+                "no pending action bound to this approval; approval is stale or already handled",
+            ));
+        }
+        if is_takeover == Some(true) {
+            return Err(LcuError::coded(
+                ErrorCode::PermissionDenied,
+                "R4 requires begin_takeover then complete_takeover; not plain approve",
+            ));
         }
         let binding = self.approval_binding(approval_id)?;
         self.approve_in_gui(approval_id, &binding)
@@ -382,6 +401,50 @@ impl Runtime {
             .unwrap_or_default()
     }
 
+    /// After a crash / kill, tasks left in Queued/Running/WaitingApproval have
+    /// no worker and no budget behind them. Pause them for the user to decide,
+    /// rebuild in-memory budgets (seeded from the persisted step count so a task
+    /// that already ran 40 steps cannot run a fresh 100), and release any
+    /// backend context (e.g. a Chrome tab lease) the dead process held.
+    fn recover_stale_tasks(&self) {
+        let stale: Vec<TaskRecord> = self
+            .list_tasks()
+            .into_iter()
+            .filter(|t| !t.state.is_terminal())
+            .collect();
+        let recovered = stale.len();
+        for mut record in stale {
+            let was_paused = record.state == TaskState::PausedByUser;
+            if !was_paused {
+                if let Err(e) = self.apply_command(
+                    &record.task_id,
+                    TaskCommand::PauseByUser,
+                    "recovered after previous process exit; paused for user to decide",
+                ) {
+                    tracing::warn!(task_id = %record.task_id.0, error = %e, "recovery transition failed");
+                    continue;
+                }
+                record = match self.get_task(&record.task_id) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(task_id = %record.task_id.0, error = %e, "recovery re-read failed");
+                        continue;
+                    }
+                };
+            }
+            let mut budget = TaskBudget::new(self.limits.clone());
+            budget.step_count = record.step_count;
+            self.budgets
+                .lock()
+                .expect("budgets")
+                .insert(record.task_id.0.clone(), budget);
+        }
+        // Release whatever the dead process may have held (Chrome tab lease);
+        // no-op for the macOS window backend.
+        self.backend.clear_task_context();
+        tracing::info!(recovered, "stale tasks recovered to paused");
+    }
+
     pub(crate) fn apply_command(
         &self,
         task_id: &TaskId,
@@ -468,6 +531,31 @@ impl Runtime {
         Ok(())
     }
 
+    /// Create and store a one-time ApprovalRequest; return its id.
+    fn insert_approval(
+        &self,
+        task_id: Option<&TaskId>,
+        observation: &AppObservation,
+        action_hash: String,
+        reason: String,
+    ) -> String {
+        let tid = task_id.cloned().unwrap_or_else(|| TaskId("pending".into()));
+        let binding = ApprovalBinding::new(
+            tid,
+            observation.observation_id.clone(),
+            action_hash,
+            observation.target.app_id.clone(),
+            Duration::minutes(5),
+        );
+        let request = ApprovalRequest::new(binding, reason);
+        let approval_id = request.approval_id.0.clone();
+        self.approvals
+            .lock()
+            .expect("approvals lock")
+            .insert(approval_id.clone(), request);
+        approval_id
+    }
+
     /// Validate an action against observation + EffectGuard. Does not execute OS effects.
     pub fn evaluate_action(
         &self,
@@ -496,6 +584,50 @@ impl Runtime {
         task_authorized_max_risk: RiskLevel,
         caller: Option<&CallerIdentity>,
     ) -> LcuResult<EvaluatedAction> {
+        self.evaluate_action_inner(
+            task_id,
+            observation,
+            action,
+            model_effect_claim,
+            task_authorized_max_risk,
+            caller,
+            true,
+        )
+    }
+
+    /// Risk-only re-evaluation: never registers a new approval. Used by
+    /// `try_execute_pending` after the original grant was consumed — a second
+    /// inserted approval would be a ghost (nobody consumes it), and an R4
+    /// escalation there re-binds a fresh pending approval explicitly instead.
+    pub(crate) fn reevaluate_action_for_task(
+        &self,
+        task_id: Option<&TaskId>,
+        observation: &AppObservation,
+        action: &Action,
+        task_authorized_max_risk: RiskLevel,
+        caller: Option<&CallerIdentity>,
+    ) -> LcuResult<EvaluatedAction> {
+        self.evaluate_action_inner(
+            task_id,
+            observation,
+            action,
+            None,
+            task_authorized_max_risk,
+            caller,
+            false,
+        )
+    }
+
+    fn evaluate_action_inner(
+        &self,
+        task_id: Option<&TaskId>,
+        observation: &AppObservation,
+        action: &Action,
+        model_effect_claim: Option<&str>,
+        task_authorized_max_risk: RiskLevel,
+        caller: Option<&CallerIdentity>,
+        create_approval: bool,
+    ) -> LcuResult<EvaluatedAction> {
         if let Some(element_id) = action.referenced_element_id() {
             if element_id.starts_with("nav_") || !observation.contains_element(element_id) {
                 return Err(LcuError::coded(
@@ -523,59 +655,45 @@ impl Runtime {
         }
 
         if judgement.risk.requires_user_takeover() {
-            let tid = task_id.cloned().unwrap_or_else(|| TaskId("pending".into()));
-            let binding = ApprovalBinding::new(
-                tid,
-                observation.observation_id.clone(),
-                action.action_hash(),
-                observation.target.app_id.clone(),
-                Duration::minutes(5),
-            );
-            let request = ApprovalRequest::new(
-                binding,
-                format!("risk R4 requires user takeover: {}", judgement.rationale),
-            );
-            let approval_id = request.approval_id.0.clone();
-            self.approvals
-                .lock()
-                .expect("approvals lock")
-                .insert(approval_id.clone(), request);
+            let approval_id = if create_approval {
+                Some(self.insert_approval(
+                    task_id,
+                    observation,
+                    action.action_hash(),
+                    format!("risk R4 requires user takeover: {}", judgement.rationale),
+                ))
+            } else {
+                None
+            };
             let _ = caller;
             return Ok(EvaluatedAction {
                 action_hash: action.action_hash(),
                 risk: judgement.risk,
                 requires_approval: true,
                 requires_takeover: true,
-                approval_id: Some(approval_id),
+                approval_id,
                 rationale: judgement.rationale,
             });
         }
 
         if judgement.risk.requires_per_action_approval() {
+            let approval_id = if create_approval {
+                Some(self.insert_approval(
+                    task_id,
+                    observation,
+                    action.action_hash(),
+                    format!("risk {:?} requires user approval", judgement.risk),
+                ))
+            } else {
+                None
+            };
             let _ = caller;
-            let tid = task_id.cloned().unwrap_or_else(|| TaskId("pending".into()));
-            let binding = ApprovalBinding::new(
-                tid,
-                observation.observation_id.clone(),
-                action.action_hash(),
-                observation.target.app_id.clone(),
-                Duration::minutes(5),
-            );
-            let request = ApprovalRequest::new(
-                binding,
-                format!("risk {:?} requires user approval", judgement.risk),
-            );
-            let approval_id = request.approval_id.0.clone();
-            self.approvals
-                .lock()
-                .expect("approvals lock")
-                .insert(approval_id.clone(), request);
             return Ok(EvaluatedAction {
                 action_hash: action.action_hash(),
                 risk: judgement.risk,
                 requires_approval: true,
                 requires_takeover: false,
-                approval_id: Some(approval_id),
+                approval_id,
                 rationale: judgement.rationale,
             });
         }
@@ -1189,6 +1307,10 @@ mod tests {
         let rt2 = Runtime::new(paths, Arc::new(NullBackend)).unwrap();
         let got = rt2.get_task(&task_id).unwrap();
         assert_eq!(got.goal, "persist me");
+        // Crash recovery: a non-terminal task from a dead process is paused for
+        // the user and gets a rebuilt budget, not a silent permanent queue slot.
+        assert_eq!(got.state, TaskState::PausedByUser);
+        assert!(rt2.budgets.lock().unwrap().contains_key(&task_id.0));
     }
 
     #[test]

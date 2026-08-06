@@ -288,6 +288,15 @@ impl Runtime {
             "product step model proposal"
         );
 
+        // The model proposal can take minutes (VLM); the user may have paused
+        // or cancelled meanwhile. Drop the proposal entirely — proceeding would
+        // register an approval / pending state for a task that must not act,
+        // and RequireApproval from PausedByUser is an illegal transition that
+        // left the task stuck Running with nobody driving it.
+        if !self.task_is_running(task_id) {
+            return Ok(StepOutcome::Continue);
+        }
+
         // Only an explicit Action::Done may complete the product task.
         // Repeated set_value / observe / wait go through LoopGuard below — never
         // forge success from "model re-proposed the same write".
@@ -388,6 +397,16 @@ impl Runtime {
             Some(&task.caller),
         )?;
 
+        // The control gate above is an RPC; the user may have paused during it.
+        // Remove the approval this evaluation just registered (nobody would
+        // consume it) and let the worker loop re-check the state.
+        if !self.task_is_running(task_id) {
+            if let Some(approval_id) = &evaluated.approval_id {
+                self.approvals.lock().expect("approvals lock").remove(approval_id);
+            }
+            return Ok(StepOutcome::Continue);
+        }
+
         if evaluated.requires_takeover {
             self.store_pending(
                 task_id,
@@ -485,16 +504,24 @@ impl Runtime {
             return Ok(None);
         };
 
-        let approvals = self.approvals.lock().expect("approvals lock");
-        let status = approvals
-            .get(&pending.approval_id)
-            .map(|r| r.status)
-            .ok_or_else(|| {
-                LcuError::coded(ErrorCode::ApprovalInvalid, "pending approval missing")
-            })?;
-        drop(approvals);
-
         use lcu_core::approval::ApprovalStatus;
+        let status = {
+            let mut approvals = self.approvals.lock().expect("approvals lock");
+            let request = approvals
+                .get_mut(&pending.approval_id)
+                .ok_or_else(|| {
+                    LcuError::coded(ErrorCode::ApprovalInvalid, "pending approval missing")
+                })?;
+            // A pending approval that outlived its 5-minute binding must not keep
+            // the task stuck in WaitingApproval forever.
+            if request.status == ApprovalStatus::Pending
+                && request.binding.is_expired(chrono::Utc::now())
+            {
+                request.status = ApprovalStatus::Expired;
+            }
+            request.status
+        };
+
         match status {
             ApprovalStatus::Pending => return Ok(Some(StepOutcome::WaitExternal)),
             ApprovalStatus::Denied
@@ -573,16 +600,38 @@ impl Runtime {
         }
 
         let task = self.get_task(task_id)?;
-        let reeval = self.evaluate_action_for_task(
+        // Risk-only re-evaluation: no approval is registered here. Registering
+        // one would leave a ghost approval (nobody consumes it) after the
+        // original grant was already consumed.
+        let reeval = self.reevaluate_action_for_task(
             Some(task_id),
             &fresh,
             &pending.action,
-            None,
             RiskLevel::R4,
             Some(&task.caller),
         )?;
         if reeval.requires_takeover || reeval.risk.requires_user_takeover() {
-            self.clear_pending(task_id);
+            // R4 escalation: the fresh observation changed the picture after the
+            // user approved. Bind a brand-new pending approval so the GUI's
+            // begin/complete_takeover can find it — otherwise the escalated
+            // action would be silently dropped and the task stuck.
+            let approval_id = self.insert_approval(
+                Some(task_id),
+                &fresh,
+                pending.action.action_hash(),
+                format!("post-approval re-risk requires user takeover: {}", reeval.rationale),
+            );
+            self.store_pending(
+                task_id,
+                PendingAction {
+                    approval_id: approval_id.clone(),
+                    action: pending.action.clone(),
+                    observation: fresh,
+                    target: pending.target.clone(),
+                    risk: reeval.risk,
+                    takeover_started: false,
+                },
+            );
             let _ = self.apply_command(
                 task_id,
                 TaskCommand::RequireApproval,
@@ -660,6 +709,13 @@ impl Runtime {
         }
     }
 
+    fn task_is_running(&self, task_id: &TaskId) -> bool {
+        matches!(
+            self.get_task(task_id).map(|t| t.state),
+            Ok(TaskState::Running)
+        )
+    }
+
     fn store_pending(&self, task_id: &TaskId, pending: PendingAction) {
         self.pending
             .lock()
@@ -672,6 +728,12 @@ impl Runtime {
             .lock()
             .expect("pending lock")
             .remove(&task_id.0);
+        // The pending entry is the only consumer of the task's approvals; once it
+        // is gone (executed, denied, invalidated, failed) every approval of this
+        // task is dead weight in the map. Purge them so the map cannot grow
+        // unboundedly and stale approvals never surface in the GUI.
+        let mut approvals = self.approvals.lock().expect("approvals lock");
+        approvals.retain(|_, r| r.binding.task_id != *task_id);
     }
 
     /// Sole production entry for real OS side effects (crate-private; not IPC-exposed).

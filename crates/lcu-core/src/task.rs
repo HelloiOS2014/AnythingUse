@@ -144,6 +144,9 @@ impl TaskStateMachine {
         let next = match (current, command) {
             (TaskState::Queued, TaskCommand::Start) => TaskState::Running,
             (TaskState::Queued, TaskCommand::Cancel) => TaskState::Cancelled,
+            // Crash recovery: a task persisted in Queued has no worker behind it
+            // after a process restart; pause it for the user to decide.
+            (TaskState::Queued, TaskCommand::PauseByUser) => TaskState::PausedByUser,
 
             (TaskState::Running, TaskCommand::RequireApproval) => TaskState::WaitingApproval,
             (TaskState::Running, TaskCommand::PauseByUser) => TaskState::PausedByUser,
