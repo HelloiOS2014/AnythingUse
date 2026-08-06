@@ -31,3 +31,4 @@
 /benchmarks/local/
 /test-results/local/
 /tmp/
+__pycache__/
