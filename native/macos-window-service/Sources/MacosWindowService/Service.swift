@@ -97,8 +97,21 @@ final class Service {
             captureBackend = shot.backend
             imageHash = sha256Hex(shot.pngData)
         } catch {
-            // AX-only observation is still useful.
-            captureBackend = nil
+            // ScreenCaptureKit failures are often transient (window bounds
+            // changing mid-capture, first-use). One immediate retry before
+            // falling back to AX-only; a second failure is likely persistent.
+            if let retry = try? awaitMain({
+                try await WindowCapture.captureWindow(windowID: target.windowID)
+            }) {
+                imageB64 = retry.pngData.base64EncodedString()
+                imageWidth = retry.width
+                imageHeight = retry.height
+                captureBackend = retry.backend
+                imageHash = sha256Hex(retry.pngData)
+            } else {
+                // AX-only observation is still useful.
+                captureBackend = nil
+            }
         }
 
         return [

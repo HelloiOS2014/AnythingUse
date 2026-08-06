@@ -19,6 +19,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+# Imported lazily from load_model normally; the stopping criteria class needs
+# the base at class-definition time, so resolve it once here.
+try:
+    from transformers import StoppingCriteria
+except ImportError:  # pragma: no cover - only relevant in model-less environments
+    StoppingCriteria = None  # type: ignore[assignment,misc]
+
 MODEL_DIR = Path(
     os.environ.get(
         "LCU_MODEL_DIR",
@@ -32,6 +39,29 @@ _device = None
 _load_ms = None
 
 
+if StoppingCriteria is not None:
+
+    class JsonCompleteStoppingCriteria(StoppingCriteria):
+        """Stop generation as soon as the emitted text contains a parseable action.
+
+        The worker's output is a single JSON object; continuing to generate past
+        it only burns max_time budget and produces truncation artifacts. The
+        criteria reuses `extract_json` so "parseable" means exactly what the
+        worker accepts.
+        """
+
+        def __call__(self, input_ids, scores, **kwargs) -> bool:
+            try:
+                text = _processor.decode(input_ids[0], skip_special_tokens=True)
+            except Exception:
+                return False
+            try:
+                extract_json(text)
+                return True
+            except Exception:
+                return False
+
+
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
@@ -42,7 +72,7 @@ def load_model() -> None:
         return
     t0 = time.time()
     import torch
-    from transformers import AutoModelForImageTextToText, Qwen3VLProcessor
+    from transformers import AutoModelForImageTextToText, Qwen3VLProcessor, StoppingCriteria
 
     if not MODEL_DIR.exists():
         raise FileNotFoundError(f"model dir missing: {MODEL_DIR}")
@@ -377,7 +407,9 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
     )
     # Single total wall budget for one propose (attempt + optional JSON retry).
     # Retry must consume remaining time only — never re-grant a full 180s.
-    max_new = int(req.get("max_new_tokens") or int(os.environ.get("LCU_VLM_MAX_NEW", "512")))
+    # One action JSON is well under 200 tokens; a larger cap only lengthens
+    # generation that the JSON-complete criteria will cut short anyway.
+    max_new = int(req.get("max_new_tokens") or int(os.environ.get("LCU_VLM_MAX_NEW", "192")))
     total_budget = float(
         req.get("max_time")
         or os.environ.get("LCU_VLM_MAX_TIME")
@@ -432,12 +464,16 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
             return max(5.0, total_budget - (time.time() - t0))
 
         def _generate(n_new: int, wall: float) -> str:
+            criteria = None
+            if StoppingCriteria is not None:
+                criteria = [JsonCompleteStoppingCriteria()]
             with torch.inference_mode():
                 out_ids = _model.generate(
                     **inputs,
                     max_new_tokens=n_new,
                     do_sample=False,
                     max_time=max(5.0, wall),
+                    stopping_criteria=criteria,
                 )
             prompt_len = inputs["input_ids"].shape[-1]
             gen = out_ids[0][prompt_len:]
@@ -464,7 +500,7 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
                 f"json parse failed ({e1}); retrying once with more tokens "
                 f"remaining_budget={remaining:.1f}s"
             )
-            text2 = _generate(max(max_new, 768), remaining)
+            text2 = _generate(max(max_new, 384), remaining)
             latency_ms = int((time.time() - t0) * 1000)
             log(f"propose retry done latency_ms={latency_ms} out_chars={len(text2)}")
             try:

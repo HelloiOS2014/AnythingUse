@@ -237,7 +237,7 @@ impl Drop for NativeClient {
 fn map_service_error(code: &str, message: &str) -> LcuError {
     let ec = match code {
         "permission_denied" => ErrorCode::PermissionDenied,
-        "not_found" | "target_lost" => ErrorCode::TaskFailed,
+        "not_found" | "target_lost" | "action_failed" => ErrorCode::TaskFailed,
         "taken_over" => ErrorCode::WaitingUser,
         "unsupported_capability" => ErrorCode::UnsupportedCapability,
         "invalid_request" => ErrorCode::InvalidRequest,
