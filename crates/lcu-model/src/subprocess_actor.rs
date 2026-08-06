@@ -426,10 +426,12 @@ impl VisionActor for SubprocessVisionActor {
             .unwrap_or(512);
         // One total wall budget for the warm propose (including any JSON retry).
         // Do not stack parent 240s + child 90s + retry 180s.
+        // 180s: the first propose after a model load pays a one-time MPS
+        // prefill compile that measured ~160s; 120s cut it mid-generation.
         let propose_budget_secs: u64 = std::env::var("LCU_VLM_PROPOSE_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(120);
+            .unwrap_or(180);
         let mut req = json!({
             "op": "propose",
             "goal": context.goal,

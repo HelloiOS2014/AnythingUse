@@ -48,11 +48,29 @@ if StoppingCriteria is not None:
         it only burns max_time budget and produces truncation artifacts. The
         criteria reuses `extract_json` so "parseable" means exactly what the
         worker accepts.
+
+        Only the *newly generated* tokens are inspected: the prompt itself
+        contains example JSON objects, so scanning the whole sequence would
+        either match a prompt example (stop after one token) or never parse
+        (prompt text mixed into the slice).
         """
 
+        def __init__(self) -> None:
+            self._base_len: int | None = None
+
         def __call__(self, input_ids, scores, **kwargs) -> bool:
+            n = input_ids.shape[-1]
+            if self._base_len is None:
+                # First call: input is prompt + 1 generated token. Record the
+                # boundary a few tokens early so the first generated token is
+                # never cut in half; the prompt tail (rule text) contains no
+                # '{', so extract_json still finds the model's opening brace.
+                self._base_len = max(0, n - 4)
+                return False
             try:
-                text = _processor.decode(input_ids[0], skip_special_tokens=True)
+                text = _processor.decode(
+                    input_ids[0][self._base_len:], skip_special_tokens=True
+                )
             except Exception:
                 return False
             try:
@@ -357,7 +375,9 @@ def _resize_image(path: str) -> str:
     from PIL import Image
 
     # Smaller default: large captures dominate MPS prefill and starve generation.
-    max_side = int(os.environ.get("LCU_VLM_MAX_IMAGE", "512"))
+    # 384 keeps enough visual fidelity for window-level actions while roughly
+    # halving the image token cost of a 512px capture.
+    max_side = int(os.environ.get("LCU_VLM_MAX_IMAGE", "384"))
     img = Image.open(path).convert("RGB")
     w, h = img.size
     scale = min(1.0, float(max_side) / float(max(w, h)))
@@ -414,7 +434,7 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
         req.get("max_time")
         or os.environ.get("LCU_VLM_MAX_TIME")
         or os.environ.get("LCU_VLM_PROPOSE_SECS")
-        or "120"
+        or "180"
     )
     total_budget = max(15.0, total_budget)
 
@@ -532,10 +552,39 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
         _cleanup_resized(resized_path, image_path)
 
 
+def _warm_prefill() -> None:
+    """Pay the MPS first-inference compile cost inside warmup.
+
+    The first generate() on a freshly loaded model compiles kernels and can
+    take 1.5–3 minutes — longer than the propose budget, so the first task
+    after a restart was failing on a truncated 17-char output almost every
+    time. A tiny warm generation absorbs that cost up front.
+    """
+    global _processor, _device
+    try:
+        import torch
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        inputs = _processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(_device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        with torch.inference_mode():
+            _model.generate(**inputs, max_new_tokens=4, do_sample=False)
+        log("warm prefill done")
+    except Exception as e:
+        log(f"warm prefill skipped: {e}")
+
+
 def handle(req: dict[str, Any]) -> dict[str, Any]:
     op = req.get("op")
     if op == "warmup":
         load_model()
+        _warm_prefill()
         return {
             "ok": True,
             "load_ms": _load_ms,

@@ -253,29 +253,51 @@ impl Runtime {
             last_action_summary: last_summary.clone(),
         };
         let propose_t0 = std::time::Instant::now();
-        let proposal = match self.actor.propose_action(&model_obs, &ctx) {
-            Ok(p) => p,
-            Err(e) => {
-                // Prefer pause-on-takeover over failing mid-propose when the user owns the window.
-                if let Some(outcome) =
-                    self.apply_control_gate(task_id, &target, "propose-failed")?
-                {
-                    return Ok(outcome);
+        // One automatic retry: propose failures are frequently transient on MPS
+        // (budget-cut generation, first-inference compile, momentary system
+        // load). A single failed propose must not kill a task that would
+        // succeed one attempt later. The worker-level budget and the Rust hard
+        // timeout still bound total time.
+        let mut proposal = None;
+        for attempt in 0..2 {
+            match self.actor.propose_action(&model_obs, &ctx) {
+                Ok(p) => {
+                    proposal = Some(p);
+                    break;
                 }
-                tracing::warn!(
-                    task_id = %task_id.0,
-                    error = %e,
-                    actor = self.actor.name(),
-                    propose_ms = propose_t0.elapsed().as_millis() as u64,
-                    "vision propose failed; task FAILED (no heuristic auto-fallback)"
-                );
-                self.fail_task(
-                    task_id,
-                    format!("VLM propose failed ({}); queue continues", e),
-                )?;
-                return Ok(StepOutcome::Terminal);
+                Err(e) => {
+                    if attempt == 0 {
+                        tracing::warn!(
+                            task_id = %task_id.0,
+                            error = %e,
+                            actor = self.actor.name(),
+                            propose_ms = propose_t0.elapsed().as_millis() as u64,
+                            "vision propose failed; retrying once"
+                        );
+                        // Prefer pause-on-takeover over retrying against a user-owned window.
+                        if let Some(outcome) =
+                            self.apply_control_gate(task_id, &target, "propose-failed")?
+                        {
+                            return Ok(outcome);
+                        }
+                        continue;
+                    }
+                    tracing::warn!(
+                        task_id = %task_id.0,
+                        error = %e,
+                        actor = self.actor.name(),
+                        propose_ms = propose_t0.elapsed().as_millis() as u64,
+                        "vision propose failed twice; task FAILED (no heuristic auto-fallback)"
+                    );
+                    self.fail_task(
+                        task_id,
+                        format!("VLM propose failed twice ({}); queue continues", e),
+                    )?;
+                    return Ok(StepOutcome::Terminal);
+                }
             }
-        };
+        }
+        let proposal = proposal.expect("proposal set by retry loop");
         let propose_ms = propose_t0.elapsed().as_millis() as u64;
 
         // Action payloads may embed model-typed content (set_value value,
