@@ -111,6 +111,27 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch the observation the worker waits on for an agent decision
+    /// (agent decision mode: start lcu-desktop with LCU_VISION_ACTOR=agent).
+    Decide {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+        /// Poll until a decision is available (default: fail fast).
+        #[arg(long, default_value_t = false)]
+        wait: bool,
+    },
+    /// Submit an agent decision for a pending observation.
+    Act {
+        task_id: String,
+        #[arg(long)]
+        observation_id: String,
+        /// Action JSON, e.g. '{"kind":"semantic","type":"invoke","element_id":"e1"}'.
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> StdExitCode {
@@ -156,6 +177,17 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             Ok(ExitCode::Success)
         }
         Commands::Doctor { json } => doctor(json),
+        Commands::Decide {
+            task_id,
+            json,
+            wait,
+        } => decide(task_id, json, wait),
+        Commands::Act {
+            task_id,
+            observation_id,
+            action,
+            json,
+        } => act(task_id, observation_id, action, json),
         Commands::Run {
             goal,
             app,
@@ -452,6 +484,108 @@ fn wait_for_task(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCod
         format!("wait timed out after {timeout}s for task {task_id}"),
     );
     Err(ExitCode::InternalError)
+}
+
+/// Agent decision mode: fetch the observation the worker is waiting on.
+/// With `--wait`, polls until a decision appears (or `LCU_WAIT_TIMEOUT_SECS`).
+fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode> {
+    use std::time::{Duration, Instant};
+
+    let deadline = if wait {
+        let secs = std::env::var("LCU_WAIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300u64);
+        Instant::now() + Duration::from_secs(secs)
+    } else {
+        Instant::now() - Duration::from_secs(1)
+    };
+
+    loop {
+        match call(InternalRequest::GetDecision {
+            task_id: task_id.clone(),
+        })? {
+            InternalResponse::Decision {
+                observation,
+                context,
+                image_path,
+                expires_in_secs,
+                ..
+            } => {
+                if json {
+                    print_json(&JsonEnvelope::ok(serde_json::json!({
+                        "task_id": task_id,
+                        "observation_id": observation.observation_id,
+                        "goal": context.goal,
+                        "step": context.step,
+                        "last_action_summary": context.last_action_summary,
+                        "elements": observation.elements,
+                        "image_path": image_path,
+                        "expires_in_secs": expires_in_secs,
+                    })));
+                } else {
+                    println!("observation_id: {}", observation.observation_id);
+                    println!("goal: {}", context.goal);
+                    println!("step: {}", context.step);
+                    println!("image_path: {}", image_path.unwrap_or_else(|| "(none)".into()));
+                    println!("elements:");
+                    for e in &observation.elements {
+                        println!(
+                            "  {} role={} label={}",
+                            e.id,
+                            e.role,
+                            e.label.as_deref().unwrap_or("")
+                        );
+                    }
+                    println!("expires_in_secs: {expires_in_secs}");
+                    println!("submit with: lcu act {task_id} --observation-id {} --action '<json>'", observation.observation_id);
+                }
+                return Ok(ExitCode::Success);
+            }
+            InternalResponse::Error {
+                code: ErrorCode::TaskNotFound,
+                ..
+            } if wait && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            other => return map_error_response(other, json),
+        }
+    }
+}
+
+/// Agent decision mode: submit an action for a pending observation.
+fn act(
+    task_id: String,
+    observation_id: String,
+    action: String,
+    json: bool,
+) -> Result<ExitCode, ExitCode> {
+    let value: serde_json::Value = serde_json::from_str(&action).map_err(|e| {
+        emit_error(json, ErrorCode::UsageError, format!("action is not valid JSON: {e}"));
+        ExitCode::UsageError
+    })?;
+    let resp = call(InternalRequest::SubmitDecision {
+        task_id: task_id.clone(),
+        observation_id,
+        action: value,
+        effect_claim: None,
+        expected_effect: None,
+        confidence: None,
+    })?;
+    match resp {
+        InternalResponse::Submitted { action, .. } => {
+            if json {
+                print_json(&JsonEnvelope::ok(serde_json::json!({
+                    "task_id": task_id,
+                    "action": action,
+                })));
+            } else {
+                println!("submitted action: {action:?}");
+            }
+            Ok(ExitCode::Success)
+        }
+        other => map_error_response(other, json),
+    }
 }
 
 fn watch_task(task_id: String, seconds: u64, interval_ms: u64) -> Result<ExitCode, ExitCode> {

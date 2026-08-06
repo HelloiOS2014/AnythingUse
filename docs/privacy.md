@@ -16,6 +16,14 @@ Product: **AnythingUse**. Runtime data root on macOS defaults to `~/Library/Appl
 Only `lcu` JSON fields: task id, goal, state, summary/error, step count, app selector, and doctor flags.  
 Agents do **not** receive screenshots, full AX trees, model chain-of-thought, or approval internals.
 
+**Agent decision mode exception** (`LCU_VISION_ACTOR=agent`): when the agent
+is the decision maker, `lcu decide` deliberately hands it the same data
+surface the local VLM gets — a compact element tree, the goal/step context,
+and a scaled screenshot via a 0600 temp file (deleted when the decision is
+consumed or times out; never embedded in IPC JSON). This is the explicit
+price of agent-driven decisions and only applies while agent mode is
+enabled.
+
 ## What we do not do by default
 
 - Upload telemetry to the network

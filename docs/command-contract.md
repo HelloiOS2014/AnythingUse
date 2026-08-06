@@ -108,6 +108,20 @@ CLI, Agent, and model credentials must not produce an approval result. Exit code
 
 Schema and internal protocol versions.
 
+### `lcu decide <task-id> [--wait] [--json]` / `lcu act <task-id> --observation-id <obs> --action <json> [--json]`
+
+Agent decision mode (Runtime started with `LCU_VISION_ACTOR=agent`).
+
+`decide` returns the observation the worker is waiting on: compact elements,
+goal/step, and a `image_path` to a 0600 temp screenshot (read it before
+submitting — the file is removed once the decision is consumed or times
+out). `--wait` polls until a decision is available. `act` submits an action
+JSON for that observation; the action then flows through the exact same
+pipeline as VLM proposals (validation, EffectGuard, approvals, control
+gates). A stale `observation_id` is rejected with exit 3; use `decide` again.
+Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s).
+Cancel/pause aborts a parked decision immediately (exit 2 semantics preserved).
+
 ## Agent rules
 
 1. Run `lcu doctor --json` when environment health is unknown.

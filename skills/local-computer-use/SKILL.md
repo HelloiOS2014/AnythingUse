@@ -36,6 +36,28 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 | `lcu cancel <task-id> [--json]` | Cancel a task |
 | `lcu approve <approval-id> [--json]` | **Only opens GUI**; never completes approval |
 | `lcu schema [--json]` | Schema / protocol versions |
+| `lcu decide <task-id> [--wait] [--json]` | **Agent decision mode**: fetch the observation the worker is waiting on (compact elements + screenshot path + goal/step). Requires `lcu-desktop` started with `LCU_VISION_ACTOR=agent` |
+| `lcu act <task-id> --observation-id <obs> --action '<json>' [--json]` | Submit an agent decision (action JSON). Same safety pipeline as VLM proposals: EffectGuard + approvals still apply |
+
+Agent decision mode workflow (decision maker = the agent itself, data surface identical to the local VLM):
+
+```bash
+# 1. Runtime must run in agent mode
+LCU_VISION_ACTOR=agent lcu-desktop &
+
+# 2. Submit a goal as usual
+lcu run "Open Downloads in Finder" --app com.apple.finder --json
+
+# 3. Decision loop: fetch observation → decide → submit
+lcu decide <task-id> --wait --json   # elements + image_path (read the image BEFORE submitting)
+lcu act <task-id> --observation-id <obs> --action '{"kind":"semantic","type":"invoke","element_id":"e1"}'
+# ... repeat until done
+lcu act <task-id> --observation-id <obs> --action '{"kind":"done","summary":"Goal verified complete"}'
+```
+
+Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). A stale
+`observation_id` is rejected — fetch a fresh decision. Cancel/pause aborts a
+parked decision immediately.
 
 Stable exit codes: `0` ok, `2` waiting user, `3` task failed, `4` permission, `64` usage, `69` runtime unavailable, `70` internal.
 

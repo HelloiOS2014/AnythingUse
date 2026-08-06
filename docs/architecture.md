@@ -36,7 +36,7 @@ flowchart TB
         LOOP
         STORE["SQLite state and events"]
         RISK["EffectGuard and approval binding"]
-        MODEL["Local VLM actor"]
+        MODEL["Decision maker (VLM subprocess or external agent)"]
     end
 
     LOOP <--> STORE
@@ -97,7 +97,12 @@ resolve target
     → observe again
 ```
 
-The VLM receives a current screenshot, compact semantic elements, the full goal, the step number, and a factual summary of the previous action.
+The decision maker — either the local VLM subprocess or an external agent
+(`LCU_VISION_ACTOR=agent`, driving `lcu decide` / `lcu act`) — receives a
+current screenshot, compact semantic elements, the full goal, the step
+number, and a factual summary of the previous action. Both plug into the
+same `VisionActor` interface and their proposals flow through identical
+validation, EffectGuard, approval, and control gates.
 
 Task success is deliberately narrow: only explicit `Done` can enter the success branch, and the backend must still be able to observe the same target. Repeated writes or model loops fail instead of being converted into success.
 
