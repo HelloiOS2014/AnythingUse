@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_SRC="$ROOT/native-host/host.mjs"
 TEMPLATE="$ROOT/native-host/com.lcu.chrome_control.json.template"
 HOST_NAME="com.lcu.chrome_control"
-EXT_ID="${LCU_CHROME_EXT_ID:-dcmfagbbcdpbmggmpngkhegbidepcogk}"
+EXT_ID="${LCU_CHROME_EXT_ID:-glcqmejd6hdgz7lkorqygtzonjxogz4b}"
 
 if [[ ! -f "$HOST_SRC" ]]; then
   echo "missing host: $HOST_SRC" >&2

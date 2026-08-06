@@ -53,10 +53,12 @@ Private entry invariants:
 - `listens_tcp` must be `false`
 - directory mode `0700`, socket mode `0600`
 
-Surface permissions (connectivity):
+Surface permissions (online `doctor`, i.e. Runtime reachable):
 
-- `mac_window_service` — Swift window control plane (`macos-window.sock`)
-- `chrome_control_host` — Chrome Native Messaging host (`chrome-control.sock`)
+- `permissions` lists the three TCC/OS flags: `screen_recording`, `accessibility`, `input_monitoring`
+- surface connectivity appears in `notes` as `mac_window` (Swift service, `macos-window.sock`) and `chrome_tab` (Chrome host, `chrome-control.sock`)
+
+When the Runtime is unreachable, offline `doctor` reports `mac_window_service` / `chrome_control_host` socket presence instead.
 
 ### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--json]`
 

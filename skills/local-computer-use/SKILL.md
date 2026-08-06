@@ -25,7 +25,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 
 | Command | Purpose |
 |---|---|
-| `lcu doctor [--json]` | Permissions, runtime reachability, private entry, **`mac_window_service` + `chrome_control_host` connectivity** |
+| `lcu doctor [--json]` | Permissions (`screen_recording`/`accessibility`/`input_monitoring`), runtime reachability, private entry, surface connectivity in `notes` (`mac_window` / `chrome_tab`) |
 | `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--json]` | Submit a task (source is display-only) |
 | `lcu list [--json]` | List global queue tasks |
 | `lcu status <task-id> [--json]` | Task state |

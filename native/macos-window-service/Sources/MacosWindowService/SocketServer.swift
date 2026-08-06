@@ -120,8 +120,12 @@ final class SocketServer {
                 let response = processLine(line, service: service)
                 var out = response
                 out.append(0x0A)
-                _ = out.withUnsafeBytes { raw in
+                let written = out.withUnsafeBytes { raw in
                     write(fd, raw.baseAddress!, out.count)
+                }
+                if written < 0 {
+                    // Client closed while we were processing (EPIPE); stop serving it.
+                    return
                 }
             }
         }

@@ -26,8 +26,18 @@ impl RuntimePaths {
         }
     }
 
-    /// Default macOS Application Support location for the current user.
+    /// Default per-user runtime root.
+    ///
+    /// `LCU_RUNTIME_ROOT` is the documented override (shared with the Chrome
+    /// native-messaging host and install scripts); `LCU_RUNTIME_DIR` remains a
+    /// compatible alias used by older local setups. Without either, defaults to
+    /// `~/Library/Application Support/LocalComputerUse`.
     pub fn default_user() -> LcuResult<Self> {
+        if let Some(dir) = std::env::var_os("LCU_RUNTIME_ROOT")
+            .or_else(|| std::env::var_os("LCU_RUNTIME_DIR"))
+        {
+            return Ok(Self::from_root(dir));
+        }
         let base = dirs::data_dir().ok_or_else(|| {
             LcuError::coded(
                 ErrorCode::InternalError,

@@ -55,7 +55,7 @@ cd native/macos-window-service && swift build -c release && cd ../..
 ## First run
 
 1. Grant Screen Recording and Accessibility when prompted (for the window service binary / host app).
-2. `lcu doctor --json` — check `mac_window_service` / `chrome_control_host` + permissions.
+2. `lcu doctor --json` — check permissions (`screen_recording`/`accessibility`/`input_monitoring`) and surface connectivity in `notes` (`mac_window` / `chrome_tab`).
 3. `lcu run "Open Downloads in Finder" --app com.apple.finder --wait --json`
 4. If approval is required, use the menu-bar / desktop confirmation UI (not the CLI).
 

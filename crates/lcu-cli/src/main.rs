@@ -114,7 +114,27 @@ enum Commands {
 }
 
 fn main() -> StdExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            use clap::error::ErrorKind;
+            // Help/version are successful output (exit 0); any other parse
+            // failure is a usage error and must exit 64 per the contract, not
+            // clap's default 2 (which collides with waiting_user).
+            match err.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                    err.print().ok();
+                    return StdExitCode::SUCCESS;
+                }
+                _ => {
+                    err.print().ok();
+                    return StdExitCode::from(64);
+                }
+            }
+        }
+    };
     match dispatch(cli) {
         Ok(code) => StdExitCode::from(code.as_i32() as u8),
         Err(code) => StdExitCode::from(code.as_i32() as u8),

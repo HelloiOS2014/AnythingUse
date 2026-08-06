@@ -29,7 +29,7 @@ native/chrome-control/
 Stable extension id:
 
 ```text
-dcmfagbbcdpbmggmpngkhegbidepcogk
+glcqmejd6hdgz7lkorqygtzonjxogz4b
 ```
 
 Native host name:
@@ -71,7 +71,7 @@ Writes:
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. **Load unpacked** → `native/chrome-control/extension`
-4. Confirm id `dcmfagbbcdpbmggmpngkhegbidepcogk`
+4. Confirm id `glcqmejd6hdgz7lkorqygtzonjxogz4b`
 
 Chrome 150+ blocks CLI `--load-extension`; interactive load is required.
 

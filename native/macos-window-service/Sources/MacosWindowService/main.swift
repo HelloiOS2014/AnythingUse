@@ -1,8 +1,14 @@
 import AppKit
 import Foundation
+import Darwin
 
 // Ensure AppKit is initialized for NSWorkspace / capture side effects.
 _ = NSApplication.shared
+
+// A client that closes its connection mid-response (e.g. Rust 45s read timeout)
+// must not SIGPIPE-kill the whole service. Ignore the signal; writes to a dead
+// socket fail with EPIPE and the client handler just closes.
+signal(SIGPIPE, SIG_IGN)
 
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "serve"
