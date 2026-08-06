@@ -260,6 +260,11 @@ impl Runtime {
         // timeout still bound total time.
         let mut proposal = None;
         for attempt in 0..2 {
+            // A cancel/pause during propose (agent mode can park for minutes)
+            // must not re-enter propose with a fresh decision request.
+            if !self.task_is_running(task_id) {
+                return Ok(StepOutcome::Continue);
+            }
             match self.actor.propose_action(&model_obs, &ctx) {
                 Ok(p) => {
                     proposal = Some(p);
@@ -267,6 +272,11 @@ impl Runtime {
                 }
                 Err(e) => {
                     if attempt == 0 {
+                        // Abort (WaitingUser) is expected control flow, not a
+                        // retryable failure.
+                        if e.code() == ErrorCode::WaitingUser {
+                            return Ok(StepOutcome::Continue);
+                        }
                         tracing::warn!(
                             task_id = %task_id.0,
                             error = %e,
@@ -910,26 +920,46 @@ pub fn resolve_selector(goal: &str, explicit: Option<AppSelector>) -> LcuResult<
     })
 }
 
-/// Default product actor: Qwen subprocess only (no heuristic auto-fallback).
+/// Default product actor with optional agent decision mode.
 ///
 /// - `LCU_VISION_ACTOR=auto` (default) / `qwen` / `vlm`: subprocess Qwen3-VL
-pub fn default_product_actor() -> Arc<dyn VisionActor> {
-    let _choice = std::env::var("LCU_VISION_ACTOR")
+/// - `LCU_VISION_ACTOR=agent`: external agent decides via `lcu decide` / `lcu act`
+/// - unknown values warn and fall back to Qwen
+///
+/// Returns `(actor, agent_actor)`; `agent_actor` is `Some` only in agent mode
+/// and lets the Runtime serve GetDecision/SubmitDecision and abort parked
+/// workers on cancel/pause.
+pub fn default_product_actor() -> (Arc<dyn VisionActor>, Option<Arc<lcu_model::AgentActor>>) {
+    let choice = std::env::var("LCU_VISION_ACTOR")
         .unwrap_or_else(|_| "auto".into())
         .to_lowercase();
-    let repo = resolve_repo_root();
-    if !qwen_assets_ready(&repo) {
-        tracing::error!(
-            repo = %repo.display(),
-            "product actor: qwen assets missing; tasks will FAIL until model/worker ready"
-        );
-    } else {
-        tracing::info!(
-            repo = %repo.display(),
-            "product actor: qwen subprocess"
-        );
+    match choice.as_str() {
+        "agent" => {
+            tracing::info!("product actor: agent decision mode (lcu decide / lcu act)");
+            let actor = Arc::new(lcu_model::AgentActor::new());
+            (actor.clone(), Some(actor))
+        }
+        "auto" | "qwen" | "vlm" => {
+            let repo = resolve_repo_root();
+            if !qwen_assets_ready(&repo) {
+                tracing::error!(
+                    repo = %repo.display(),
+                    "product actor: qwen assets missing; tasks will FAIL until model/worker ready"
+                );
+            } else {
+                tracing::info!(
+                    repo = %repo.display(),
+                    "product actor: qwen subprocess"
+                );
+            }
+            (Arc::new(SubprocessVisionActor::from_repo_root(&repo)), None)
+        }
+        other => {
+            tracing::warn!(actor = other, "unknown LCU_VISION_ACTOR; falling back to qwen");
+            let repo = resolve_repo_root();
+            (Arc::new(SubprocessVisionActor::from_repo_root(&repo)), None)
+        }
     }
-    Arc::new(SubprocessVisionActor::from_repo_root(&repo))
 }
 
 fn resolve_repo_root() -> std::path::PathBuf {
@@ -974,6 +1004,8 @@ fn which_python3() -> bool {
 mod tests {
     use super::*;
     use crate::paths::RuntimePaths;
+    use crate::{InternalRequest, InternalResponse};
+    use lcu_core::task::TaskRecord;
     use lcu_core::action::SemanticAction;
     use lcu_core::observation::{
         AppObservation, ElementNode, ModelSize, ObservationId, Rect, TransformId,
@@ -1196,4 +1228,150 @@ mod tests {
         let done = rt.get_task(&task.task_id).unwrap();
         assert_eq!(done.state, TaskState::Failed);
     }
+
+    fn agent_test_runtime() -> (Arc<Runtime>, Arc<lcu_model::AgentActor>) {
+        let dir = tempdir().unwrap();
+        let paths = RuntimePaths::from_root(dir.path());
+        let mut rt = Runtime::new_for_test(paths, Arc::new(MockBackend::new(ControlState::None)))
+            .unwrap();
+        let agent = Arc::new(lcu_model::AgentActor::with_timeout(std::time::Duration::from_secs(30)));
+        rt.set_agent_actor(agent.clone());
+        (Arc::new(rt), agent)
+    }
+
+    fn agent_task(rt: &Runtime) -> TaskRecord {
+        rt.submit_task(
+            "click Open in Finder",
+            CallerIdentity::HumanCli,
+            Some(AppSelector {
+                app_id: Some("com.apple.finder".into()),
+                pid: None,
+                window_title_contains: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_actor_full_loop_via_ipc() {
+        let (rt, _agent) = agent_test_runtime();
+        let task = agent_task(&rt);
+        let tid = task.task_id.clone();
+        let rt2 = rt.clone();
+        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
+
+        // Poll for the decision, then submit an invoke via IPC.
+        let mut submitted = false;
+        for _ in 0..300 {
+            match rt.handle_internal(InternalRequest::GetDecision {
+                task_id: task.task_id.0.clone(),
+            }) {
+                InternalResponse::Decision {
+                    observation, ..
+                } => {
+                    let resp = rt.handle_internal(InternalRequest::SubmitDecision {
+                        task_id: task.task_id.0.clone(),
+                        observation_id: observation.observation_id.clone(),
+                        action: serde_json::json!({
+                            "kind": "semantic",
+                            "type": "invoke",
+                            "element_id": "e1"
+                        }),
+                        effect_claim: None,
+                        expected_effect: None,
+                        confidence: None,
+                    });
+                    assert!(
+                        matches!(resp, InternalResponse::Submitted { .. }),
+                        "submit rejected: {resp:?}"
+                    );
+                    submitted = true;
+                    break;
+                }
+                // "no observation yet" is the normal early state while the
+                // worker is still resolving/observing; keep polling.
+                InternalResponse::Error {
+                    code: ErrorCode::InvalidRequest,
+                    ..
+                } => {}
+                other => {
+                    panic!("get_decision errored: {other:?}");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(submitted, "never got a decision to submit");
+
+        // The worker consumes it and executes the action.
+        let mut stepped = false;
+        for _ in 0..300 {
+            if rt.get_task(&task.task_id).unwrap().step_count >= 1 {
+                stepped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(stepped, "worker did not advance after submit");
+
+        // Stop the loop; cancel aborts the next parked propose.
+        let _ = rt.cancel_task(&task.task_id);
+        worker.join().unwrap();
+        assert_eq!(
+            rt.get_task(&task.task_id).unwrap().state,
+            TaskState::Cancelled
+        );
+    }
+
+    #[test]
+    fn agent_actor_cancel_interrupts_parked_propose() {
+        let (rt, _agent) = agent_test_runtime();
+        let task = agent_task(&rt);
+        let tid = task.task_id.clone();
+        let rt2 = rt.clone();
+        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
+
+        // Wait until the worker is parked on a decision.
+        let mut parked = false;
+        for _ in 0..300 {
+            if matches!(
+                rt.handle_internal(InternalRequest::GetDecision {
+                    task_id: task.task_id.0.clone(),
+                }),
+                InternalResponse::Decision { .. }
+            ) {
+                parked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(parked, "worker never parked");
+
+        let _ = rt.cancel_task(&task.task_id);
+        // run_task_to_completion returns promptly (abort wakes the waiter).
+        worker.join().unwrap();
+        assert_eq!(
+            rt.get_task(&task.task_id).unwrap().state,
+            TaskState::Cancelled
+        );
+    }
+
+    #[test]
+    fn agent_actor_stale_observation_rejected() {
+        let (rt, _agent) = agent_test_runtime();
+        let task = agent_task(&rt);
+        // No observation yet: submit must be rejected, not silently parked.
+        let resp = rt.handle_internal(InternalRequest::SubmitDecision {
+            task_id: task.task_id.0.clone(),
+            observation_id: "obs_nonexistent".into(),
+            action: serde_json::json!({"kind":"wait","milliseconds":1}),
+            effect_claim: None,
+            expected_effect: None,
+            confidence: None,
+        });
+        assert!(
+            matches!(resp, InternalResponse::Error { code: ErrorCode::InvalidRequest, .. }),
+            "stale submit must error, got {resp:?}"
+        );
+    }
+
 }

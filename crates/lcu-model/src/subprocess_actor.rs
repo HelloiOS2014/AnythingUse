@@ -95,7 +95,7 @@ fn coerce_action_value(
 }
 
 /// Write screenshot bytes with owner-only permissions (0600 on Unix).
-fn write_private_temp_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private_temp_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     {

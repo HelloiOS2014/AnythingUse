@@ -4,10 +4,12 @@
 //! minimal task context. It must never receive platform handles, client secrets,
 //! or the ability to approve actions.
 
+pub mod agent_actor;
 pub mod loop_guard;
 pub mod subprocess_actor;
 pub mod validate;
 
+pub use agent_actor::AgentActor;
 pub use loop_guard::{LoopGuard, LoopGuardConfig};
 pub use subprocess_actor::SubprocessVisionActor;
 pub use validate::{compress_elements_for_model, ensure_observation_binding, validate_action};

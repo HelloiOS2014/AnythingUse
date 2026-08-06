@@ -57,6 +57,9 @@ pub struct Runtime {
     pending: Mutex<HashMap<String, PendingAction>>,
     /// Current task target for release on complete/cancel/fail/takeover.
     current_target: Mutex<Option<AppTarget>>,
+    /// Present when `LCU_VISION_ACTOR=agent`: the worker parks on this actor
+    /// while the external agent decides (lcu decide / lcu act).
+    agent_actor: Option<Arc<lcu_model::AgentActor>>,
 }
 
 impl Runtime {
@@ -77,6 +80,7 @@ impl Runtime {
         if let Err(e) = backend.ensure_surfaces() {
             tracing::warn!(error = %e, "ensure_surfaces at runtime start");
         }
+        let (actor, agent_actor) = default_product_actor();
         let runtime = Self {
             paths,
             entry,
@@ -86,10 +90,11 @@ impl Runtime {
             limits: TaskLimits::default(),
             backend,
             effect_guard: Arc::new(StaticEffectGuard),
-            actor: default_product_actor(),
+            actor,
             scheduler: TaskScheduler::default(),
             pending: Mutex::new(HashMap::new()),
             current_target: Mutex::new(None),
+            agent_actor,
         };
         // A previous process may have crashed with tasks in flight. They have no
         // worker and no budget behind them after restart; pause them so the user
@@ -118,7 +123,15 @@ impl Runtime {
             scheduler: TaskScheduler::default(),
             pending: Mutex::new(HashMap::new()),
             current_target: Mutex::new(None),
+            agent_actor: None,
         })
+    }
+
+    /// Install an agent decision actor (tests and `LCU_VISION_ACTOR=agent`
+    /// after construction). Sets both the worker actor and the IPC handle.
+    pub fn set_agent_actor(&mut self, actor: Arc<lcu_model::AgentActor>) {
+        self.actor = actor.clone();
+        self.agent_actor = Some(actor);
     }
 
     pub fn backend(&self) -> &dyn PlatformBackend {
@@ -467,6 +480,16 @@ impl Runtime {
                 .remove(&record.task_id.0);
         }
         self.persist_task(&record, Some(&event));
+        // Wake an agent-decision waiter: cancel/pause/fail must interrupt a
+        // parked propose_action immediately instead of leaving the worker
+        // blocked until the decision timeout.
+        if record.state.is_terminal() || record.state == TaskState::PausedByUser {
+            if let (Some(actor), Some(obs_id)) =
+                (&self.agent_actor, &record.last_observation_id)
+            {
+                actor.abort_waiting(&obs_id.0, &format!("task {:?}", record.state));
+            }
+        }
         Ok(record)
     }
 
@@ -1037,6 +1060,22 @@ pub enum InternalRequest {
     OpenApprovalUi {
         approval_id: String,
     },
+    /// Fetch the observation the worker is waiting on for an agent decision.
+    GetDecision {
+        task_id: String,
+    },
+    /// Submit an agent decision for a pending observation.
+    SubmitDecision {
+        task_id: String,
+        observation_id: String,
+        action: serde_json::Value,
+        #[serde(default)]
+        effect_claim: Option<String>,
+        #[serde(default)]
+        expected_effect: Option<String>,
+        #[serde(default)]
+        confidence: Option<f32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1059,6 +1098,19 @@ pub enum InternalResponse {
     },
     Approvals {
         pending: Vec<ApprovalUiLaunch>,
+    },
+    /// Agent-mode observation for `lcu decide` (no image bytes; path only).
+    Decision {
+        task_id: String,
+        observation: lcu_model::ModelObservation,
+        context: lcu_model::ModelTaskContext,
+        image_path: Option<String>,
+        expires_in_secs: u64,
+    },
+    /// Echo of the parsed action for `lcu act`.
+    Submitted {
+        task_id: String,
+        action: Action,
     },
     Error {
         code: ErrorCode,
@@ -1164,6 +1216,82 @@ impl Runtime {
             InternalRequest::OpenApprovalUi { approval_id } => {
                 match self.request_approval_ui(&approval_id) {
                     Ok(launch) => InternalResponse::ApprovalUi { launch },
+                    Err(err) => Self::map_err_resp(err),
+                }
+            }
+            InternalRequest::GetDecision { task_id } => {
+                let Some(actor) = &self.agent_actor else {
+                    return Self::map_err_resp(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        "runtime is not in agent decision mode (start lcu-desktop with LCU_VISION_ACTOR=agent)",
+                    ));
+                };
+                let record = match self.get_task(&TaskId(task_id.clone())) {
+                    Ok(r) => r,
+                    Err(err) => return Self::map_err_resp(err),
+                };
+                let Some(obs_id) = record.last_observation_id else {
+                    return Self::map_err_resp(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        "task has no observation yet; wait for the worker to reach the decision step (lcu decide --wait)",
+                    ));
+                };
+                match actor.pending(&obs_id.0) {
+                    Some(view) => InternalResponse::Decision {
+                        task_id,
+                        observation: view.observation,
+                        context: view.context,
+                        image_path: view.image_path.map(|p| p.display().to_string()),
+                        expires_in_secs: view.expires_in_secs,
+                    },
+                    None => Self::map_err_resp(LcuError::coded(
+                        ErrorCode::TaskNotFound,
+                        format!(
+                            "no pending decision for observation {}; worker may have moved on (lcu decide --wait)",
+                            obs_id.0
+                        ),
+                    )),
+                }
+            }
+            InternalRequest::SubmitDecision {
+                task_id,
+                observation_id,
+                action,
+                effect_claim,
+                expected_effect,
+                confidence,
+            } => {
+                let Some(actor) = &self.agent_actor else {
+                    return Self::map_err_resp(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        "runtime is not in agent decision mode (start lcu-desktop with LCU_VISION_ACTOR=agent)",
+                    ));
+                };
+                let record = match self.get_task(&TaskId(task_id.clone())) {
+                    Ok(r) => r,
+                    Err(err) => return Self::map_err_resp(err),
+                };
+                if record
+                    .last_observation_id
+                    .as_ref()
+                    .map(|o| o.0 != observation_id)
+                    .unwrap_or(true)
+                {
+                    return Self::map_err_resp(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        format!(
+                            "observation_id {observation_id} is not the task's current observation; fetch a fresh decision"
+                        ),
+                    ));
+                }
+                match actor.submit(
+                    &observation_id,
+                    &action.to_string(),
+                    effect_claim,
+                    expected_effect,
+                    confidence,
+                ) {
+                    Ok(action) => InternalResponse::Submitted { task_id, action },
                     Err(err) => Self::map_err_resp(err),
                 }
             }
