@@ -1,9 +1,18 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "anythinguse",
-  "description": "AnythingUse — local-first control plane for real macOS apps and Chrome, from any agent.",
+  "description": "AnythingUse — local-first control plane for real macOS apps and Chrome, from any agent (Claude Code, Grok Build, Codex).",
+  "owner": {
+    "name": "AnythingUse",
+    "email": "helloios2014@users.noreply.github.com"
+  },
   "plugins": [
     {
       "name": "anythinguse",
+      "description": "AnythingUse / lcu — operate real macOS apps and Chrome from any agent through the lcu CLI. Pluggable decision maker: local VLM or the agent itself.",
+      "author": {
+        "name": "AnythingUse"
+      },
       "source": "HelloiOS2014/AnythingUse"
     }
   ]
