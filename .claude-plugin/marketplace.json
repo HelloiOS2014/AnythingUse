@@ -13,7 +13,10 @@
       "author": {
         "name": "AnythingUse"
       },
-      "source": "HelloiOS2014/AnythingUse"
+      "source": {
+        "source": "github",
+        "repo": "HelloiOS2014/AnythingUse"
+      }
     }
   ]
 }
