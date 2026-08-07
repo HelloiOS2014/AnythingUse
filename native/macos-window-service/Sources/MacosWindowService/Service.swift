@@ -194,10 +194,24 @@ final class Service {
                 let el = try store.resolveElement(target: target, elementId: elementId)
                 let metadata = try store.metadata(for: elementId)
 
-                // Editable Chromium-style controls often report AXSetValue success
-                // without dispatching input/change events. Use an element-bound,
-                // process-directed click and real typing so application code sees
-                // the same interaction, while the user's cursor/focus stay put.
+                // Primary path: AX setValue + readback. Native AppKit apps
+                // (TextEdit etc.) update their model directly, so background
+                // set_value works without focus or keyboard delivery.
+                do {
+                    try AXBridge.setValue(el, value)
+                    let readback = AXBridge.getValue(el)
+                    if readback.contains(value) || readback == value {
+                        return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
+                    }
+                } catch {
+                    // Fall through to the interaction path below.
+                }
+
+                // Fallback for Chromium-style editable controls: they often
+                // report AXSetValue success without dispatching input/change
+                // events (readback mismatch above). Deliver an element-bound
+                // click and real typing; the keyboard gate fail-closes when
+                // the target window cannot be proven key.
                 if (metadata.role.contains("Text") || metadata.role.contains("Field"))
                     && metadata.frame.width > 0
                     && metadata.frame.height > 0
@@ -220,16 +234,6 @@ final class Service {
                     )
                 }
 
-                // Background-first: AX setValue without requiring focus.
-                do {
-                    try AXBridge.setValue(el, value)
-                    let readback = AXBridge.getValue(el)
-                    if readback.contains(value) || readback == value {
-                        return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
-                    }
-                } catch {
-                    // Fall through to directed type only when key window proven.
-                }
                 _ = try DirectedInput.typeUnicode(target: target, text: value)
                 return okAction(
                     path: "cgevent_post_to_pid_type",
