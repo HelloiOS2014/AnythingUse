@@ -8,9 +8,12 @@ operating real macOS applications and Chrome through one command surface.
 - Use the **`local-computer-use`** skill (`skills/local-computer-use/SKILL.md`).
   It is the only supported way to operate the desktop — never touch the
   private sockets or invent new protocols.
-- The skill is installed as a slash command in Grok Build
-  (`~/.grok/skills/local-computer-use`) and available to Claude Code in this
-  repo. If it is missing from your toolset, read the SKILL.md directly.
+- The skill ships as a plugin through this repo's marketplace:
+  `claude plugin marketplace add HelloiOS2014/AnythingUse` + `claude plugin
+  install anythinguse` (Claude Code), or `grok plugin install
+  https://github.com/HelloiOS2014/AnythingUse --trust` (Grok Build). Update
+  with `claude plugin update` / `grok plugin update`. If it is missing from
+  your toolset, read the SKILL.md directly.
 - **Decision maker is pluggable**: the default is the local Qwen3-VL
   subprocess (`lcu run "<goal>"` decides automatically). An agent can also
   decide itself: start the runtime with `LCU_VISION_ACTOR=agent`, submit a
