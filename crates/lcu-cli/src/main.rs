@@ -56,6 +56,10 @@ enum Commands {
         /// Display-only source label (e.g. codex, grok). Not authentication.
         #[arg(long)]
         source_name: Option<String>,
+        /// Decision maker for this task: `vlm` (local model, default) or
+        /// `agent` (external agent via lcu decide/lcu act).
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// List tasks.
     List {
@@ -196,6 +200,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             max_steps,
             source,
             source_name,
+            actor,
         } => {
             let resp = call(InternalRequest::SubmitTask {
                 goal,
@@ -203,6 +208,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
                 source: Some(source),
                 source_name,
                 max_steps,
+                actor,
             })?;
             if wait {
                 wait_for_task(resp, json)

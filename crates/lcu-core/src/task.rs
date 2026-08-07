@@ -76,6 +76,10 @@ pub struct TaskRecord {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_selector: Option<AppSelector>,
+    /// Per-task decision maker override: `vlm` (local model) or `agent`
+    /// (external agent via lcu decide/act). None = follow the Runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     pub step_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observation_id: Option<ObservationId>,
@@ -102,6 +106,7 @@ impl TaskRecord {
             created_at: now,
             updated_at: now,
             app_selector,
+            actor: None,
             step_count: 0,
             last_observation_id: None,
             last_action_hash: None,

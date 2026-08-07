@@ -42,6 +42,7 @@ impl SqliteTaskStore {
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
                   app_selector_json TEXT,
+                  actor TEXT,
                   step_count INTEGER NOT NULL,
                   last_observation_id TEXT,
                   last_action_hash TEXT,
@@ -59,6 +60,13 @@ impl SqliteTaskStore {
                 "#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("migrate: {e}")))?;
+        // Older databases predate the per-task actor column; add it if missing.
+        if let Err(e) = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN actor TEXT", [])
+        {
+            tracing::debug!(error = %e, "tasks.actor column already present");
+        }
         Ok(())
     }
 
@@ -68,15 +76,16 @@ impl SqliteTaskStore {
                 r#"
                 INSERT INTO tasks (
                   task_id, goal, state, caller_json, created_at, updated_at,
-                  app_selector_json, step_count, last_observation_id, last_action_hash,
+                  app_selector_json, actor, step_count, last_observation_id, last_action_hash,
                   summary, error
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                 ON CONFLICT(task_id) DO UPDATE SET
                   goal=excluded.goal,
                   state=excluded.state,
                   caller_json=excluded.caller_json,
                   updated_at=excluded.updated_at,
                   app_selector_json=excluded.app_selector_json,
+                  actor=excluded.actor,
                   step_count=excluded.step_count,
                   last_observation_id=excluded.last_observation_id,
                   last_action_hash=excluded.last_action_hash,
@@ -94,6 +103,7 @@ impl SqliteTaskStore {
                         .app_selector
                         .as_ref()
                         .map(|s| serde_json::to_string(s).unwrap()),
+                    record.actor.clone(),
                     record.step_count as i64,
                     record.last_observation_id.as_ref().map(|o| o.0.clone()),
                     record.last_action_hash.clone(),
@@ -110,7 +120,7 @@ impl SqliteTaskStore {
             .conn
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
-                          app_selector_json, step_count, last_observation_id, last_action_hash,
+                          app_selector_json, actor, step_count, last_observation_id, last_action_hash,
                           summary, error FROM tasks WHERE task_id=?1"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
@@ -132,7 +142,7 @@ impl SqliteTaskStore {
             .conn
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
-                          app_selector_json, step_count, last_observation_id, last_action_hash,
+                          app_selector_json, actor, step_count, last_observation_id, last_action_hash,
                           summary, error FROM tasks ORDER BY created_at ASC"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
@@ -213,11 +223,12 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
     let created: String = row.get(4).map_err(sql_err)?;
     let updated: String = row.get(5).map_err(sql_err)?;
     let sel_s: Option<String> = row.get(6).map_err(sql_err)?;
-    let step: i64 = row.get(7).map_err(sql_err)?;
-    let last_obs: Option<String> = row.get(8).map_err(sql_err)?;
-    let last_hash: Option<String> = row.get(9).map_err(sql_err)?;
-    let summary: Option<String> = row.get(10).map_err(sql_err)?;
-    let error: Option<String> = row.get(11).map_err(sql_err)?;
+    let actor: Option<String> = row.get(7).map_err(sql_err)?;
+    let step: i64 = row.get(8).map_err(sql_err)?;
+    let last_obs: Option<String> = row.get(9).map_err(sql_err)?;
+    let last_hash: Option<String> = row.get(10).map_err(sql_err)?;
+    let summary: Option<String> = row.get(11).map_err(sql_err)?;
+    let error: Option<String> = row.get(12).map_err(sql_err)?;
 
     let state: TaskState = serde_json::from_str(&state_s)
         .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("state json: {e}")))?;
@@ -241,6 +252,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
             .map(|d| d.with_timezone(&Utc))
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("updated: {e}")))?,
         app_selector,
+        actor,
         step_count: step as u32,
         last_observation_id: last_obs.map(lcu_core::observation::ObservationId),
         last_action_hash: last_hash,

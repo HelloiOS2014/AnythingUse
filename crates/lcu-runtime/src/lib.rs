@@ -40,6 +40,15 @@ use crate::private_entry::{PrivateEntry, PrivateEntryConfig};
 use crate::sqlite_store::SqliteTaskStore;
 use crate::worker::{default_product_actor, PendingAction, TaskScheduler};
 
+/// Which decision maker a task uses when it does not override via `--actor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionActor {
+    /// Local Qwen3-VL subprocess.
+    Vlm,
+    /// External agent via lcu decide / lcu act.
+    Agent,
+}
+
 /// Handle to the single-instance runtime owned by the desktop app.
 pub struct Runtime {
     paths: RuntimePaths,
@@ -52,14 +61,16 @@ pub struct Runtime {
     backend: Arc<dyn PlatformBackend>,
     effect_guard: Arc<dyn EffectGuard>,
     actor: Arc<dyn VisionActor>,
+    /// Present whenever agent decision mode is possible (task-level --actor
+    /// agent). The process-level default is `default_actor`.
+    agent_actor: Arc<lcu_model::AgentActor>,
+    /// Process-level default decision maker when a task does not override.
+    default_actor: DecisionActor,
     scheduler: TaskScheduler,
     /// High-risk actions waiting for GUI approval before gated execution.
     pending: Mutex<HashMap<String, PendingAction>>,
     /// Current task target for release on complete/cancel/fail/takeover.
     current_target: Mutex<Option<AppTarget>>,
-    /// Present when `LCU_VISION_ACTOR=agent`: the worker parks on this actor
-    /// while the external agent decides (lcu decide / lcu act).
-    agent_actor: Option<Arc<lcu_model::AgentActor>>,
 }
 
 impl Runtime {
@@ -80,7 +91,7 @@ impl Runtime {
         if let Err(e) = backend.ensure_surfaces() {
             tracing::warn!(error = %e, "ensure_surfaces at runtime start");
         }
-        let (actor, agent_actor) = default_product_actor();
+        let (actor, agent_actor, default_actor) = default_product_actor();
         let runtime = Self {
             paths,
             entry,
@@ -95,6 +106,7 @@ impl Runtime {
             pending: Mutex::new(HashMap::new()),
             current_target: Mutex::new(None),
             agent_actor,
+            default_actor,
         };
         // A previous process may have crashed with tasks in flight. They have no
         // worker and no budget behind them after restart; pause them so the user
@@ -123,15 +135,15 @@ impl Runtime {
             scheduler: TaskScheduler::default(),
             pending: Mutex::new(HashMap::new()),
             current_target: Mutex::new(None),
-            agent_actor: None,
+            agent_actor: Arc::new(lcu_model::AgentActor::new()),
+            default_actor: DecisionActor::Vlm,
         })
     }
 
-    /// Install an agent decision actor (tests and `LCU_VISION_ACTOR=agent`
-    /// after construction). Sets both the worker actor and the IPC handle.
+    /// Replace the agent decision actor (tests; also lets a task-level
+    /// `--actor agent` override the process default).
     pub fn set_agent_actor(&mut self, actor: Arc<lcu_model::AgentActor>) {
-        self.actor = actor.clone();
-        self.agent_actor = Some(actor);
+        self.agent_actor = actor;
     }
 
     pub fn backend(&self) -> &dyn PlatformBackend {
@@ -202,16 +214,18 @@ impl Runtime {
         caller: CallerIdentity,
         app_selector: Option<AppSelector>,
     ) -> LcuResult<TaskRecord> {
-        self.submit_task_with_limits(goal, caller, app_selector, None)
+        self.submit_task_with_limits(goal, caller, app_selector, None, None)
     }
 
-    /// Submit with optional per-task step budget (CLI `--max-steps`).
+    /// Submit with optional per-task step budget (CLI `--max-steps`) and
+    /// decision maker (`actor`: `vlm` | `agent`; None follows the Runtime).
     pub fn submit_task_with_limits(
         &self,
         goal: impl Into<String>,
         caller: CallerIdentity,
         app_selector: Option<AppSelector>,
         max_steps: Option<u32>,
+        actor: Option<String>,
     ) -> LcuResult<TaskRecord> {
         let active = self
             .list_tasks()
@@ -230,7 +244,18 @@ impl Runtime {
                 ),
             ));
         }
-        let record = TaskRecord::new(goal, caller, app_selector);
+        let mut record = TaskRecord::new(goal, caller, app_selector);
+        if let Some(actor) = actor.as_deref() {
+            match actor {
+                "vlm" | "qwen" | "agent" => record.actor = Some(actor.to_string()),
+                other => {
+                    return Err(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        format!("unknown --actor {other:?}; use vlm or agent"),
+                    ));
+                }
+            }
+        }
         let event = TaskEvent {
             task_id: record.task_id.clone(),
             state: record.state,
@@ -484,10 +509,9 @@ impl Runtime {
         // parked propose_action immediately instead of leaving the worker
         // blocked until the decision timeout.
         if record.state.is_terminal() || record.state == TaskState::PausedByUser {
-            if let (Some(actor), Some(obs_id)) =
-                (&self.agent_actor, &record.last_observation_id)
-            {
-                actor.abort_waiting(&obs_id.0, &format!("task {:?}", record.state));
+            if let Some(obs_id) = &record.last_observation_id {
+                self.agent_actor
+                    .abort_waiting(&obs_id.0, &format!("task {:?}", record.state));
             }
         }
         Ok(record)
@@ -1040,6 +1064,11 @@ pub enum InternalRequest {
         source_name: Option<String>,
         #[serde(default)]
         max_steps: Option<u32>,
+        /// Per-task decision maker: `vlm` (local model) or `agent` (external
+        /// agent via lcu decide/act). Default: follow the Runtime process
+        /// setting (LCU_VISION_ACTOR).
+        #[serde(default)]
+        actor: Option<String>,
     },
     Status {
         task_id: String,
@@ -1167,6 +1196,7 @@ impl Runtime {
                 source,
                 source_name,
                 max_steps,
+                actor,
             } => {
                 let caller = Self::caller_from_source(source, source_name);
                 let selector = app_id.map(|app_id| {
@@ -1185,7 +1215,7 @@ impl Runtime {
                         window_title_contains: None,
                     }
                 });
-                match self.submit_task_with_limits(goal, caller, selector, max_steps) {
+                match self.submit_task_with_limits(goal, caller, selector, max_steps, actor) {
                     Ok(task) => InternalResponse::Task { task },
                     Err(err) => Self::map_err_resp(err),
                 }
@@ -1220,12 +1250,7 @@ impl Runtime {
                 }
             }
             InternalRequest::GetDecision { task_id } => {
-                let Some(actor) = &self.agent_actor else {
-                    return Self::map_err_resp(LcuError::coded(
-                        ErrorCode::InvalidRequest,
-                        "runtime is not in agent decision mode (start lcu-desktop with LCU_VISION_ACTOR=agent)",
-                    ));
-                };
+                let actor = &self.agent_actor;
                 let record = match self.get_task(&TaskId(task_id.clone())) {
                     Ok(r) => r,
                     Err(err) => return Self::map_err_resp(err),
@@ -1261,12 +1286,7 @@ impl Runtime {
                 expected_effect,
                 confidence,
             } => {
-                let Some(actor) = &self.agent_actor else {
-                    return Self::map_err_resp(LcuError::coded(
-                        ErrorCode::InvalidRequest,
-                        "runtime is not in agent decision mode (start lcu-desktop with LCU_VISION_ACTOR=agent)",
-                    ));
-                };
+                let actor = &self.agent_actor;
                 let record = match self.get_task(&TaskId(task_id.clone())) {
                     Ok(r) => r,
                     Err(err) => return Self::map_err_resp(err),

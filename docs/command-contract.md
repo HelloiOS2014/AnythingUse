@@ -60,11 +60,11 @@ Surface permissions (online `doctor`, i.e. Runtime reachable):
 
 When the Runtime is unreachable, offline `doctor` reports `mac_window_service` / `chrome_control_host` socket presence instead.
 
-### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--json]`
+### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--actor vlm|agent] [--json]`
 
 Submit a high-level natural-language task.
 
-`source` and `source-name` are display metadata, not authentication. Tasks enter one serial FIFO queue; `waiting_user` and user-paused tasks release the execution slot.
+`source` and `source-name` are display metadata, not authentication. `--actor vlm|agent` selects the decision maker for this task (default: the Runtime process setting, `LCU_VISION_ACTOR`); tasks of either kind may coexist in one queue. Tasks enter one serial FIFO queue; `waiting_user` and user-paused tasks release the execution slot.
 
 Task wire states include `queued`, `running`, `waiting_user` (legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), `succeeded`, `failed`, `cancelled`. After GUI approval or user resume, the task returns to `running` (not a new `queued` enqueue).
 

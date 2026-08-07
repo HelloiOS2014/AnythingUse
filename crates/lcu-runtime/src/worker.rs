@@ -253,6 +253,8 @@ impl Runtime {
             last_action_summary: last_summary.clone(),
         };
         let propose_t0 = std::time::Instant::now();
+        // Per-task decision maker (--actor override or Runtime default).
+        let decision_actor = self.decision_actor(task.actor.as_deref());
         // One automatic retry: propose failures are frequently transient on MPS
         // (budget-cut generation, first-inference compile, momentary system
         // load). A single failed propose must not kill a task that would
@@ -265,7 +267,7 @@ impl Runtime {
             if !self.task_is_running(task_id) {
                 return Ok(StepOutcome::Continue);
             }
-            match self.actor.propose_action(&model_obs, &ctx) {
+            match decision_actor.propose_action(&model_obs, &ctx) {
                 Ok(p) => {
                     proposal = Some(p);
                     break;
@@ -280,7 +282,7 @@ impl Runtime {
                         tracing::warn!(
                             task_id = %task_id.0,
                             error = %e,
-                            actor = self.actor.name(),
+                            actor = decision_actor.name(),
                             propose_ms = propose_t0.elapsed().as_millis() as u64,
                             "vision propose failed; retrying once"
                         );
@@ -295,7 +297,7 @@ impl Runtime {
                     tracing::warn!(
                         task_id = %task_id.0,
                         error = %e,
-                        actor = self.actor.name(),
+                        actor = decision_actor.name(),
                         propose_ms = propose_t0.elapsed().as_millis() as u64,
                         "vision propose failed twice; task FAILED (no heuristic auto-fallback)"
                     );
@@ -322,7 +324,7 @@ impl Runtime {
             propose_ms,
             action = ?redacted_action,
             last_action_summary = ?last_summary,
-            actor = self.actor.name(),
+            actor = decision_actor.name(),
             "product step model proposal"
         );
 
@@ -747,6 +749,27 @@ impl Runtime {
         }
     }
 
+    /// Pick the decision maker for a task: per-task `--actor` override, else
+    /// the Runtime process default.
+    fn decision_actor(&self, task_actor: Option<&str>) -> Arc<dyn VisionActor> {
+        match task_actor {
+            Some("agent") => self.agent_actor.clone(),
+            Some("vlm") | Some("qwen") => self.actor.clone(),
+            Some(other) => {
+                tracing::warn!(actor = other, "unknown task actor; using runtime default");
+                self.default_actor_arc()
+            }
+            None => self.default_actor_arc(),
+        }
+    }
+
+    fn default_actor_arc(&self) -> Arc<dyn VisionActor> {
+        match self.default_actor {
+            crate::DecisionActor::Vlm => self.actor.clone(),
+            crate::DecisionActor::Agent => self.agent_actor.clone(),
+        }
+    }
+
     fn task_is_running(&self, task_id: &TaskId) -> bool {
         matches!(
             self.get_task(task_id).map(|t| t.state),
@@ -920,46 +943,44 @@ pub fn resolve_selector(goal: &str, explicit: Option<AppSelector>) -> LcuResult<
     })
 }
 
-/// Default product actor with optional agent decision mode.
+/// Default product actors: the VLM subprocess and the agent decision actor
+/// are both always available; the process-level default is chosen from
+/// `LCU_VISION_ACTOR` and tasks may override per-task via `--actor`.
 ///
-/// - `LCU_VISION_ACTOR=auto` (default) / `qwen` / `vlm`: subprocess Qwen3-VL
-/// - `LCU_VISION_ACTOR=agent`: external agent decides via `lcu decide` / `lcu act`
-/// - unknown values warn and fall back to Qwen
+/// - `LCU_VISION_ACTOR=auto` (default) / `qwen` / `vlm`: tasks default to VLM
+/// - `LCU_VISION_ACTOR=agent`: tasks default to the external agent
+/// - unknown values warn and default to VLM
 ///
-/// Returns `(actor, agent_actor)`; `agent_actor` is `Some` only in agent mode
-/// and lets the Runtime serve GetDecision/SubmitDecision and abort parked
-/// workers on cancel/pause.
-pub fn default_product_actor() -> (Arc<dyn VisionActor>, Option<Arc<lcu_model::AgentActor>>) {
+/// Returns `(vlm_actor, agent_actor, default)`.
+pub fn default_product_actor() -> (
+    Arc<dyn VisionActor>,
+    Arc<lcu_model::AgentActor>,
+    crate::DecisionActor,
+) {
     let choice = std::env::var("LCU_VISION_ACTOR")
         .unwrap_or_else(|_| "auto".into())
         .to_lowercase();
-    match choice.as_str() {
+    let default = match choice.as_str() {
         "agent" => {
-            tracing::info!("product actor: agent decision mode (lcu decide / lcu act)");
-            let actor = Arc::new(lcu_model::AgentActor::new());
-            (actor.clone(), Some(actor))
+            tracing::info!("product actor: default = agent (lcu decide / lcu act)");
+            crate::DecisionActor::Agent
         }
-        "auto" | "qwen" | "vlm" => {
-            let repo = resolve_repo_root();
-            if !qwen_assets_ready(&repo) {
-                tracing::error!(
-                    repo = %repo.display(),
-                    "product actor: qwen assets missing; tasks will FAIL until model/worker ready"
-                );
-            } else {
-                tracing::info!(
-                    repo = %repo.display(),
-                    "product actor: qwen subprocess"
-                );
-            }
-            (Arc::new(SubprocessVisionActor::from_repo_root(&repo)), None)
-        }
+        "auto" | "qwen" | "vlm" => crate::DecisionActor::Vlm,
         other => {
-            tracing::warn!(actor = other, "unknown LCU_VISION_ACTOR; falling back to qwen");
-            let repo = resolve_repo_root();
-            (Arc::new(SubprocessVisionActor::from_repo_root(&repo)), None)
+            tracing::warn!(actor = other, "unknown LCU_VISION_ACTOR; defaulting to vlm");
+            crate::DecisionActor::Vlm
         }
+    };
+    let repo = resolve_repo_root();
+    if !qwen_assets_ready(&repo) {
+        tracing::error!(
+            repo = %repo.display(),
+            "product actor: qwen assets missing; vlm tasks will FAIL until model/worker ready"
+        );
     }
+    let vlm: Arc<dyn VisionActor> = Arc::new(SubprocessVisionActor::from_repo_root(&repo));
+    let agent = Arc::new(lcu_model::AgentActor::new());
+    (vlm, agent, default)
 }
 
 fn resolve_repo_root() -> std::path::PathBuf {
@@ -1240,7 +1261,7 @@ mod tests {
     }
 
     fn agent_task(rt: &Runtime) -> TaskRecord {
-        rt.submit_task(
+        rt.submit_task_with_limits(
             "click Open in Finder",
             CallerIdentity::HumanCli,
             Some(AppSelector {
@@ -1248,6 +1269,8 @@ mod tests {
                 pid: None,
                 window_title_contains: None,
             }),
+            None,
+            Some("agent".into()),
         )
         .unwrap()
     }
@@ -1374,4 +1397,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_level_actor_mixing_vlm_and_agent() {
+        // Same runtime serves both decision makers: a default (VLM) task runs
+        // to completion, then an --actor agent task parks for lcu decide.
+        let (rt, _agent) = agent_test_runtime();
+        // rt.set_actor is FakeActor in new_for_test (VLM side).
+        let vlm_task = rt
+            .submit_task_with_limits(
+                "click Open in Finder",
+                CallerIdentity::HumanCli,
+                None,
+                None,
+                None, // default → VLM (FakeActor)
+            )
+            .unwrap();
+        let tid = vlm_task.task_id.clone();
+        let rt2 = rt.clone();
+        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
+        // FakeActor emits wait/done quickly; task should terminate without
+        // any agent decision being involved.
+        worker.join().unwrap();
+        assert!(
+            rt.get_task(&vlm_task.task_id).unwrap().state.is_terminal(),
+            "vlm task must not park on the agent actor"
+        );
+
+        // Now an agent task on the same runtime parks for a decision.
+        let agent_task = rt
+            .submit_task_with_limits(
+                "click Open in Finder",
+                CallerIdentity::HumanCli,
+                None,
+                None,
+                Some("agent".into()),
+            )
+            .unwrap();
+        let tid2 = agent_task.task_id.clone();
+        let rt3 = rt.clone();
+        let worker2 = std::thread::spawn(move || rt3.run_task_to_completion(&tid2));
+        let mut parked = false;
+        for _ in 0..300 {
+            if matches!(
+                rt.handle_internal(InternalRequest::GetDecision {
+                    task_id: agent_task.task_id.0.clone(),
+                }),
+                InternalResponse::Decision { .. }
+            ) {
+                parked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(parked, "agent task must park for a decision");
+        rt.cancel_task(&agent_task.task_id).unwrap();
+        worker2.join().unwrap();
+        assert_eq!(
+            rt.get_task(&agent_task.task_id).unwrap().state,
+            TaskState::Cancelled
+        );
+    }
 }

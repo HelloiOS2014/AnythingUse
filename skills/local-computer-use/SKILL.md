@@ -26,7 +26,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 | Command | Purpose |
 |---|---|
 | `lcu doctor [--json]` | Permissions (`screen_recording`/`accessibility`/`input_monitoring`), runtime reachability, private entry, surface connectivity in `notes` (`mac_window` / `chrome_tab`) |
-| `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--json]` | Submit a task (source is display-only) |
+| `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--actor vlm\|agent] [--json]` | Submit a task (`--actor` picks the decision maker per task; default follows the Runtime) |
 | `lcu list [--json]` | List global queue tasks |
 | `lcu status <task-id> [--json]` | Task state |
 | `lcu watch <task-id> [--seconds N]` | Incremental JSONL status lines |
@@ -42,8 +42,9 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 Agent decision mode workflow (decision maker = the agent itself, data surface identical to the local VLM):
 
 ```bash
-# 1. Runtime must run in agent mode
-LCU_VISION_ACTOR=agent lcu-desktop &
+# 1. Runtime runs normally (any mode); the task picks the agent as its
+#    decision maker, so no restart is needed.
+lcu run "<goal>" --app <id> --actor agent --json
 
 # 2. Submit a goal as usual
 lcu run "Open Downloads in Finder" --app com.apple.finder --json
