@@ -18,15 +18,33 @@ Tasks enter one serial FIFO queue. `waiting_user` and user-paused tasks release 
 - Optional Chrome surface: install native host + load unpacked extension (see below)
 - Optional: local Qwen3-VL weights under `models/Qwen3-VL-4B-Instruct` for VLM mode
 
-### Local model weights (optional)
+### Local model (optional — needed only for VLM decision mode)
+
+Two steps: Python env, then weights (~8 GB).
 
 ```bash
-# requires `hf` CLI or python package huggingface_hub
+# 1. Python env (Python 3.11+)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. Weights (uses `hf` CLI or huggingface_hub; writes models/Qwen3-VL-4B-Instruct)
 ./scripts/download_qwen3_vl.sh
-# override: LCU_MODEL_DIR=... LCU_MODEL_REPO=...
 ```
 
-Without weights, doctor and CLI still work; VLM propose path needs the model tree and a Python env with the project’s vision stack (see `.venv` / model worker).
+`lcu-desktop` auto-detects the model (`models/Qwen3-VL-4B-Instruct` relative to
+the repo, or `LCU_MODEL_DIR`). Without weights, `lcu` and `lcu-desktop` still
+work; only VLM-decided tasks fail — use `--actor agent` instead.
+
+VLM knobs (env vars, defaults shown):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `LCU_MODEL_DIR` | `<repo>/models/Qwen3-VL-4B-Instruct` | Model weights directory (also honored by the download script) |
+| `LCU_MODEL_REPO` | `Qwen/Qwen3-VL-4B-Instruct` | HuggingFace repo for the download script |
+| `LCU_VLM_MAX_TIME` / `LCU_VLM_PROPOSE_SECS` | `180` | Per-propose wall budget (seconds) |
+| `LCU_VLM_TIMEOUT_SECS` | `240` | Rust-side hard timeout for one propose |
+| `LCU_VLM_MAX_IMAGE` | `384` | Screenshot downscale cap (px) |
+| `LCU_VLM_MAX_NEW` | `192` | Max generated tokens per propose |
 
 ## Install (dev)
 

@@ -62,7 +62,7 @@ cargo build -p lcu-cli -p lcu-desktop --release
   --app com.apple.finder --source agent --source-name codex --wait --json
 ```
 
-可选：Chrome 表面（`./native/chrome-control/scripts/install-native-host.sh`，然后 `chrome://extensions` → 开发者模式 → **Load unpacked** → `native/chrome-control/extension`）；本地 VLM 权重（`./scripts/download_qwen3_vl.sh`，`models/Qwen3-VL-4B-Instruct`）。
+可选：Chrome 表面（`./native/chrome-control/scripts/install-native-host.sh`，然后 `chrome://extensions` → 开发者模式 → **Load unpacked** → `native/chrome-control/extension`）；本地 VLM（`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`，再 `./scripts/download_qwen3_vl.sh`）。
 
 ## 以插件方式安装 Skill
 

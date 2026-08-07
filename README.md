@@ -64,7 +64,7 @@ cargo build -p lcu-cli -p lcu-desktop --release
   --app com.apple.finder --source agent --source-name codex --wait --json
 ```
 
-Optional: Chrome surface (`./native/chrome-control/scripts/install-native-host.sh`, then `chrome://extensions` → Developer mode → **Load unpacked** → `native/chrome-control/extension`); local VLM weights (`./scripts/download_qwen3_vl.sh`, `models/Qwen3-VL-4B-Instruct`).
+Optional: Chrome surface (`./native/chrome-control/scripts/install-native-host.sh`, then `chrome://extensions` → Developer mode → **Load unpacked** → `native/chrome-control/extension`); local VLM (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`, then `./scripts/download_qwen3_vl.sh`).
 
 ## Install the Skill as a plugin
 

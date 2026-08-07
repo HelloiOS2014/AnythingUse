@@ -18,6 +18,7 @@ cp "$ROOT/native/macos-window-service/.build/release/macos-window-service" "$STA
 cp -R "$ROOT/native/chrome-control/extension" "$STAGE/chrome-extension"
 cp "$ROOT/native/chrome-control/native-host/host.mjs" "$STAGE/native-host/"
 cp "$ROOT/native/chrome-control/native-host/com.lcu.chrome_control.json.template" "$STAGE/native-host/"
+cp "$ROOT/requirements.txt" "$STAGE/"
 cp "$ROOT/native/chrome-control/scripts/install-native-host.sh" "$STAGE/scripts/"
 cp "$ROOT/native/chrome-control/scripts/uninstall-native-host.sh" "$STAGE/scripts/"
 cp -R "$ROOT/skills/local-computer-use" "$STAGE/skills/"
