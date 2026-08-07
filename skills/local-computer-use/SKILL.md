@@ -42,14 +42,11 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 Agent decision mode workflow (decision maker = the agent itself, data surface identical to the local VLM):
 
 ```bash
-# 1. Runtime runs normally (any mode); the task picks the agent as its
-#    decision maker, so no restart is needed.
-lcu run "<goal>" --app <id> --actor agent --json
+# 1. Submit a goal with this task's decision maker set to the agent
+#    (no Runtime restart needed; --actor overrides the process default)
+lcu run "Open Downloads in Finder" --app com.apple.finder --actor agent --json
 
-# 2. Submit a goal as usual
-lcu run "Open Downloads in Finder" --app com.apple.finder --json
-
-# 3. Decision loop: fetch observation → decide → submit
+# 2. Decision loop: fetch observation → decide → submit
 lcu decide <task-id> --wait --json   # elements + image_path (read the image BEFORE submitting)
 lcu act <task-id> --observation-id <obs> --action '{"kind":"semantic","type":"invoke","element_id":"e1"}'
 # ... repeat until done
