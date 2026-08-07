@@ -29,7 +29,7 @@ impl RuntimePaths {
     /// `LCU_RUNTIME_ROOT` is the documented override (shared with the Chrome
     /// native-messaging host and install scripts); `LCU_RUNTIME_DIR` remains a
     /// compatible alias used by older local setups. Without either, defaults to
-    /// `~/Library/Application Support/LocalComputerUse`.
+    /// `~/Library/Application Support/AnythingUse`.
     pub fn default_user() -> LcuResult<Self> {
         if let Some(dir) = std::env::var_os("LCU_RUNTIME_ROOT")
             .or_else(|| std::env::var_os("LCU_RUNTIME_DIR"))
@@ -42,7 +42,7 @@ impl RuntimePaths {
                 "cannot resolve user data directory",
             )
         })?;
-        Ok(Self::from_root(base.join("LocalComputerUse")))
+        Ok(Self::from_root(base.join("AnythingUse")))
     }
 
     pub fn ensure_layout(&self) -> LcuResult<()> {

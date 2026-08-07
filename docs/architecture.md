@@ -1,6 +1,6 @@
 # AnythingUse Architecture
 
-CLI and on-disk paths still use the **LCU** / `LocalComputerUse` codename; see [Delivery status](status.md) for the naming map.
+The CLI and crates keep the historical **LCU** codename (`lcu`, `lcu-*`); the data root is `~/Library/Application Support/AnythingUse`. See [Delivery status](status.md) for the naming map.
 
 ## Design goals
 

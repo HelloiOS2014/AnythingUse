@@ -14,14 +14,14 @@
 
 - Build: `cd native/macos-window-service && swift build -c release`
 - Set `LCU_MACOS_WINDOW_SERVICE` to the binary path if not under `.build/release/`
-- Socket: `~/Library/Application Support/LocalComputerUse/macos-window.sock`
+- Socket: `~/Library/Application Support/AnythingUse/macos-window.sock`
 
 ## `chrome_control_host` disconnected
 
 - Run `./native/chrome-control/scripts/install-native-host.sh`
 - Load unpacked extension from `native/chrome-control/extension`
 - Chrome must be running so Native Messaging can launch the host
-- Socket: `~/Library/Application Support/LocalComputerUse/chrome-control.sock` (no TCP)
+- Socket: `~/Library/Application Support/AnythingUse/chrome-control.sock` (no TCP)
 
 ## Task stuck in `waiting_user`
 

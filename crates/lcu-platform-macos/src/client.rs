@@ -21,7 +21,7 @@ pub fn default_socket_path() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("LocalComputerUse")
+        .join("AnythingUse")
         .join("macos-window.sock")
 }
 
@@ -255,7 +255,7 @@ mod tests {
     fn default_socket_is_under_local_computer_use() {
         let p = default_socket_path();
         assert!(
-            p.to_string_lossy().contains("LocalComputerUse")
+            p.to_string_lossy().contains("AnythingUse")
                 || std::env::var("LCU_MACOS_WINDOW_SOCK").is_ok()
         );
         assert!(p.to_string_lossy().ends_with("macos-window.sock")

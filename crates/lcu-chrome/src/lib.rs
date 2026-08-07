@@ -46,7 +46,7 @@ pub fn default_runtime_root() -> LcuResult<PathBuf> {
             "cannot resolve user data directory for Chrome control socket",
         )
     })?;
-    Ok(base.join("LocalComputerUse"))
+    Ok(base.join("AnythingUse"))
 }
 
 /// Unix socket path for the Chrome control host (private entry sibling of runtime.sock).

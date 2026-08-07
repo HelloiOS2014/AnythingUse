@@ -4,7 +4,7 @@
 
 AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** 真实的 macOS 应用和用户已安装的 Chrome。**未来：** Windows 及其他端点类型，通过同一套命令模型扩展。
 
-**命名说明：** 产品名是 **AnythingUse**。公开 CLI 仍是 `lcu`；crate 与 socket 沿用历史代号 **LCU** / `LocalComputerUse`（数据根目录：`~/Library/Application Support/LocalComputerUse`）。两者是同一个产品。
+**命名说明：** 产品名是 **AnythingUse**。公开 CLI 仍是 `lcu`；crate 与 socket 沿用历史代号 **LCU**（`lcu`、`lcu-*`）；数据根目录为 `~/Library/Application Support/AnythingUse`。
 
 ## 为什么是 AnythingUse
 

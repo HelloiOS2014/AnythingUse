@@ -6,7 +6,7 @@
 
 AnythingUse is a local-first control layer for humans and Agents. **Today:** real macOS applications and the user's installed Chrome. **Future:** Windows and other endpoint types through the same command-oriented model.
 
-**Naming:** product name is **AnythingUse**. The public CLI is still `lcu`; crates and sockets keep the historical **LCU** / `LocalComputerUse` codename (data root: `~/Library/Application Support/LocalComputerUse`). Treat them as one product.
+**Naming:** product name is **AnythingUse**. The public CLI is still `lcu`; crates, sockets, and the CLI keep the historical **LCU** codename (`lcu`, `lcu-*`); the data root is `~/Library/Application Support/AnythingUse`.
 
 ## Why AnythingUse
 

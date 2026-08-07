@@ -2,7 +2,7 @@
 
 ## What this is
 
-**AnythingUse** (CLI / data root still branded **LCU** / `LocalComputerUse`) runs a single-instance Runtime on your Mac. Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
+**AnythingUse** runs a single-instance Runtime on your Mac (CLI codename `lcu`; data root `~/Library/Application Support/AnythingUse`). Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
 
 Execution surfaces:
 

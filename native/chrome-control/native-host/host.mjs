@@ -8,7 +8,7 @@
  * Control plane (product invariant):
  *   - Unix domain socket ONLY under the Runtime private entry directory
  *   - Path: <runtime_root>/chrome-control.sock
- *     default runtime_root = ~/Library/Application Support/LocalComputerUse
+ *     default runtime_root = ~/Library/Application Support/AnythingUse
  *   - NEVER binds TCP for control
  *
  * Bridge:
@@ -40,7 +40,7 @@ function runtimeRoot() {
     os.homedir(),
     "Library",
     "Application Support",
-    "LocalComputerUse"
+    "AnythingUse"
   );
 }
 

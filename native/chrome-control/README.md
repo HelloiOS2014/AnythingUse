@@ -41,7 +41,7 @@ com.lcu.chrome_control
 Private control socket (created when Chrome launches the host):
 
 ```text
-~/Library/Application Support/LocalComputerUse/chrome-control.sock
+~/Library/Application Support/AnythingUse/chrome-control.sock
 ```
 
 Override root with `LCU_RUNTIME_ROOT` (same as Rust `RuntimePaths`).
@@ -63,7 +63,7 @@ Writes:
 
 ```text
 ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lcu.chrome_control.json
-~/Library/Application Support/LocalComputerUse/chrome-control-host-wrapper.sh
+~/Library/Application Support/AnythingUse/chrome-control-host-wrapper.sh
 ```
 
 ### 2. Load the extension

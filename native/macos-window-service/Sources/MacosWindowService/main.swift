@@ -93,7 +93,7 @@ func printHelp() {
           {"id":"7","method":"detect_conflict","params":{"pid":1,"window_id":2}}
 
         Default socket:
-          ~/Library/Application Support/LocalComputerUse/macos-window.sock
+          ~/Library/Application Support/AnythingUse/macos-window.sock
           override: --socket PATH or env LCU_MACOS_WINDOW_SOCK
 
         Build:
@@ -111,7 +111,7 @@ func resolveSocketPath(args: [String]) -> String {
     }
     let home = FileManager.default.homeDirectoryForCurrentUser
     return home
-        .appendingPathComponent("Library/Application Support/LocalComputerUse/macos-window.sock")
+        .appendingPathComponent("Library/Application Support/AnythingUse/macos-window.sock")
         .path
 }
 

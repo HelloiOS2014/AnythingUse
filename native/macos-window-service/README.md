@@ -26,7 +26,7 @@ swift build -c release
 Default socket:
 
 ```text
-~/Library/Application Support/LocalComputerUse/macos-window.sock
+~/Library/Application Support/AnythingUse/macos-window.sock
 ```
 
 Override: `--socket PATH` or `LCU_MACOS_WINDOW_SOCK`.

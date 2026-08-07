@@ -3,7 +3,7 @@
 Version: **v3.2** (macOS core)  
 Branch: `main`  
 Product name: **AnythingUse**  
-Command / data root codename: **LCU** / `LocalComputerUse`
+Command codename: **LCU** (`lcu`, `lcu-*`); data root: `~/Library/Application Support/AnythingUse`
 
 ## What is delivered
 
@@ -45,7 +45,7 @@ Neither blocks claiming macOS core capability on `main`.
 | CLI binary | `lcu` |
 | Desktop host | `lcu-desktop` |
 | Agent Skill directory | `skills/local-computer-use` |
-| Runtime data directory | `~/Library/Application Support/LocalComputerUse` |
+| Runtime data directory | `~/Library/Application Support/AnythingUse` |
 | Crates / native prefixes | `lcu-*`, historical “Local Computer Use” phrasing in some docs |
 
 “Local Computer Use” in Skill and older headings is the historical product line name; new prose should prefer **AnythingUse** while keeping path and binary names stable.

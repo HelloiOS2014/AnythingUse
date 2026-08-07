@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HOST_NAME="com.lcu.chrome_control"
-RUNTIME_ROOT="${LCU_RUNTIME_ROOT:-${HOME}/Library/Application Support/LocalComputerUse}"
+RUNTIME_ROOT="${LCU_RUNTIME_ROOT:-${HOME}/Library/Application Support/AnythingUse}"
 
 rm -f "${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts/${HOST_NAME}.json"
 rm -f "${HOME}/Library/Application Support/Chromium/NativeMessagingHosts/${HOST_NAME}.json"
