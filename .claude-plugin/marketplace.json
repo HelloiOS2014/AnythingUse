@@ -1,0 +1,10 @@
+{
+  "name": "anythinguse",
+  "description": "AnythingUse — local-first control plane for real macOS apps and Chrome, from any agent.",
+  "plugins": [
+    {
+      "name": "anythinguse",
+      "source": "HelloiOS2014/AnythingUse"
+    }
+  ]
+}
