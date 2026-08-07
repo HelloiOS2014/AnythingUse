@@ -3,9 +3,9 @@
 This machine runs **AnythingUse** (`lcu`), a local-first control plane for
 operating real macOS applications and Chrome through one command surface.
 
-## For agents (any CLI: Grok Build, Claude Code, Codex, ...)
+## For agents (any CLI: Grok Build, Claude Code, ...)
 
-- Use the **`local-computer-use`** skill (`skills/local-computer-use/SKILL.md`).
+- Use the **`local-computer-use`** skill (`skills/local-computer-use/SKILL.md`). (Codex ships its own Computer Use and does not need this skill.)
   It is the only supported way to operate the desktop — never touch the
   private sockets or invent new protocols.
 - The skill ships as a plugin through this repo's marketplace:
