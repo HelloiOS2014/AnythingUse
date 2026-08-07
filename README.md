@@ -66,6 +66,17 @@ cargo build -p lcu-cli -p lcu-desktop --release
 
 Optional: Chrome surface (`./native/chrome-control/scripts/install-native-host.sh`, then `chrome://extensions` → Developer mode → **Load unpacked** → `native/chrome-control/extension`); local VLM weights (`./scripts/download_qwen3_vl.sh`, `models/Qwen3-VL-4B-Instruct`).
 
+## Install the Skill as a plugin (Claude Code / Grok Build)
+
+The `local-computer-use` skill ships as a plugin through this repo's marketplace. Skill updates ride the repo; the `lcu` binaries stay a separate build.
+
+```bash
+claude plugin marketplace add HelloiOS2014/AnythingUse
+claude plugin install anythinguse
+```
+
+Grok Build loads the same Claude-compatible plugin format (`grok plugin install` equivalents, or point its skills directory at `skills/local-computer-use`).
+
 ## Non-interference model
 
 Coexistence is not "pause whenever the target app is frontmost":
