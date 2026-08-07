@@ -160,6 +160,11 @@ impl Runtime {
         self.actor.warm_up()
     }
 
+    /// True when the local VLM is the process default decision maker.
+    pub fn is_vlm_default(&self) -> bool {
+        self.default_actor == DecisionActor::Vlm
+    }
+
     /// Override step/duration limits (catalog items / tests).
     pub fn set_limits(&mut self, limits: TaskLimits) {
         self.limits = limits;

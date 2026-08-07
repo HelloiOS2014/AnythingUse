@@ -24,7 +24,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Operate a specific application window without activating it |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
-| Decision maker | Pluggable: local Qwen3-VL subprocess (default) or the external Agent itself (`lcu decide` / `lcu act`) |
+| Decision maker | External Agent by default (`lcu run --actor agent` + `lcu decide`/`lcu act`); local Qwen3-VL as an optional fallback (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
 | Safety | Effect-based risk checks, GUI-bound approval, takeover detection, fail-closed window isolation |
 | Persistence | Local SQLite task and event state |
@@ -46,7 +46,7 @@ flowchart LR
     USER["User input"] -. "same-target takeover" .-> RT
 ```
 
-The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: either the local VLM proposes an action, or — with `lcu run --actor agent` — an external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
+The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: by default the external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`); the local VLM is an optional fallback (`lcu run --actor vlm`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
 
 ## Quick start
 

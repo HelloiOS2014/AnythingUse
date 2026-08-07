@@ -943,13 +943,16 @@ pub fn resolve_selector(goal: &str, explicit: Option<AppSelector>) -> LcuResult<
     })
 }
 
-/// Default product actors: the VLM subprocess and the agent decision actor
-/// are both always available; the process-level default is chosen from
-/// `LCU_VISION_ACTOR` and tasks may override per-task via `--actor`.
+/// Default product actors: the agent decision actor is the DEFAULT decision
+/// maker; the local VLM subprocess is an optional fallback (device-bound,
+/// often too slow on consumer hardware). Both are always available; the
+/// process-level default is chosen from `LCU_VISION_ACTOR` and tasks may
+/// override per-task via `--actor`.
 ///
-/// - `LCU_VISION_ACTOR=auto` (default) / `qwen` / `vlm`: tasks default to VLM
-/// - `LCU_VISION_ACTOR=agent`: tasks default to the external agent
-/// - unknown values warn and default to VLM
+/// - `LCU_VISION_ACTOR=auto` (default) / `agent`: tasks default to the
+///   external agent (lcu decide / lcu act)
+/// - `LCU_VISION_ACTOR=vlm` / `qwen`: tasks default to the local VLM
+/// - unknown values warn and default to agent
 ///
 /// Returns `(vlm_actor, agent_actor, default)`.
 pub fn default_product_actor() -> (
@@ -961,14 +964,17 @@ pub fn default_product_actor() -> (
         .unwrap_or_else(|_| "auto".into())
         .to_lowercase();
     let default = match choice.as_str() {
-        "agent" => {
+        "vlm" | "qwen" => {
+            tracing::info!("product actor: default = vlm (local model)");
+            crate::DecisionActor::Vlm
+        }
+        "agent" | "auto" => {
             tracing::info!("product actor: default = agent (lcu decide / lcu act)");
             crate::DecisionActor::Agent
         }
-        "auto" | "qwen" | "vlm" => crate::DecisionActor::Vlm,
         other => {
-            tracing::warn!(actor = other, "unknown LCU_VISION_ACTOR; defaulting to vlm");
-            crate::DecisionActor::Vlm
+            tracing::warn!(actor = other, "unknown LCU_VISION_ACTOR; defaulting to agent");
+            crate::DecisionActor::Agent
         }
     };
     let repo = resolve_repo_root();

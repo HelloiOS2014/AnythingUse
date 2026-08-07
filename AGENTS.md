@@ -17,12 +17,12 @@ operating real macOS applications and Chrome through one command surface.
 - For machines other than the dev box: copy this file to
   `~/.grok/AGENTS.md` and `~/.claude/CLAUDE.md` so the agents know about
   AnythingUse from any working directory.
-- **Decision maker is pluggable**: the default is the local Qwen3-VL
-  subprocess (`lcu run "<goal>"` decides automatically). An agent can also
-  decide itself: start the runtime with `LCU_VISION_ACTOR=agent`, submit a
-  goal, then loop `lcu decide <task-id> --wait --json` → read the screenshot
-  path → `lcu act <task-id> --observation-id <obs> --action '<json>'` →
-  finish with a `done` action.
+- **Decision maker is pluggable, per task**: the agent itself is the default
+  (`lcu run "<goal>"` → loop `lcu decide <task-id> --wait --json` → read the
+  screenshot path → `lcu act <task-id> --observation-id <obs> --action '<json>'`
+  → finish with a `done` action). `lcu run --actor vlm` uses the local
+  Qwen3-VL subprocess as an optional fallback. The Runtime default is
+  `LCU_VISION_ACTOR` (`auto` = agent); tasks of both kinds coexist in one queue.
 
 ## Quick reference
 

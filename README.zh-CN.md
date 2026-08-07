@@ -22,7 +22,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 |---|---|
 | macOS 应用 | 在不激活窗口的前提下操作特定应用窗口 |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
-| 决策器 | 可插拔：本地 Qwen3-VL 子进程（默认），或外部 Agent 亲自决策（`lcu decide` / `lcu act`） |
+| 决策器 | 默认由外部 Agent 亲自决策（`lcu run --actor agent` + `lcu decide`/`lcu act`）；本地 Qwen3-VL 作为可选备选（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
 | 安全 | 基于效果的风险检查、GUI 绑定审批、接管检测、fail-closed 窗口隔离 |
 | 持久化 | 本地 SQLite 任务与事件存储 |
@@ -44,7 +44,7 @@ flowchart LR
     USER["用户输入"] -. "同目标接管" .-> RT
 ```
 
-循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：本地 VLM 提议动作，或者——`lcu run --actor agent` ——外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
+循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：默认由外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）；本地 VLM 是可选备选（`lcu run --actor vlm`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
 
 ## 快速开始
 

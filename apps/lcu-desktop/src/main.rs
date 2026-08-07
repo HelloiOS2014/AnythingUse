@@ -59,12 +59,14 @@ fn main() -> Result<()> {
     // Product worker: observe → VLM → EffectGuard → act.
     runtime.start_scheduler();
 
-    // Background VLM warmup so the first task is not stuck on cold load.
-    {
+    // Background VLM warmup, only when the local model is the default
+    // decision maker (LCU_VISION_ACTOR=vlm). The agent is the default; its
+    // decisions need no 8GB model load.
+    if runtime.is_vlm_default() {
         let warm = Arc::clone(&runtime);
         thread::spawn(move || {
             if let Err(e) = warm.warm_vision_actor() {
-                tracing::warn!(error = %e, "vision warmup skipped/failed (heuristic still available)");
+                tracing::warn!(error = %e, "vision warmup skipped/failed");
             } else {
                 tracing::info!("vision actor warmup complete");
             }
