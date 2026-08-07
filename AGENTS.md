@@ -14,6 +14,9 @@ operating real macOS applications and Chrome through one command surface.
   https://github.com/HelloiOS2014/AnythingUse --trust` (Grok Build). Update
   with `claude plugin update` / `grok plugin update`. If it is missing from
   your toolset, read the SKILL.md directly.
+- For machines other than the dev box: copy this file to
+  `~/.grok/AGENTS.md` and `~/.claude/CLAUDE.md` so the agents know about
+  AnythingUse from any working directory.
 - **Decision maker is pluggable**: the default is the local Qwen3-VL
   subprocess (`lcu run "<goal>"` decides automatically). An agent can also
   decide itself: start the runtime with `LCU_VISION_ACTOR=agent`, submit a
