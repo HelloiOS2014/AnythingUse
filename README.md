@@ -46,7 +46,7 @@ flowchart LR
     USER["User input"] -. "same-target takeover" .-> RT
 ```
 
-The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: either the local VLM proposes an action, or — with `LCU_VISION_ACTOR=agent` — an external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
+The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: either the local VLM proposes an action, or — with `lcu run --actor agent` — an external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
 
 ## Quick start
 
@@ -66,16 +66,26 @@ cargo build -p lcu-cli -p lcu-desktop --release
 
 Optional: Chrome surface (`./native/chrome-control/scripts/install-native-host.sh`, then `chrome://extensions` → Developer mode → **Load unpacked** → `native/chrome-control/extension`); local VLM weights (`./scripts/download_qwen3_vl.sh`, `models/Qwen3-VL-4B-Instruct`).
 
-## Install the Skill as a plugin (Claude Code / Grok Build)
+## Install the Skill as a plugin
 
-The `local-computer-use` skill ships as a plugin through this repo's marketplace. Skill updates ride the repo; the `lcu` binaries stay a separate build.
+The `local-computer-use` skill ships as a plugin from this repo. **Install** (one of):
 
 ```bash
+# Claude Code
 claude plugin marketplace add HelloiOS2014/AnythingUse
 claude plugin install anythinguse
+
+# Grok Build
+grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust
 ```
 
-Grok Build loads the same Claude-compatible plugin format (`grok plugin install` equivalents, or point its skills directory at `skills/local-computer-use`).
+**Update**:
+
+```bash
+claude plugin update anythinguse    # or: grok plugin update
+```
+
+Skill updates ride the repo; the `lcu` binaries stay a separate build.
 
 ## Non-interference model
 

@@ -44,7 +44,7 @@ flowchart LR
     USER["用户输入"] -. "同目标接管" .-> RT
 ```
 
-循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：本地 VLM 提议动作，或者——设 `LCU_VISION_ACTOR=agent` ——外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
+循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：本地 VLM 提议动作，或者——`lcu run --actor agent` ——外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
 
 ## 快速开始
 
@@ -63,6 +63,27 @@ cargo build -p lcu-cli -p lcu-desktop --release
 ```
 
 可选：Chrome 表面（`./native/chrome-control/scripts/install-native-host.sh`，然后 `chrome://extensions` → 开发者模式 → **Load unpacked** → `native/chrome-control/extension`）；本地 VLM 权重（`./scripts/download_qwen3_vl.sh`，`models/Qwen3-VL-4B-Instruct`）。
+
+## 以插件方式安装 Skill
+
+`local-computer-use` 技能以插件形式从这个仓库分发。**安装**（二选一）：
+
+```bash
+# Claude Code
+claude plugin marketplace add HelloiOS2014/AnythingUse
+claude plugin install anythinguse
+
+# Grok Build
+grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust
+```
+
+**更新**：
+
+```bash
+claude plugin update anythinguse    # 或：grok plugin update
+```
+
+技能更新随仓库走；`lcu` 二进制保持独立构建。
 
 ## 非干扰模型
 
