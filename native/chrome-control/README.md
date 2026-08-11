@@ -64,26 +64,35 @@ Writes:
 ```text
 ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lcu.chrome_control.json
 ~/Library/Application Support/AnythingUse/chrome-control-host-wrapper.sh
+~/Library/Application Support/AnythingUse/native-host/host.mjs
+~/Library/Application Support/AnythingUse/chrome-extension/
 ```
 
 ### 2. Load the extension
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
-3. **Load unpacked** → `native/chrome-control/extension`
+3. **Load unpacked** → the installer's printed `extension:` path (default: `~/Library/Application Support/AnythingUse/chrome-extension`)
 4. Confirm id `dcmfagbbcdpbmggmpngkhegbidepcogk`
 
 Chrome 150+ blocks CLI `--load-extension`; interactive load is required.
+The repository's `native/chrome-control/extension` is only the installer source;
+do not load it directly. If `LCU_RUNTIME_ROOT` is set, use the path printed by
+the installer; re-run it to update the copied directory.
 
 ## Runtime methods
 
 Extension dispatch (via native host Unix socket):
 
 - `ping` / `get_state`
-- `claim` / `start_task` — background task tab (`https://example.com/` default; never `chrome://` — debugger cannot attach); navigation via VLM actions; always `active:false`
+- `claim` / `start_task` — background task tab (`https://example.com/` default; never `chrome://` — debugger cannot attach); always `active:false`
 - `handoff` — rebind task id without detaching
 - `observe` / `act` / `navigate` / `type` / `click` / `read`
 - `release` / `end_task` — detach debugger + drop lease (optional close tab)
 - `cleanup` — force detach + drop lease (cancel / crash / disconnect)
 
 Takeover (user activates the task tab or cancels debugger) detaches the debugger immediately and never re-activates a previously recorded user tab.
+
+`navigate` is reached only through the shared `lcu` semantic action contract:
+`{"kind":"semantic","type":"navigate","url":"https://example.com/"}`. It accepts
+only explicit HTTP(S) URLs with a host. Do not call the native-host method directly.

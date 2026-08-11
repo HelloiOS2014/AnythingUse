@@ -84,6 +84,20 @@ fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String
         Action::Done { .. } | Action::Fail { .. } | Action::RequestUser { .. } => {
             (RiskLevel::R0, "control action without side effects".into())
         }
+        Action::Semantic(SemanticAction::Navigate { url }) => {
+            let query_or_fragment = url
+                .find(['?', '#'])
+                .map(|start| url[start + 1..].to_lowercase())
+                .unwrap_or_default();
+            if has_sensitive_navigation_data(&query_or_fragment) {
+                (
+                    RiskLevel::R4,
+                    "navigation contains sensitive query or fragment".into(),
+                )
+            } else {
+                (RiskLevel::R1, "browser navigation".into())
+            }
+        }
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
             // Synthetic nav_* is not a valid product path; elevate so it cannot auto-run.
             if element_id.starts_with("nav_") {
@@ -210,6 +224,26 @@ fn is_security_or_finance(text: &str) -> bool {
     KEYWORDS.iter().any(|k| text.contains(k))
 }
 
+fn has_sensitive_navigation_data(query_or_fragment: &str) -> bool {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "token",
+        "access_token",
+        "id_token",
+        "secret",
+        "client_secret",
+        "credential",
+        "authorization",
+        "api_key",
+        "apikey",
+        "session",
+    ];
+    is_security_or_finance(query_or_fragment)
+        || query_or_fragment
+            .split(['&', ';', '#', '?'])
+            .map(|part| part.split('=').next().unwrap_or_default())
+            .any(|key| SENSITIVE_KEYS.contains(&key))
+}
+
 fn looks_like_secret_value(value: &str) -> bool {
     // Heuristic only — elevates unknown sensitive typing; not a password detector.
     let v = value.trim();
@@ -276,7 +310,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn submit_button_is_r3_and_password_is_r4() {
         let guard = StaticEffectGuard;
@@ -303,20 +336,42 @@ mod tests {
     }
 
     #[test]
+    fn navigation_uses_existing_r1_gate() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("button");
+        let risk = |url: &str| {
+            let action = Action::Semantic(SemanticAction::Navigate { url: url.into() });
+            guard
+                .judge(&EffectContext {
+                    observation: &obs,
+                    action: &action,
+                    model_effect_claim: None,
+                    task_authorized_max_risk: RiskLevel::R4,
+                })
+                .risk
+        };
+        assert_eq!(risk("https://example.com/path"), RiskLevel::R1);
+        assert_eq!(risk("https://example.com/?password=secret"), RiskLevel::R4);
+        assert_eq!(risk("https://example.com/#otp=123456"), RiskLevel::R4);
+        assert_eq!(risk("https://example.com/?token=abc"), RiskLevel::R4);
+        assert_eq!(risk("https://example.com/#api_key=abc"), RiskLevel::R4);
+    }
+
+    #[test]
     fn targeted_type_text_classifies_secrets_as_r4() {
         let guard = StaticEffectGuard;
         let obs = obs_with_button("button");
 
         fn judge(guard: &StaticEffectGuard, obs: &AppObservation, text: &str) -> RiskLevel {
-            let action = Action::Targeted(TargetedInput::TypeText {
-                text: text.into(),
-            });
-            guard.judge(&EffectContext {
-                observation: obs,
-                action: &action,
-                model_effect_claim: None,
-                task_authorized_max_risk: RiskLevel::R4,
-            }).risk
+            let action = Action::Targeted(TargetedInput::TypeText { text: text.into() });
+            guard
+                .judge(&EffectContext {
+                    observation: obs,
+                    action: &action,
+                    model_effect_claim: None,
+                    task_authorized_max_risk: RiskLevel::R4,
+                })
+                .risk
         }
 
         // Plain text stays R2 (auto-executable).
@@ -325,7 +380,10 @@ mod tests {
         assert_eq!(judge(&guard, &obs, "password hunter2"), RiskLevel::R4);
         assert_eq!(judge(&guard, &obs, "OTP 123456"), RiskLevel::R4);
         assert_eq!(judge(&guard, &obs, "验证码 8888"), RiskLevel::R4);
-        assert_eq!(judge(&guard, &obs, "信用卡 4111111111111111"), RiskLevel::R4);
+        assert_eq!(
+            judge(&guard, &obs, "信用卡 4111111111111111"),
+            RiskLevel::R4
+        );
         // 6-digit numeric OTP shape triggers the secret heuristic.
         assert_eq!(judge(&guard, &obs, "482913"), RiskLevel::R4);
     }

@@ -15,7 +15,7 @@ mkdir -p "$STAGE/bin" "$STAGE/scripts" "$STAGE/skills" "$STAGE/native-host"
 cp "$ROOT/target/release/lcu" "$STAGE/bin/"
 cp "$ROOT/target/release/lcu-desktop" "$STAGE/bin/"
 cp "$ROOT/native/macos-window-service/.build/release/macos-window-service" "$STAGE/bin/"
-cp -R "$ROOT/native/chrome-control/extension" "$STAGE/chrome-extension"
+cp -R "$ROOT/native/chrome-control/extension" "$STAGE/extension"
 cp "$ROOT/native/chrome-control/native-host/host.mjs" "$STAGE/native-host/"
 cp "$ROOT/native/chrome-control/native-host/com.lcu.chrome_control.json.template" "$STAGE/native-host/"
 cp "$ROOT/requirements.txt" "$STAGE/"
@@ -32,18 +32,26 @@ Components:
   bin/lcu                public CLI
   bin/lcu-desktop        Runtime host (start this first)
   bin/macos-window-service  Swift window service (auto-spawned by desktop)
-  chrome-extension/      Chrome unpacked extension (install via scripts/install-native-host.sh)
+  extension/             Chrome extension source (install via scripts/install-native-host.sh)
   skills/                agent skill (install via Claude/Grok plugin marketplace)
   AGENTS.md              agent notes
 
 Quick start:
   ./bin/lcu-desktop &
   ./bin/lcu doctor --json
-  ./bin/lcu run "Open Downloads in Finder" --app com.apple.finder --wait --json
+
+External Agent (default decision path):
+  ./bin/lcu run "Open Downloads in Finder" --app com.apple.finder --actor agent --json
+  ./bin/lcu decide <task-id> --wait --json
+  ./bin/lcu act <task-id> --observation-id <obs> --action '<json>'
+  # Repeat decide/act; finish with a done action and confirm lcu result is succeeded.
+
+Optional local VLM (local model resources required):
+  ./bin/lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json
 
 Chrome surface:
-  ./scripts/install-native-host.sh   # copies host+extension into ~/Library/Application Support/AnythingUse
-  # chrome://extensions → Load unpacked → ~/Library/Application Support/AnythingUse/chrome-extension
+  ./scripts/install-native-host.sh
+  # chrome://extensions → Load unpacked → the extension: path printed above
 
 Not code-signed: macOS shows Gatekeeper prompts on first run (right-click → Open).
 Documentation: docs/ on GitHub (https://github.com/HelloiOS2014/AnythingUse).

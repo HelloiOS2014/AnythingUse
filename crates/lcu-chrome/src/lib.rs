@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use lcu_core::action::{Action, SemanticAction, TargetedInput};
+use lcu_core::action::{is_http_navigation_url, Action, SemanticAction, TargetedInput};
 use lcu_core::capability::CapabilityLevel;
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 use lcu_core::observation::{
@@ -363,6 +363,17 @@ impl ChromeTabSurface {
         }
 
         self.ensure_auto()?;
+        if let Action::Semantic(SemanticAction::Navigate { url }) = action {
+            if !is_http_navigation_url(url) {
+                return Err(LcuError::coded(
+                    ErrorCode::InvalidRequest,
+                    "navigate requires an explicit http:// or https:// URL with a host",
+                ));
+            }
+            let result = self.client.call("navigate", json!({ "url": url }))?;
+            self.sync_control_state_from_value(&result);
+            return Ok(receipt(action, true, Some("navigated")));
+        }
         let action_json = action_to_extension_json(action)?;
         let result = self
             .client
@@ -587,17 +598,15 @@ fn map_observe_result(result: &Value) -> LcuResult<AppObservation> {
                             .get("label")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string()),
-                        value: el
-                            .get("value")
-                            .and_then(|v| {
-                                if v.is_null() {
-                                    None
-                                } else {
-                                    v.as_str()
-                                        .map(|s| s.to_string())
-                                        .or_else(|| Some(v.to_string()))
-                                }
-                            }),
+                        value: el.get("value").and_then(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_str()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| Some(v.to_string()))
+                            }
+                        }),
                         frame: Rect {
                             x: el.get("frame")?.get("x")?.as_f64().unwrap_or(0.0),
                             y: el.get("frame")?.get("y")?.as_f64().unwrap_or(0.0),
@@ -736,30 +745,61 @@ mod tests {
             Some("com.google.Chrome"),
             "open settings"
         ));
-        assert!(ChromeTabSurface::is_chrome_selector(None, "use Chrome to search"));
+        assert!(ChromeTabSurface::is_chrome_selector(
+            None,
+            "use Chrome to search"
+        ));
         assert!(!ChromeTabSurface::is_chrome_selector(
             Some("com.apple.finder"),
             "open downloads folder"
         ));
     }
 
-
-
     #[test]
     fn exclusive_not_applicable() {
-        let a = Action::Exclusive(TargetedInput::TypeText {
-            text: "x".into(),
-        });
+        let a = Action::Exclusive(TargetedInput::TypeText { text: "x".into() });
         assert!(!action_is_surface_applicable(&a));
     }
 
+    #[test]
+    fn navigate_uses_existing_rpc() {
+        use std::os::unix::net::UnixListener;
 
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("chrome.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "navigate");
+            assert_eq!(request["params"]["url"], "https://example.com/path");
+            let response = json!({
+                "id": request["id"],
+                "ok": true,
+                "result": { "url": request["params"]["url"] }
+            });
+            writeln!(stream, "{response}").unwrap();
+        });
 
-
+        let mut surface = ChromeTabSurface::new(ChromeControlClient::new(socket));
+        surface.tab = Some(ChromeTab::new("Default", 1));
+        let receipt = surface
+            .act(&Action::Semantic(SemanticAction::Navigate {
+                url: "https://example.com/path".into(),
+            }))
+            .unwrap();
+        assert!(receipt.success);
+        server.join().unwrap();
+    }
 
     #[test]
     fn control_state_blocks_auto_after_takeover() {
-        let mut surface = ChromeTabSurface::new(ChromeControlClient::new("/tmp/lcu-test-missing.sock"));
+        let mut surface =
+            ChromeTabSurface::new(ChromeControlClient::new("/tmp/lcu-test-missing.sock"));
         surface.tab = Some(ChromeTab::new("Default", 1));
         assert!(surface.control_state.allows_auto_control());
         surface.apply_control_state(ControlState::TakenOver);

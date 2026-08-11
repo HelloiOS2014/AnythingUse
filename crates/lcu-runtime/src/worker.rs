@@ -157,11 +157,13 @@ impl Runtime {
                 TaskState::PausedByUser => {
                     return Ok(());
                 }
-                TaskState::WaitingApproval => match self.try_execute_pending(task_id)? {
-                    Some(StepOutcome::Continue) => continue,
-                    Some(StepOutcome::Terminal) => return Ok(()),
-                    Some(StepOutcome::WaitExternal) | None => return Ok(()),
-                },
+                TaskState::WaitingApproval => {
+                    match self.try_execute_pending(task_id, &mut last_summary)? {
+                        Some(StepOutcome::Continue) => continue,
+                        Some(StepOutcome::Terminal) => return Ok(()),
+                        Some(StepOutcome::WaitExternal) | None => return Ok(()),
+                    }
+                }
                 TaskState::Queued => {
                     let _ =
                         self.apply_command(task_id, TaskCommand::Start, "worker recovered start");
@@ -193,26 +195,34 @@ impl Runtime {
             return Ok(StepOutcome::WaitExternal);
         }
 
-        if let Some(outcome) = self.try_execute_pending(task_id)? {
+        if let Some(outcome) = self.try_execute_pending(task_id, last_summary)? {
             return Ok(outcome);
         }
 
         self.check_step_budget(task_id)?;
 
+        self.release_other_target(task_id);
         self.backend
             .bind_task_context(&task.goal, Some(task_id.0.as_str()));
 
         let selector = resolve_selector(&task.goal, task.app_selector.clone())?;
-        let target = self.backend.resolve_target(&selector).map_err(|e| {
-            LcuError::coded(
-                e.code(),
-                format!(
-                    "resolve target failed ({:?}): {e}; pass --app with a running app id",
-                    selector.app_id
-                ),
-            )
-        })?;
-        self.set_current_target(target.clone());
+        let target = match self.current_target_for(task_id) {
+            Some(target) => target,
+            None => {
+                let target = self.backend.resolve_target(&selector).map_err(|e| {
+                    self.backend.clear_task_context();
+                    LcuError::coded(
+                        e.code(),
+                        format!(
+                            "resolve target failed ({:?}): {e}; pass --app with a running app id",
+                            selector.app_id
+                        ),
+                    )
+                })?;
+                self.set_current_target(task_id, target.clone());
+                target
+            }
+        };
 
         // Backend control state only (taken_over / target_lost).
         if let Some(outcome) = self.apply_control_gate(task_id, &target, "pre-observe")? {
@@ -510,6 +520,13 @@ impl Runtime {
                 );
                 return Ok(StepOutcome::WaitExternal);
             }
+            Err(e) if is_recoverable_action_error(&e) => {
+                *last_summary = Some(format!(
+                    "ACTION_REJECTED by execution layer: {e}; re-observe and choose a current element"
+                ));
+                self.record_step(task_id)?;
+                return Ok(StepOutcome::Continue);
+            }
             Err(e) => return Err(e),
         };
 
@@ -535,7 +552,11 @@ impl Runtime {
         Ok(StepOutcome::Continue)
     }
 
-    fn try_execute_pending(&self, task_id: &TaskId) -> LcuResult<Option<StepOutcome>> {
+    fn try_execute_pending(
+        &self,
+        task_id: &TaskId,
+        last_summary: &mut Option<String>,
+    ) -> LcuResult<Option<StepOutcome>> {
         let pending = {
             let map = self.pending.lock().expect("pending lock");
             map.get(&task_id.0).cloned()
@@ -568,7 +589,7 @@ impl Runtime {
             | ApprovalStatus::Expired
             | ApprovalStatus::Consumed
             | ApprovalStatus::Invalidated => {
-                self.clear_pending(task_id);
+                self.clear_task_pending(task_id);
                 self.fail_task(
                     task_id,
                     format!("approval {} not usable: {status:?}", pending.approval_id),
@@ -582,7 +603,7 @@ impl Runtime {
             if !pending.takeover_started {
                 return Ok(Some(StepOutcome::WaitExternal));
             }
-            self.clear_pending(task_id);
+            self.clear_task_pending(task_id);
             {
                 let mut rec = self.get_task(task_id)?;
                 rec.summary = Some(format!(
@@ -614,7 +635,7 @@ impl Runtime {
         let fresh = match self.backend.observe(&pending.target) {
             Ok(o) => o,
             Err(e) => {
-                self.clear_pending(task_id);
+                self.clear_task_pending(task_id);
                 self.fail_task(task_id, format!("post-approval re-observe failed: {e}"))?;
                 return Ok(Some(StepOutcome::Terminal));
             }
@@ -623,7 +644,7 @@ impl Runtime {
             || fresh.target.pid != pending.target.pid
             || fresh.target.window_id != pending.target.window_id
         {
-            self.clear_pending(task_id);
+            self.clear_task_pending(task_id);
             self.fail_task(
                 task_id,
                 "post-approval target changed; approval invalidated — re-submit if needed",
@@ -631,7 +652,14 @@ impl Runtime {
             return Ok(Some(StepOutcome::Terminal));
         }
         if let Err(e) = validate_action(&fresh, &pending.action) {
-            self.clear_pending(task_id);
+            self.clear_task_pending(task_id);
+            if is_recoverable_action_error(&e) {
+                *last_summary = Some(format!(
+                    "ACTION_REJECTED after approval: {e}; re-observe and choose a current element"
+                ));
+                self.record_step(task_id)?;
+                return Ok(Some(StepOutcome::Continue));
+            }
             self.fail_task(
                 task_id,
                 format!("post-approval action no longer valid: {e}"),
@@ -686,20 +714,29 @@ impl Runtime {
         if let Some(outcome) =
             self.apply_control_gate(task_id, &pending.target, "post-approval")?
         {
-            if matches!(outcome, StepOutcome::Terminal) {
-                self.clear_pending(task_id);
-            }
+            self.clear_task_pending(task_id);
             return Ok(Some(outcome));
         }
+        self.set_current_target(task_id, pending.target.clone());
         let _agent = AgentSessionGuard::begin(self.backend.as_ref(), &pending.target)?;
-        let _receipt = self.perform_gated_action(
+        let result = self.perform_gated_action(
             task_id,
             &pending.target,
             &fresh,
             &pending.action,
             Some(&grant),
-        )?;
-        self.clear_pending(task_id);
+        );
+        self.clear_task_pending(task_id);
+        if let Err(e) = result {
+            if is_recoverable_action_error(&e) {
+                *last_summary = Some(format!(
+                    "ACTION_REJECTED after approval: {e}; re-observe and choose a current element"
+                ));
+                self.record_step(task_id)?;
+                return Ok(Some(StepOutcome::Continue));
+            }
+            return Err(e);
+        }
         thread::sleep(StdDuration::from_millis(250));
         Ok(Some(StepOutcome::Continue))
     }
@@ -735,7 +772,10 @@ impl Runtime {
                     TaskCommand::PauseByUser,
                     format!("paused ({phase}): control taken_over"),
                 ) {
-                    Ok(_) => tracing::info!(task_id = %task_id.0, phase, "paused by user takeover"),
+                    Ok(_) => {
+                        self.release_current_target(task_id);
+                        tracing::info!(task_id = %task_id.0, phase, "paused by user takeover");
+                    }
                     Err(e) => tracing::warn!(
                         task_id = %task_id.0,
                         phase,
@@ -782,19 +822,6 @@ impl Runtime {
             .lock()
             .expect("pending lock")
             .insert(task_id.0.clone(), pending);
-    }
-
-    fn clear_pending(&self, task_id: &TaskId) {
-        self.pending
-            .lock()
-            .expect("pending lock")
-            .remove(&task_id.0);
-        // The pending entry is the only consumer of the task's approvals; once it
-        // is gone (executed, denied, invalidated, failed) every approval of this
-        // task is dead weight in the map. Purge them so the map cannot grow
-        // unboundedly and stale approvals never surface in the GUI.
-        let mut approvals = self.approvals.lock().expect("approvals lock");
-        approvals.retain(|_, r| r.binding.task_id != *task_id);
     }
 
     /// Sole production entry for real OS side effects (crate-private; not IPC-exposed).
@@ -893,19 +920,41 @@ impl Runtime {
         receipt.risk_level = judgement.risk;
         receipt.action_hash = action.action_hash();
 
-        self.record_step(task_id)?;
-
         if !receipt.success {
+            let message = receipt
+                .message
+                .clone()
+                .unwrap_or_else(|| "platform action failed".into());
             return Err(LcuError::coded(
-                ErrorCode::InternalError,
-                receipt
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "platform action failed".into()),
+                if is_recoverable_action_message(&message) {
+                    ErrorCode::InvalidRequest
+                } else {
+                    ErrorCode::InternalError
+                },
+                message,
             ));
         }
+        self.record_step(task_id)?;
         Ok(receipt)
     }
+}
+
+fn is_recoverable_action_error(error: &LcuError) -> bool {
+    matches!(
+        error.code(),
+        ErrorCode::InvalidRequest | ErrorCode::TaskFailed
+    ) && is_recoverable_action_message(&error.to_string())
+}
+
+fn is_recoverable_action_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    (message.contains("element")
+        && (message.contains("stale")
+            || message.contains("unknown")
+            || message.contains("not in last observation")
+            || message.contains("missing")))
+        || message.contains("selector not found")
+        || message.trim_end().ends_with(": not found")
 }
 
 /// Infer AppSelector when the caller did not pass `--app`.
@@ -1041,12 +1090,14 @@ mod tests {
     use lcu_core::types::{CallerIdentity, Frame};
     use lcu_core::surface::ControlState;
     use lcu_platform::{PermissionFlag, PermissionState, PlatformBackend};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex;
     use tempfile::tempdir;
 
     struct MockBackend {
         acts: AtomicU32,
+        resolves: AtomicU32,
+        stale_once: AtomicBool,
         conflict: Mutex<ControlState>,
     }
 
@@ -1054,13 +1105,22 @@ mod tests {
         fn new(conflict: ControlState) -> Self {
             Self {
                 acts: AtomicU32::new(0),
+                resolves: AtomicU32::new(0),
+                stale_once: AtomicBool::new(false),
                 conflict: Mutex::new(conflict),
             }
+        }
+
+        fn with_stale_action() -> Self {
+            let backend = Self::new(ControlState::None);
+            backend.stale_once.store(true, Ordering::SeqCst);
+            backend
         }
     }
 
     impl PlatformBackend for MockBackend {
         fn resolve_target(&self, selector: &AppSelector) -> LcuResult<AppTarget> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
             Ok(AppTarget {
                 app_id: selector
                     .app_id
@@ -1118,6 +1178,12 @@ mod tests {
             _target: &AppTarget,
             action: &SemanticAction,
         ) -> LcuResult<ActionReceipt> {
+            if self.stale_once.swap(false, Ordering::SeqCst) {
+                return Err(LcuError::coded(
+                    ErrorCode::TaskFailed,
+                    "not_found: element_id e1 is stale; re-observe before acting",
+                ));
+            }
             self.acts.fetch_add(1, Ordering::SeqCst);
             Ok(ActionReceipt {
                 action: Action::Semantic(action.clone()),
@@ -1172,9 +1238,8 @@ mod tests {
     fn product_loop_executes_semantic_action_via_runtime() {
         let dir = tempdir().unwrap();
         let paths = RuntimePaths::from_root(dir.path());
-        let rt = Arc::new(
-            Runtime::new_for_test(paths, Arc::new(MockBackend::new(ControlState::None))).unwrap(),
-        );
+        let backend = Arc::new(MockBackend::new(ControlState::None));
+        let rt = Arc::new(Runtime::new_for_test(paths, backend.clone()).unwrap());
         let task = rt
             .submit_task(
                 "click Open in Finder",
@@ -1195,6 +1260,159 @@ mod tests {
             done.step_count
         );
         assert!(done.step_count >= 1, "gated action must record a step");
+        assert_eq!(backend.resolves.load(Ordering::SeqCst), 1);
+    }
+
+
+    #[test]
+    fn stale_element_action_reobserves_without_failing_task() {
+        let dir = tempdir().unwrap();
+        let paths = RuntimePaths::from_root(dir.path());
+        let rt = Runtime::new_for_test(paths, Arc::new(MockBackend::with_stale_action())).unwrap();
+        let task = rt
+            .submit_task("click Open in Finder", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
+            .unwrap();
+        let mut loop_guard = LoopGuard::new(LoopGuardConfig::default());
+        let mut summary = None;
+
+        let outcome = rt
+            .run_one_product_step(&task.task_id, &mut loop_guard, &mut summary)
+            .unwrap();
+
+        assert_eq!(outcome, StepOutcome::Continue);
+        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::Running);
+        assert!(summary.unwrap().contains("stale"));
+        assert!(!is_recoverable_action_error(&LcuError::coded(
+            ErrorCode::PermissionDenied,
+            "element e1 stale"
+        )));
+        assert!(!is_recoverable_action_error(&LcuError::coded(
+            ErrorCode::TaskFailed,
+            "target_lost: window gone"
+        )));
+    }
+
+
+    #[test]
+    fn post_approval_stale_element_reobserves_instead_of_failing() {
+        let dir = tempdir().unwrap();
+        let backend = Arc::new(MockBackend::new(ControlState::None));
+        let rt = Runtime::new_for_test(RuntimePaths::from_root(dir.path()), backend.clone()).unwrap();
+        let task = rt
+            .submit_task("submit form", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
+            .unwrap();
+        let target = backend
+            .resolve_target(&AppSelector {
+                app_id: None,
+                pid: None,
+                window_title_contains: None,
+            })
+            .unwrap();
+        let mut observation = backend.observe(&target).unwrap();
+        observation.elements[0].label = Some("发送".into());
+        let action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let evaluated = rt
+            .evaluate_action_for_task(
+                Some(&task.task_id),
+                &observation,
+                &action,
+                None,
+                RiskLevel::R4,
+                Some(&task.caller),
+            )
+            .unwrap();
+        let approval_id = evaluated.approval_id.unwrap();
+        rt.store_pending(
+            &task.task_id,
+            PendingAction {
+                approval_id: approval_id.clone(),
+                action,
+                observation: observation.clone(),
+                target,
+                risk: evaluated.risk,
+                takeover_started: false,
+            },
+        );
+        rt.apply_command(&task.task_id, TaskCommand::RequireApproval, "test approval")
+            .unwrap();
+        let binding = rt.approval_binding(&approval_id).unwrap();
+        rt.approve_in_gui(&approval_id, &binding).unwrap();
+        backend.acts.store(1, Ordering::SeqCst);
+        let mut summary = None;
+
+        let outcome = rt
+            .try_execute_pending(&task.task_id, &mut summary)
+            .unwrap();
+
+        assert_eq!(outcome, Some(StepOutcome::Continue));
+        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::Running);
+        assert!(summary.unwrap().contains("stale"));
+        assert!(rt.pending.lock().unwrap().is_empty());
+        assert!(rt.approvals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn post_approval_takeover_discards_consumed_pending() {
+        let dir = tempdir().unwrap();
+        let backend = Arc::new(MockBackend::new(ControlState::TakenOver));
+        let rt = Runtime::new_for_test(RuntimePaths::from_root(dir.path()), backend.clone()).unwrap();
+        let task = rt
+            .submit_task("submit form", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
+            .unwrap();
+        let target = backend
+            .resolve_target(&AppSelector {
+                app_id: None,
+                pid: None,
+                window_title_contains: None,
+            })
+            .unwrap();
+        let mut observation = backend.observe(&target).unwrap();
+        observation.elements[0].label = Some("发送".into());
+        let action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let evaluated = rt
+            .evaluate_action_for_task(
+                Some(&task.task_id),
+                &observation,
+                &action,
+                None,
+                RiskLevel::R4,
+                Some(&task.caller),
+            )
+            .unwrap();
+        let approval_id = evaluated.approval_id.unwrap();
+        rt.store_pending(
+            &task.task_id,
+            PendingAction {
+                approval_id: approval_id.clone(),
+                action,
+                observation,
+                target,
+                risk: evaluated.risk,
+                takeover_started: false,
+            },
+        );
+        rt.apply_command(&task.task_id, TaskCommand::RequireApproval, "test approval")
+            .unwrap();
+        let binding = rt.approval_binding(&approval_id).unwrap();
+        rt.approve_in_gui(&approval_id, &binding).unwrap();
+
+        let outcome = rt
+            .try_execute_pending(&task.task_id, &mut None)
+            .unwrap();
+
+        assert_eq!(outcome, Some(StepOutcome::WaitExternal));
+        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::PausedByUser);
+        assert!(rt.pending.lock().unwrap().is_empty());
     }
 
 
@@ -1227,6 +1445,7 @@ mod tests {
             TaskState::PausedByUser,
             "TakenOver must pause automation"
         );
+        assert!(rt.current_target_for(&task.task_id).is_none());
     }
 
     #[test]

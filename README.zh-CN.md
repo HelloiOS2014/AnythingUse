@@ -22,10 +22,12 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 |---|---|
 | macOS 应用 | 在不激活窗口的前提下操作特定应用窗口 |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
-| 决策器 | 默认由外部 Agent 亲自决策（`lcu run --actor agent` + `lcu decide`/`lcu act`）；本地 Qwen3-VL 作为可选备选（`--actor vlm`） |
+| 决策器 | `LCU_VISION_ACTOR` 未设置或为 `auto` 时默认由外部 Agent 决策；本地 Qwen3-VL 可按任务显式选择（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
 | 安全 | 基于效果的风险检查、GUI 绑定审批、接管检测、fail-closed 窗口隔离 |
 | 持久化 | 本地 SQLite 任务与事件存储 |
+
+上表是当前源码已实现的产品契约，不是对所有真实应用兼容性或稳定性的认证；运行时验证仍按具体场景进行。
 
 当前实现是 Apple Silicon macOS 的开发构建（尚无签名安装包）。
 
@@ -44,7 +46,7 @@ flowchart LR
     USER["用户输入"] -. "同目标接管" .-> RT
 ```
 
-循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：默认由外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）；本地 VLM 是可选备选（`lcu run --actor vlm`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
+循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：在通常的未设置/`auto` Runtime 默认值下，外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）；本地 VLM 可按任务显式选择（`lcu run --actor vlm`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
 
 ## 快速开始
 
@@ -57,12 +59,16 @@ cargo build -p lcu-cli -p lcu-desktop --release
 ./target/release/lcu-desktop &
 ./target/release/lcu doctor --json
 
-# 提交任务（--source 仅为展示性元数据）
+# 外部 Agent 路径：Skill 随后执行 lcu decide / lcu act
 ./target/release/lcu run "Open Downloads in Finder" \
-  --app com.apple.finder --source agent --source-name codex --wait --json
+  --app com.apple.finder --actor agent --json
+
+# 人类/本地路径：需要先安装下方可选模型资源
+./target/release/lcu run "Open Downloads in Finder" \
+  --app com.apple.finder --actor vlm --wait --json
 ```
 
-可选：Chrome 表面（`./native/chrome-control/scripts/install-native-host.sh`，然后 `chrome://extensions` → 开发者模式 → **Load unpacked** → `native/chrome-control/extension`）；本地 VLM（`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`，再 `./scripts/download_qwen3_vl.sh`）。
+可选：Chrome 表面：运行 `./native/chrome-control/scripts/install-native-host.sh`，然后在 `chrome://extensions` 开启开发者模式，并仅从脚本打印的 `extension:` 路径 **Load unpacked**（默认是 `~/Library/Application Support/AnythingUse/chrome-extension`）。本地 VLM：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`，再 `./scripts/download_qwen3_vl.sh`。
 
 ## 以插件方式安装 Skill
 
@@ -127,5 +133,5 @@ scripts/                      模型下载与辅助脚本
 
 ## 文档
 
-- [交付状态](docs/status.md) · [架构](docs/architecture.md) · [用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md)
+- [交付状态](docs/status.md) · [架构](docs/architecture.md) · [Computer Use 参考笔记](docs/computer-use-reference.md) · [用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS 窗口服务](native/macos-window-service/README.md) · [Chrome 控制](native/chrome-control/README.md)

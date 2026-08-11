@@ -1,6 +1,6 @@
 //! Strict action validation against the current observation (M4).
 
-use lcu_core::action::{Action, TargetedInput};
+use lcu_core::action::{is_http_navigation_url, Action, SemanticAction, TargetedInput};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 use lcu_core::observation::{AppObservation, ObservationId};
 
@@ -22,6 +22,14 @@ pub fn validate_action(obs: &AppObservation, action: &Action) -> LcuResult<()> {
             Ok(())
         }
         Action::Semantic(sem) => {
+            if let SemanticAction::Navigate { url } = sem {
+                if !is_http_navigation_url(url) {
+                    return Err(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        "navigate requires an explicit http:// or https:// URL with a host",
+                    ));
+                }
+            }
             if let Some(id) = action.referenced_element_id() {
                 // Synthetic nav_* ids are never valid product actions.
                 if id.starts_with("nav_") {
@@ -214,5 +222,30 @@ mod tests {
             })
         )
         .is_ok());
+    }
+
+    #[test]
+    fn navigation_requires_explicit_http_url() {
+        let obs = sample_obs();
+        assert!(validate_action(
+            &obs,
+            &Action::Semantic(SemanticAction::Navigate {
+                url: "https://example.com/path".into(),
+            })
+        )
+        .is_ok());
+        for url in [
+            "example.com",
+            "file:///tmp/x",
+            "javascript:alert(1)",
+            "https://",
+            "https://user:pass@example.com/",
+        ] {
+            assert!(validate_action(
+                &obs,
+                &Action::Semantic(SemanticAction::Navigate { url: url.into() })
+            )
+            .is_err());
+        }
     }
 }

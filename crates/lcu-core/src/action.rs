@@ -24,6 +24,9 @@ pub enum ActionKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SemanticAction {
+    Navigate {
+        url: String,
+    },
     Invoke {
         element_id: String,
     },
@@ -39,6 +42,34 @@ pub enum SemanticAction {
         delta_x: f64,
         delta_y: f64,
     },
+}
+
+/// Basic product-boundary check for browser navigation.
+///
+/// Only explicit HTTP(S) URLs with a non-empty authority are accepted. Chrome
+/// remains responsible for full URL parsing and navigation semantics.
+pub fn is_http_navigation_url(url: &str) -> bool {
+    if url.is_empty()
+        || url.len() > 4096
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let host_port = authority;
+    if let Some(ipv6) = host_port.strip_prefix('[') {
+        return ipv6.find(']').is_some_and(|end| end > 0);
+    }
+    !host_port.split(':').next().unwrap_or_default().is_empty()
 }
 
 /// Window- or PID-targeted low-level input (still not global by default).
@@ -133,4 +164,3 @@ pub struct ProposedAction {
     #[serde(default)]
     pub confidence: f32,
 }
-

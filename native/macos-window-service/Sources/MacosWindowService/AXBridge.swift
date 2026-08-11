@@ -11,7 +11,13 @@ private func lcuAXUIElementGetActualPid(
     _ pid: UnsafeMutablePointer<pid_t>
 ) -> AXError
 
-/// Accessibility tree read + semantic actions + synthetic in-app focus.
+@_silgen_name("_AXUIElementGetWindow")
+private func lcuAXUIElementGetWindow(
+    _ element: AXUIElement,
+    _ windowID: UnsafeMutablePointer<CGWindowID>
+) -> AXError
+
+/// Accessibility tree read + semantic actions.
 /// Never activates the application or raises it to system frontmost.
 enum AXBridge {
     /// Keeps the compatibility fallback enabled only for the duration of one
@@ -46,6 +52,10 @@ enum AXBridge {
             usesFallback = allowFallback && !attributeEnabled
             if usesFallback {
                 Self.acquireFallback()
+            } else if allowFallback && attributeEnabled {
+                // Renderer-backed apps may accept AX enablement before their tree is ready.
+                // This path runs only after the first observation returned no UI.
+                usleep(500_000)
             }
         }
 
@@ -124,7 +134,7 @@ enum AXBridge {
         AXUIElementCreateApplication(pid)
     }
 
-    /// Chromium/CEF apps commonly keep their full AX tree disabled until an
+    /// Renderer-backed apps may keep their full AX tree disabled until an
     /// accessibility client opts in. Keep the returned assertion alive while
     /// reading or acting on the target UI.
     static func enableAccessibility(
@@ -178,8 +188,9 @@ enum AXBridge {
     /// Match CG window id to an AX window element — **fail closed**.
     ///
     /// Identity proof (never "first/main/focused/title" alone):
-    /// 1) `AXWindowNumber == target.windowID` when the app exposes it
-    /// 2) else AX window **frame ≈ target.bounds**, only when that frame match
+    /// 1) `_AXUIElementGetWindow == target.windowID`
+    /// 2) else `AXWindowNumber == target.windowID` when the app exposes it
+    /// 3) else AX window **frame ≈ target.bounds**, only when that frame match
     ///    is **unique** under the same PID (apps like TextEdit omit AXWindowNumber).
     /// When AXWindowNumber exists but differs: immediate mismatch — never frame fallback.
     static func axWindow(for target: MacWindowTarget) throws -> AXUIElement {
@@ -188,10 +199,11 @@ enum AXBridge {
 
         var windowsRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef)
-        if err == .success, let windows = windowsRef as? [AXUIElement], !windows.isEmpty {
-            // Prefer authoritative AXWindowNumber hits.
+        let windows = (err == .success ? windowsRef as? [AXUIElement] : nil) ?? []
+        if !windows.isEmpty {
+            // Prefer authoritative exact window-id hits.
             for w in windows {
-                if windowNumberEquals(w, target.windowID) {
+                if windowIDEquals(w, target.windowID) {
                     return w
                 }
             }
@@ -217,7 +229,7 @@ enum AXBridge {
                 let element = el as! AXUIElement
                 let role = copyString(element, kAXRoleAttribute as CFString) ?? ""
                 if (role == (kAXWindowRole as String) || role == "AXWindow"),
-                   windowIdentityMatches(element, target: target)
+                   windowIDEquals(element, target.windowID)
                 {
                     return element
                 }
@@ -228,7 +240,7 @@ enum AXBridge {
         if let hit = elementAtScreenPoint(
             CGPoint(x: target.bounds.midX, y: target.bounds.midY),
             expectedPID: target.pid
-        ), let window = climbToWindow(from: hit), windowIdentityMatches(window, target: target) {
+        ), let window = climbToWindow(from: hit), windowIDEquals(window, target.windowID) {
             return window
         }
 
@@ -251,17 +263,31 @@ enum AXBridge {
             )
         }
 
+        let roundedFrame: (CGRect?) -> String = { frame in
+            guard let frame else { return "-" }
+            return "\(Int(frame.minX.rounded())),\(Int(frame.minY.rounded())),"
+                + "\(Int(frame.width.rounded())),\(Int(frame.height.rounded()))"
+        }
+        let candidateSummary = windows.map { window in
+            let exact = exactWindowID(window).map(String.init) ?? "-"
+            let attribute = copyInt(window, kAXWindowNumberAttribute).map(String.init) ?? "-"
+            return "\(exact)/\(attribute)/\(roundedFrame(copyFrame(window)))"
+        }.joined(separator: ";")
         throw ServiceError.notFound(
-            "strict AX window match failed for pid=\(target.pid) windowID=\(target.windowID) "
-                + "(no AXWindowNumber or unique frame match to CG bounds)"
+            "strict AX window match failed pid=\(target.pid) wid=\(target.windowID) "
+                + "axerr=\(err.rawValue) n=\(windows.count) "
+                + "target=\(roundedFrame(target.bounds)) candidates(e/a/f)=\(candidateSummary)"
         )
     }
 
     /// True when AX element is the target CG window (number or frame).
     ///
-    /// If `AXWindowNumber` is present it is authoritative: a mismatch never falls
+    /// If an exact window id is present it is authoritative: a mismatch never falls
     /// through to frame comparison (same-position windows must not alias).
     static func windowIdentityMatches(_ el: AXUIElement, target: MacWindowTarget) -> Bool {
+        if let windowID = exactWindowID(el) {
+            return windowID == target.windowID
+        }
         if let cgid = copyInt(el, kAXWindowNumberAttribute) {
             return CGWindowID(cgid) == target.windowID
         }
@@ -269,15 +295,18 @@ enum AXBridge {
         return windowFrameMatches(el, target: target)
     }
 
-    /// `AXWindowNumber` present and equal to target.
-    private static func windowNumberEquals(_ el: AXUIElement, _ windowID: CGWindowID) -> Bool {
+    /// Exact SPI window id, or exposed `AXWindowNumber`, equal to target.
+    private static func windowIDEquals(_ el: AXUIElement, _ windowID: CGWindowID) -> Bool {
+        if let exact = exactWindowID(el) {
+            return exact == windowID
+        }
         guard let cgid = copyInt(el, kAXWindowNumberAttribute) else { return false }
         return CGWindowID(cgid) == windowID
     }
 
-    /// Frame-only identity (only valid when AXWindowNumber is absent on the element).
+    /// Frame-only identity, valid only when exact ids are unavailable.
     private static func windowFrameMatches(_ el: AXUIElement, target: MacWindowTarget) -> Bool {
-        if copyInt(el, kAXWindowNumberAttribute) != nil {
+        if exactWindowID(el) != nil || copyInt(el, kAXWindowNumberAttribute) != nil {
             return false
         }
         guard let frame = copyFrame(el), target.bounds.width > 1, target.bounds.height > 1 else {
@@ -484,39 +513,6 @@ enum AXBridge {
         return nil
     }
 
-    /// Synthetic in-app focus. **Window-scoped and background-safe.**
-    ///
-    /// Only mutates focus when the target window is already the system key window
-    /// (`pid + windowID`). PID-only frontmost checks are insufficient: they allow
-    /// re-keying user window A → agent window B inside the same app.
-    ///
-    /// Background apps may change their in-process focused element without becoming
-    /// frontmost. If the user is already in that app, require exact target-window proof.
-    @discardableResult
-    static func syntheticFocus(target: MacWindowTarget, element: AXUIElement) -> Bool {
-        if FocusGuard.isFrontmost(pid: target.pid) {
-            guard FocusGuard.isTargetKeyWindow(target: target),
-                  elementBelongsToTargetWindow(element, target: target)
-            else {
-                return false
-            }
-        }
-        let app = application(pid: target.pid)
-        // Background in-process focus is not system frontmost/key ownership.
-        // Do NOT set kAXFrontmostAttribute or raise a window.
-        let focused = AXUIElementSetAttributeValue(
-            app,
-            kAXFocusedUIElementAttribute as CFString,
-            element
-        )
-        _ = AXUIElementSetAttributeValue(
-            element,
-            kAXFocusedAttribute as CFString,
-            kCFBooleanTrue!
-        )
-        return focused == .success
-    }
-
     static func setValue(_ element: AXUIElement, _ value: String) throws {
         let err = AXUIElementSetAttributeValue(
             element,
@@ -581,6 +577,14 @@ enum AXBridge {
 
     // kAXWindowNumberAttribute is not always in the Swift overlay; use string.
     private static let kAXWindowNumberAttribute = "AXWindowNumber" as CFString
+
+    private static func exactWindowID(_ el: AXUIElement) -> CGWindowID? {
+        var windowID = CGWindowID(0)
+        guard lcuAXUIElementGetWindow(el, &windowID) == .success, windowID != 0 else {
+            return nil
+        }
+        return windowID
+    }
 
     private static func copyString(_ el: AXUIElement, _ attr: CFString) -> String? {
         var ref: CFTypeRef?

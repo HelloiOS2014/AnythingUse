@@ -226,6 +226,15 @@ mod tests {
         let serialized = serde_json::to_string(&invoke).unwrap();
         let parsed = parse_action_json(&serialized).unwrap();
         assert_eq!(parsed, invoke);
+
+        let navigate = parse_action_json(
+            r#"{"kind":"semantic","type":"navigate","url":"https://example.com"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            navigate,
+            Action::Semantic(SemanticAction::Navigate { .. })
+        ));
     }
 }
 

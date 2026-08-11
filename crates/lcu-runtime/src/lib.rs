@@ -69,8 +69,8 @@ pub struct Runtime {
     scheduler: TaskScheduler,
     /// High-risk actions waiting for GUI approval before gated execution.
     pending: Mutex<HashMap<String, PendingAction>>,
-    /// Current task target for release on complete/cancel/fail/takeover.
-    current_target: Mutex<Option<AppTarget>>,
+    /// Current task owner and its strict target.
+    current_target: Mutex<Option<(TaskId, AppTarget)>>,
 }
 
 impl Runtime {
@@ -179,16 +179,64 @@ impl Runtime {
         }
     }
 
-    fn release_current_target(&self) {
-        let target = self.current_target.lock().expect("current_target").take();
+    pub(crate) fn release_current_target(&self, task_id: &TaskId) {
+        let target = {
+            let mut current = self.current_target.lock().expect("current_target");
+            match current.as_ref() {
+                Some((owner, _)) if owner == task_id => current.take().map(|(_, target)| target),
+                _ => None,
+            }
+        };
         if let Some(t) = target {
             let _ = self.backend.release(&t);
+            self.backend.clear_task_context();
         }
-        self.backend.clear_task_context();
     }
 
-    pub(crate) fn set_current_target(&self, target: AppTarget) {
-        *self.current_target.lock().expect("current_target") = Some(target);
+    pub(crate) fn current_target_for(&self, task_id: &TaskId) -> Option<AppTarget> {
+        self.current_target
+            .lock()
+            .expect("current_target")
+            .as_ref()
+            .and_then(|(owner, target)| (owner == task_id).then(|| target.clone()))
+    }
+
+    pub(crate) fn release_other_target(&self, task_id: &TaskId) {
+        let target = {
+            let mut current = self.current_target.lock().expect("current_target");
+            match current.as_ref() {
+                Some((owner, _)) if owner != task_id => current.take().map(|(_, target)| target),
+                _ => None,
+            }
+        };
+        if let Some(target) = target {
+            let _ = self.backend.release(&target);
+            self.backend.clear_task_context();
+        }
+    }
+
+    pub(crate) fn set_current_target(&self, task_id: &TaskId, target: AppTarget) {
+        let previous = self
+            .current_target
+            .lock()
+            .expect("current_target")
+            .replace((task_id.clone(), target));
+        if let Some((owner, target)) = previous {
+            if owner != *task_id {
+                let _ = self.backend.release(&target);
+            }
+        }
+    }
+
+    pub(crate) fn clear_task_pending(&self, task_id: &TaskId) {
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .remove(&task_id.0);
+        self.approvals
+            .lock()
+            .expect("approvals lock")
+            .retain(|_, request| request.binding.task_id != *task_id);
     }
 
     pub fn paths(&self) -> &RuntimePaths {
@@ -288,9 +336,9 @@ impl Runtime {
 
     /// Pending GUI approvals (desktop process only — not via socket).
     pub fn list_pending_approvals(&self) -> Vec<ApprovalUiLaunch> {
+        let tasks = self.list_tasks();
         let approvals = self.approvals.lock().expect("approvals lock");
         let pending_map = self.pending.lock().expect("pending lock");
-        let tasks = self.list_tasks();
         approvals
             .values()
             .filter(|r| r.status == ApprovalStatus::Pending)
@@ -428,19 +476,71 @@ impl Runtime {
         self.approve_in_gui(approval_id, &binding)
     }
 
-    pub fn get_task(&self, task_id: &TaskId) -> LcuResult<TaskRecord> {
+    fn load_task(&self, task_id: &TaskId) -> LcuResult<TaskRecord> {
         let store = self.store.lock().expect("store lock");
         store
             .get_task(task_id)?
             .ok_or_else(|| LcuError::coded(ErrorCode::TaskNotFound, "task not found"))
     }
 
+    pub fn get_task(&self, task_id: &TaskId) -> LcuResult<TaskRecord> {
+        let record = self.load_task(task_id)?;
+        if record.state == TaskState::WaitingApproval && self.expire_waiting_approval(task_id) {
+            self.load_task(task_id)
+        } else {
+            Ok(record)
+        }
+    }
+
     pub fn list_tasks(&self) -> Vec<TaskRecord> {
-        self.store
+        let mut tasks = self
+            .store
             .lock()
             .expect("store lock")
             .list_tasks()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for task in &mut tasks {
+            if task.state == TaskState::WaitingApproval
+                && self.expire_waiting_approval(&task.task_id)
+            {
+                if let Ok(updated) = self.load_task(&task.task_id) {
+                    *task = updated;
+                }
+            }
+        }
+        tasks
+    }
+
+    /// Approval expiry is reconciled on the existing status/list read path.
+    fn expire_waiting_approval(&self, task_id: &TaskId) -> bool {
+        let approval_id = self
+            .pending
+            .lock()
+            .expect("pending lock")
+            .get(&task_id.0)
+            .map(|pending| pending.approval_id.clone());
+        let Some(approval_id) = approval_id else {
+            return false;
+        };
+        let expired = {
+            let mut approvals = self.approvals.lock().expect("approvals lock");
+            let Some(request) = approvals.get_mut(&approval_id) else {
+                return false;
+            };
+            if request.status == ApprovalStatus::Pending && request.binding.is_expired(Utc::now()) {
+                request.status = ApprovalStatus::Expired;
+            }
+            request.status == ApprovalStatus::Expired
+        };
+        if !expired {
+            return false;
+        }
+
+        let error = format!("approval {approval_id} expired");
+        if self.fail_task(task_id, error).is_err() {
+            return false;
+        }
+        true
     }
 
     /// After a crash / kill, tasks left in Queued/Running/WaitingApproval have
@@ -493,7 +593,7 @@ impl Runtime {
         command: TaskCommand,
         message: impl Into<String>,
     ) -> LcuResult<TaskRecord> {
-        let mut record = self.get_task(task_id)?;
+        let mut record = self.load_task(task_id)?;
         TaskStateMachine::apply(&mut record, command)?;
         let event = TaskEvent {
             task_id: record.task_id.clone(),
@@ -503,7 +603,8 @@ impl Runtime {
             step: Some(record.step_count),
         };
         if record.state.is_terminal() {
-            self.release_current_target();
+            self.clear_task_pending(task_id);
+            self.release_current_target(task_id);
             self.budgets
                 .lock()
                 .expect("budgets")
@@ -926,7 +1027,11 @@ impl Runtime {
 
         let mut notes = vec![
             format!(
-                "vision_actor={} (LCU_VISION_ACTOR=auto|qwen)",
+                "default_actor={}; vlm_implementation={} (LCU_VISION_ACTOR=auto|agent|vlm|qwen)",
+                match self.default_actor {
+                    DecisionActor::Agent => "agent",
+                    DecisionActor::Vlm => "vlm",
+                },
                 self.actor.name()
             ),
             if self.scheduler.is_started() {
@@ -1012,6 +1117,7 @@ pub fn describe_action_for_ui(action: &Action) -> String {
         Action::Done { summary } => format!("done: {summary}"),
         Action::Fail { reason } => format!("fail: {reason}"),
         Action::RequestUser { reason } => format!("request user: {reason}"),
+        Action::Semantic(SemanticAction::Navigate { url }) => format!("navigate to `{url}`"),
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
             format!("invoke element `{element_id}`")
         }
@@ -1411,9 +1517,115 @@ mod tests {
             .unwrap();
         rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
             .unwrap();
+        let obs = sample_obs("发送");
+        let action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let approval_id = rt.insert_approval(
+            Some(&task.task_id),
+            &obs,
+            action.action_hash(),
+            "test approval".into(),
+        );
+        rt.pending.lock().unwrap().insert(
+            task.task_id.0.clone(),
+            PendingAction {
+                approval_id: approval_id.clone(),
+                action,
+                observation: obs.clone(),
+                target: obs.target,
+                risk: RiskLevel::R3,
+                takeover_started: false,
+            },
+        );
+        rt.apply_command(&task.task_id, TaskCommand::RequireApproval, "test approval")
+            .unwrap();
+        assert_eq!(rt.list_pending_approvals().len(), 1);
+
         let cancelled = rt.cancel_task(&task.task_id).unwrap();
+
         assert_eq!(cancelled.state, lcu_core::task::TaskState::Cancelled);
         assert!(rt.current_target.lock().unwrap().is_none());
+        assert!(rt.list_pending_approvals().is_empty());
+        assert!(rt.approve_pending_in_gui(&approval_id).is_err());
+    }
+
+
+    #[test]
+    fn cancelling_other_task_does_not_release_current_target() {
+        let rt = test_runtime();
+        let current = rt
+            .submit_task("current", CallerIdentity::HumanCli, None)
+            .unwrap();
+        let other = rt
+            .submit_task("other", CallerIdentity::HumanCli, None)
+            .unwrap();
+        let target = sample_obs("Open").target;
+        rt.set_current_target(&current.task_id, target.clone());
+
+        rt.cancel_task(&other.task_id).unwrap();
+
+        assert_eq!(rt.current_target_for(&current.task_id), Some(target));
+        rt.release_other_target(&other.task_id);
+        assert!(rt.current_target_for(&current.task_id).is_none());
+        rt.cancel_task(&current.task_id).unwrap();
+        assert!(rt.current_target.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn expired_approval_becomes_failed_on_status_read() {
+        let rt = test_runtime();
+        let task = rt
+            .submit_task("submit form", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
+            .unwrap();
+        let obs = sample_obs("发送");
+        let action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let evaluated = rt
+            .evaluate_action_for_task(
+                Some(&task.task_id),
+                &obs,
+                &action,
+                None,
+                RiskLevel::R4,
+                Some(&CallerIdentity::HumanCli),
+            )
+            .unwrap();
+        let approval_id = evaluated.approval_id.unwrap();
+        rt.pending.lock().unwrap().insert(
+            task.task_id.0.clone(),
+            PendingAction {
+                approval_id: approval_id.clone(),
+                action,
+                observation: obs.clone(),
+                target: obs.target,
+                risk: evaluated.risk,
+                takeover_started: false,
+            },
+        );
+        rt.apply_command(
+            &task.task_id,
+            TaskCommand::RequireApproval,
+            "test approval",
+        )
+        .unwrap();
+        rt.approvals
+            .lock()
+            .unwrap()
+            .get_mut(&approval_id)
+            .unwrap()
+            .binding
+            .expires_at = Utc::now() - Duration::seconds(1);
+
+        let expired = rt.get_task(&task.task_id).unwrap();
+
+        assert_eq!(expired.state, TaskState::Failed);
+        assert!(expired.error.unwrap().contains("expired"));
+        assert!(rt.pending.lock().unwrap().is_empty());
+        assert!(rt.approvals.lock().unwrap().is_empty());
     }
 
 

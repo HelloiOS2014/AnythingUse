@@ -4,6 +4,10 @@
 
 **AnythingUse** runs a single-instance Runtime on your Mac (CLI codename `lcu`; data root `~/Library/Application Support/AnythingUse`). Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
 
+This guide describes the implemented setup and interface, not a blanket
+real-app stability certification. Runtime behavior is verified per target
+scenario.
+
 Execution surfaces:
 
 - **macOS apps** — strict window-targeted control via `macos-window-service`. The Runtime does not activate the target window; user takeover of the same window pauses the task.
@@ -67,14 +71,20 @@ cd native/macos-window-service && swift build -c release && cd ../..
 ```bash
 ./native/chrome-control/scripts/install-native-host.sh
 # Chrome → chrome://extensions → Developer mode → Load unpacked
-#   → native/chrome-control/extension
+#   → the installer's printed extension: path
+#      (default: ~/Library/Application Support/AnythingUse/chrome-extension)
 ```
+
+The installer copies the extension to its printed `extension:` path (the
+default above). Do not load the repository source directory into Chrome.
 
 ## First run
 
 1. Grant Screen Recording and Accessibility when prompted (for the window service binary / host app).
 2. `lcu doctor --json` — check permissions (`screen_recording`/`accessibility`/`input_monitoring`) and surface connectivity in `notes` (`mac_window` / `chrome_tab`).
-3. `lcu run "Open Downloads in Finder" --app com.apple.finder --wait --json`
+3. Choose one explicit decision path:
+   - Local model installed: `lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json`.
+   - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`.
 4. If approval is required, use the menu-bar / desktop confirmation UI (not the CLI).
 
 Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `lcu watch`, or `lcu result` to follow it. `waiting_user` requires human action; resume a user-paused task only after the user is ready.
@@ -83,8 +93,13 @@ Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `l
 
 The decision maker is pluggable; both receive the same data surface (compact elements + scaled screenshot) and their proposals flow through the same safety pipeline.
 
-- **Local VLM (default)**: `lcu-desktop` runs the Qwen3-VL subprocess automatically. Requires the weights under `models/Qwen3-VL-4B-Instruct` (see above).
-- **Agent-driven**: start the Runtime with `LCU_VISION_ACTOR=agent lcu-desktop &`, submit a goal with `lcu run`, then drive the loop with `lcu decide <task-id> --wait --json` (fetch observation) and `lcu act <task-id> --observation-id <obs> --action '<json>'` (submit a decision). Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
+- **Agent-driven (product default when `LCU_VISION_ACTOR` is unset/`auto`)**: submit with `--actor agent`, then drive the loop with `lcu decide <task-id> --wait --json` (fetch observation) and `lcu act <task-id> --observation-id <obs> --action '<json>'` (submit a decision). Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
+- **Local VLM (optional)**: submit with `--actor vlm`; `lcu-desktop` runs the Qwen3-VL subprocess automatically. Requires the weights under `models/Qwen3-VL-4B-Instruct` (see above).
+
+For Chrome, put the destination in the high-level goal. An external Agent may
+submit `{"kind":"semantic","type":"navigate","url":"https://example.com/"}`
+through `lcu act` from a current observation; navigation accepts only explicit
+`http://` or `https://` URLs with a host and is not a macOS-window action.
 
 Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).
 

@@ -89,7 +89,7 @@ impl ProductBackend {
         if !self.chrome_client.socket_present() {
             return Err(LcuError::coded(
                 ErrorCode::RuntimeUnavailable,
-                "Chrome control socket missing; load LCU Chrome Control extension / install native host",
+                "Chrome control socket missing; run install-native-host.sh, then load the extension: path it prints in chrome://extensions",
             ));
         }
 
@@ -171,7 +171,7 @@ impl PlatformBackend for ProductBackend {
             return Err(LcuError::coded(
                 ErrorCode::RuntimeUnavailable,
                 "Chrome surface required but chrome-control host is not connected; \
-                 install native host and load native/chrome-control/extension",
+                 run install-native-host.sh, then load the extension: path it prints in chrome://extensions",
             ));
         }
         self.window.resolve_target(selector)

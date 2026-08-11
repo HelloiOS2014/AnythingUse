@@ -197,6 +197,15 @@ impl PlatformBackend for MacosBackend {
             })),
         )?;
 
+        if let Some(error) = v.get("semantic_error").and_then(|x| x.as_str()) {
+            tracing::warn!(
+                pid = target.pid,
+                window_id = target.window_id,
+                error,
+                "macOS semantic observation unavailable; using screenshot-only observation"
+            );
+        }
+
         // Surface backend control state immediately on observe (no multi-layer session).
         if let Some(cs) = v.get("control_state").and_then(|c| c.as_str()) {
             match cs {
@@ -274,8 +283,8 @@ impl PlatformBackend for MacosBackend {
         target: &AppTarget,
         action: &SemanticAction,
     ) -> LcuResult<ActionReceipt> {
-        self.ensure_live()?;
         let action_json = semantic_to_json(action)?;
+        self.ensure_live()?;
         let v = self.client.call(
             "semantic",
             Some(json!({
@@ -544,6 +553,12 @@ fn parse_perm_flag(v: Option<&Value>) -> PermissionFlag {
 
 fn semantic_to_json(action: &SemanticAction) -> LcuResult<Value> {
     Ok(match action {
+        SemanticAction::Navigate { .. } => {
+            return Err(LcuError::coded(
+                ErrorCode::UnsupportedCapability,
+                "navigate is only supported by the ChromeTab surface",
+            ));
+        }
         SemanticAction::Invoke { element_id } => json!({
             "type": "invoke",
             "element_id": element_id,
@@ -599,7 +614,9 @@ fn targeted_to_json(action: &TargetedInput) -> LcuResult<Value> {
 fn risk_for_semantic(action: &SemanticAction) -> RiskLevel {
     match action {
         SemanticAction::Focus { .. } => RiskLevel::R0,
-        SemanticAction::Invoke { .. } | SemanticAction::Scroll { .. } => RiskLevel::R1,
+        SemanticAction::Navigate { .. }
+        | SemanticAction::Invoke { .. }
+        | SemanticAction::Scroll { .. } => RiskLevel::R1,
         SemanticAction::SetValue { .. } => RiskLevel::R2,
     }
 }
@@ -665,5 +682,14 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code(), ErrorCode::NotImplemented);
+    }
+
+    #[test]
+    fn navigate_is_explicitly_unsupported() {
+        let err = semantic_to_json(&SemanticAction::Navigate {
+            url: "https://example.com".into(),
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::UnsupportedCapability);
     }
 }

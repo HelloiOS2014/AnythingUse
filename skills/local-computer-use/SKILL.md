@@ -36,7 +36,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 | `lcu cancel <task-id> [--json]` | Cancel a task |
 | `lcu approve <approval-id> [--json]` | **Only opens GUI**; never completes approval |
 | `lcu schema [--json]` | Schema / protocol versions |
-| `lcu decide <task-id> [--wait] [--json]` | **Agent decision mode**: fetch the observation the worker is waiting on (compact elements + screenshot path + goal/step). Requires `lcu-desktop` started with `LCU_VISION_ACTOR=agent` |
+| `lcu decide <task-id> [--wait] [--json]` | **Agent decision mode**: fetch the observation the worker is waiting on (compact elements + screenshot path + goal/step). The task must use `--actor agent` |
 | `lcu act <task-id> --observation-id <obs> --action '<json>' [--json]` | Submit an agent decision (action JSON). Same safety pipeline as VLM proposals: EffectGuard + approvals still apply |
 
 Agent decision mode workflow (decision maker = the agent itself, data surface identical to the local VLM):
@@ -61,32 +61,32 @@ Stable exit codes: `0` ok, `2` waiting user, `3` task failed, `4` permission, `6
 
 ## Recommended workflow
 
-```bash
-# 1. Health (first use or after permission changes)
-lcu doctor --json
-
-# 2. Submit (desktop Runtime must be running: lcu-desktop)
-lcu run "Open Downloads in Finder" --app com.apple.finder --wait --json
-
-# Agent-originated tasks only tag display source (no secrets / registration):
-lcu run "Open Downloads in Finder" --app com.apple.finder --source agent --source-name codex --wait --json
-
-# 3. Track (if not using --wait)
-lcu status <task-id> --json
-lcu watch <task-id> --seconds 60
-
-# 4. If waiting_user / exit 2 → human must approve in the desktop GUI
-#    Agents must NOT call any path that completes approval.
-
-# 5. Finish
-lcu result <task-id> --json
-# or cancel
-lcu cancel <task-id> --json
-```
+1. Run `lcu doctor --json` on first use or after permission changes.
+2. Follow the Agent decision workflow above. Submit with `--actor agent`
+   **without** `--wait`, because the Agent must remain free to call
+   `lcu decide` / `lcu act`.
+3. If the task reaches `waiting_user`, stop for human GUI approval.
+4. Claim completion only after `lcu result <task-id> --json` reports
+   `succeeded`; otherwise continue the loop or cancel.
 
 There is **one serial FIFO queue** for the macOS login user. `waiting_user` and user-paused tasks release the execution slot. Do not invent client secrets, `RegisterClient`, MCP, or Playwright.
 
 macOS tasks do not activate the target window; user takeover of the same window pauses the task. Chrome tasks use an inactive background task tab and do not reactivate user or task tabs on completion. Do **not** drive Chrome via page DOM, CDP, or Playwright from the agent — only `lcu run …`.
+
+## Chrome setup and navigation
+
+Do not install or reload the Chrome extension yourself. If `lcu doctor` says
+the Chrome surface is disconnected, ask the human to run
+`./native/chrome-control/scripts/install-native-host.sh` and load unpacked
+only from the installer's printed `extension:` path (default:
+`~/Library/Application Support/AnythingUse/chrome-extension`). The repository
+extension directory is not a second load target.
+
+For a Chrome task, express the destination in the high-level goal. When a
+current observation calls for navigation, submit only the shared action JSON
+`{"kind":"semantic","type":"navigate","url":"https://example.com/"}` through
+`lcu act`. It is Chrome-only and accepts only explicit `http://` or `https://`
+URLs with a host; never call the native-host method directly.
 
 ## What you must not do
 

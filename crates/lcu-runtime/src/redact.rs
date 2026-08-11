@@ -13,10 +13,11 @@ const SENSITIVE_KEYS: &[&str] = &[
     "image_b64",
     "screenshot",
     "authorization",
-    // Action payload fields that carry model-typed content (set_value value,
-    // type_text text): they can hold credentials and must not hit logs verbatim.
+    // Action payload fields that carry model-typed content: they can hold
+    // credentials and must not hit logs verbatim.
     "value",
     "text",
+    "url",
 ];
 
 /// Recursively redact sensitive keys in a JSON value for structured logging.
@@ -38,5 +39,20 @@ pub fn redact_value(v: &Value) -> Value {
         }
         Value::Array(arr) => Value::Array(arr.iter().map(redact_value).collect()),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_entire_navigation_url() {
+        let value = json!({
+            "kind": "semantic",
+            "type": "navigate",
+            "url": "https://example.com/?password=secret"
+        });
+        assert_eq!(redact_value(&value)["url"], "[REDACTED]");
     }
 }

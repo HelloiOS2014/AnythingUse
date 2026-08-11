@@ -18,7 +18,7 @@ operating real macOS applications and Chrome through one command surface.
   `~/.grok/AGENTS.md` and `~/.claude/CLAUDE.md` so the agents know about
   AnythingUse from any working directory.
 - **Decision maker is pluggable, per task**: the agent itself is the default
-  (`lcu run "<goal>"` → loop `lcu decide <task-id> --wait --json` → read the
+  (`lcu run "<goal>" --actor agent` → loop `lcu decide <task-id> --wait --json` → read the
   screenshot path → `lcu act <task-id> --observation-id <obs> --action '<json>'`
   → finish with a `done` action). `lcu run --actor vlm` uses the local
   Qwen3-VL subprocess as an optional fallback. The Runtime default is
@@ -33,12 +33,13 @@ operating real macOS applications and Chrome through one command surface.
 # health
 ./target/release/lcu doctor --json
 
-# submit a goal (VLM decides automatically)
-./target/release/lcu run "Open Downloads in Finder" --app com.apple.finder --wait --json
+# external Agent: submit, then use the returned task id in the decision loop
+./target/release/lcu run "Open Downloads in Finder" --app com.apple.finder --actor agent --json
+./target/release/lcu decide <task-id> --wait --json
+./target/release/lcu act <task-id> --observation-id <obs> --action '{"kind":"semantic","type":"invoke","element_id":"e1"}'
 
-# agent decides (runtime started with LCU_VISION_ACTOR=agent)
-lcu decide <task-id> --wait --json
-lcu act <task-id> --observation-id <obs> --action '{"kind":"semantic","type":"invoke","element_id":"e1"}'
+# optional local VLM (separate task; model assets required)
+./target/release/lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json
 ```
 
 Hard rules (never break):

@@ -64,20 +64,26 @@ final class Service {
         let accessibility = AXBridge.enableAccessibility(pid: target.pid)
         defer { accessibility.disable() }
         var elements: [[String: Any]] = []
+        var semanticError: String?
         do {
             elements = try store.observeElements(target: target)
         } catch {
             // AX-only may fail; still try capture.
-            elements = []
+            semanticError = String(String(describing: error).prefix(4096))
         }
         if elements.isEmpty {
             // Avoid touching the global compatibility preference for ordinary
             // native apps. Retry only when the canonical AX walk produced no UI.
             let fallback = AXBridge.enableAccessibility(pid: target.pid, allowFallback: true)
             defer { fallback.disable() }
-            elements = (try? store.observeElements(target: target)) ?? []
+            do {
+                elements = try store.observeElements(target: target)
+                semanticError = nil
+            } catch {
+                semanticError = String(String(describing: error).prefix(4096))
+            }
+            fallback.disable()
         }
-
         var captureBackend: String?
         var imageB64: String?
         var imageWidth = max(1, Int(target.bounds.width))
@@ -127,6 +133,7 @@ final class Service {
                 "height": imageHeight
             ],
             "elements": elements,
+            "semantic_error": semanticError as Any,
             "image_png_b64": imageB64 as Any,
             "image_hash": imageHash as Any,
             "capture_backend": captureBackend as Any,
@@ -161,12 +168,8 @@ final class Service {
                     && !metadata.actions.contains("AXPress")
                     && (metadata.role.contains("Text") || metadata.role.contains("Field"))
                 {
-                    _ = AXBridge.syntheticFocus(target: target, element: el)
-                    let returnPath = try DirectedInput.pressReturn(target: target)
-                    return okAction(
-                        path: returnPath,
-                        detail: "confirm editable \(elementId) with directed Return"
-                    )
+                    _ = try AXBridge.press(el)
+                    return okAction(path: "ax_confirm", detail: "confirm editable \(elementId)")
                 }
                 if !metadata.actions.contains("AXPress")
                     && !metadata.actions.contains("AXConfirm")
@@ -242,26 +245,9 @@ final class Service {
 
             case "focus":
                 let elementId = try requireString(action, "element_id")
-                let el = try store.resolveElement(target: target, elementId: elementId)
-                // Soft-skip when not key window so the product loop can continue with
-                // set_value/invoke. Never activate, never re-key, never fail the task
-                // solely because the model asked for focus in the background.
-                guard FocusGuard.isTargetKeyWindow(target: target) else {
-                    return okAction(
-                        path: "focus_noop_background",
-                        detail: "focus \(elementId) skipped: target not key window "
-                            + "(pid=\(target.pid) window_id=\(target.windowID)); "
-                            + "will not activate or re-key"
-                    )
-                }
-                let ok = AXBridge.syntheticFocus(target: target, element: el)
-                if !ok {
-                    return okAction(
-                        path: "focus_noop_failed",
-                        detail: "focus \(elementId) no-op: synthetic focus failed without raise"
-                    )
-                }
-                return okAction(path: "ax_synthetic_focus", detail: "focus \(elementId)")
+                throw ServiceError.unsupported(
+                    "focus \(elementId) is disabled on macOS: agent actions never write AX focus"
+                )
 
             case "scroll":
                 let deltaY = doubleValue(action["delta_y"]) ?? -0.15
@@ -292,6 +278,12 @@ final class Service {
         return try FocusGuard.withoutFrontmostSteal(target: target) {
             switch type {
             case "click":
+                let button = (action["button"] as? String ?? "left").lowercased()
+                guard button == "left" else {
+                    throw ServiceError.unsupported(
+                        "targeted \(button) click is not supported on macOS"
+                    )
+                }
                 let x = doubleValue(action["x"]) ?? 0.5
                 let y = doubleValue(action["y"]) ?? 0.5
                 // Hit requested coordinates (or element under that point) — never first pressable.

@@ -166,6 +166,7 @@ When Elements is empty, these screenshot-targeted actions are also allowed:
 {"kind":"targeted","type":"key_combo","keys":["RETURN"]}
 Coordinates are normalized to the current window screenshot: x=0 left, x=1 right,
 y=0 top, y=1 bottom. Use type_text only after the intended field is focused.
+On macOS, the only supported key_combo is exactly ["RETURN"] or ["ENTER"].
 Use RETURN after filling a search/filter field when results require submission.
 """
 
@@ -226,26 +227,39 @@ def build_prompt(
             }
         )
     element_ids = [str(e["id"]) for e in compact if e.get("id")]
+    is_chrome = "chrome" in str(observation.get("app_id") or "").lower()
+    navigation_action = (
+        '\nChrome navigation is allowed with an explicit HTTP(S) URL:\n'
+        '{"kind":"semantic","type":"navigate","url":"https://example.com"}'
+        if is_chrome
+        else ""
+    )
     if element_ids:
         example_id = json.dumps(element_ids[0], ensure_ascii=False)
+        focus_action = (
+            f'{{"kind":"semantic","type":"focus","element_id":{example_id}}}\n'
+            if is_chrome
+            else ""
+        )
         semantic_actions = (
             "Semantic actions are also allowed; element_id must be copied from "
             f"Valid element_ids={json.dumps(element_ids, ensure_ascii=False)}:\n"
             f'{{"kind":"semantic","type":"invoke","element_id":{example_id}}}\n'
             f'{{"kind":"semantic","type":"set_value","element_id":{example_id},"value":"..."}}\n'
-            f'{{"kind":"semantic","type":"focus","element_id":{example_id}}}\n'
+            f"{focus_action}"
             '{"kind":"semantic","type":"scroll","element_id":null,"delta_x":0,"delta_y":-0.3}\n'
             "Elements contains usable AX controls, so targeted click/type_text is "
             "forbidden for this observation. Use semantic actions. After setting "
             "a search/filter field, invoke that same element only when its actions "
             "include AXConfirm and the results have not refreshed."
+            f"{navigation_action}"
         )
     else:
         semantic_actions = (
-            "Elements is empty. Semantic actions are forbidden because no valid "
+            "Elements is empty. Element-bound semantic actions are forbidden because no valid "
             "element_id exists. Use targeted click/type_text from the screenshot, "
             "or fail/request_user if safe progress is impossible.\n"
-            f"{TARGETED_ACTIONS}"
+            f"{TARGETED_ACTIONS}{navigation_action}"
         )
     step_line = f"Step: {step}\n" if step is not None else ""
     last_line = (
@@ -285,6 +299,7 @@ def normalize_action_payload(obj: dict[str, Any]) -> dict[str, Any]:
         for k in (
             "type",
             "element_id",
+            "url",
             "value",
             "delta_x",
             "delta_y",
@@ -599,6 +614,24 @@ def handle(req: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
+    if "--self-check" in sys.argv:
+        parsed = extract_json(
+            '{"action":"semantic","type":"navigate","url":"https://example.com/path"}'
+        )
+        assert parsed["action"] == {
+            "kind": "semantic",
+            "type": "navigate",
+            "url": "https://example.com/path",
+        }
+        sample = {"elements": [{"id": "e1", "role": "AXTextField"}]}
+        mac_prompt = build_prompt("fill field", {**sample, "app_id": "com.apple.TextEdit"})
+        chrome_prompt = build_prompt("fill field", {**sample, "app_id": "com.google.Chrome"})
+        assert '"type":"focus"' not in mac_prompt
+        assert '"type":"focus"' in chrome_prompt
+        mac_empty_prompt = build_prompt("fill field", {"app_id": "com.apple.TextEdit", "elements": []})
+        assert 'only supported key_combo is exactly ["RETURN"] or ["ENTER"]' in mac_empty_prompt
+        print("parser/prompt self-check ok")
+        return
     log(f"qwen3_vl_worker starting model_dir={MODEL_DIR}")
     for line in sys.stdin:
         line = line.strip()

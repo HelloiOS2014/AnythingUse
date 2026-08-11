@@ -56,8 +56,8 @@ enum Commands {
         /// Display-only source label (e.g. codex, grok). Not authentication.
         #[arg(long)]
         source_name: Option<String>,
-        /// Decision maker for this task: `vlm` (local model, default) or
-        /// `agent` (external agent via lcu decide/lcu act).
+        /// Decision maker: `agent` or `vlm`; omitted follows Runtime
+        /// `LCU_VISION_ACTOR` (unset/auto defaults to agent).
         #[arg(long)]
         actor: Option<String>,
     },
@@ -115,8 +115,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Fetch the observation the worker waits on for an agent decision
-    /// (agent decision mode: start lcu-desktop with LCU_VISION_ACTOR=agent).
+    /// Fetch the observation the worker waits on for an `--actor agent` task.
     Decide {
         task_id: String,
         #[arg(long)]

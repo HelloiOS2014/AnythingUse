@@ -19,7 +19,7 @@
 ## `chrome_control_host` disconnected
 
 - Run `./native/chrome-control/scripts/install-native-host.sh`
-- Load unpacked extension from `native/chrome-control/extension`
+- Load unpacked only from the installer's printed `extension:` path (default: `~/Library/Application Support/AnythingUse/chrome-extension`)
 - Chrome must be running so Native Messaging can launch the host
 - Socket: `~/Library/Application Support/AnythingUse/chrome-control.sock` (no TCP)
 
@@ -34,6 +34,12 @@ Wire name is `waiting_user` (legacy alias `waiting_approval` may appear in older
 
 - Non-Chrome: ensure the app is running with a visible window; try `--app Finder`.
 - Chrome: extension + native host must be connected; goals open a **background task tab**, not AX menus.
+
+## `lcu decide` returns `elements: []`
+
+- The target app exposed a screenshot but no usable macOS Accessibility tree.
+- AnythingUse keeps coordinate click and Return/Enter at R3; it does not silently weaken the gate to automate an unknown Send/Delete/Pay control.
+- In the current `1.0.0` build, cancel the task if no safe semantic action is available. Enterprise WeChat is one known example. The planned `1.1.0` fix is the generic screenshot-bound macOS operator; do not add an application-specific workaround.
 
 ## VLM slow or OOM on 16GB
 

@@ -5,16 +5,32 @@ Branch: `main`
 Product name: **AnythingUse**  
 Command codename: **LCU** (`lcu`, `lcu-*`); data root: `~/Library/Application Support/AnythingUse`
 
-## What is delivered
+## Source-level delivery
 
-macOS core Computer Use is implemented and on `main`:
+This page records source and interface delivery. **Implemented** means the
+behavior exists in the source tree; it does not mean that AnythingUse is already
+proven mature, stable, or compatible with every real application.
+
+Current macOS-core implementation includes:
 
 - Humans and Agents share the public `lcu` CLI; Agents use the bundled Skill only.
 - One serial FIFO queue per login user, with pause, resume, cancel, GUI approval, and SQLite recovery (leftover tasks from a dead process are recovered to `paused` for the user to decide; recovered tasks do not occupy queue slots).
 - macOS: strict window identity (PID + `CGWindowID`); no activate-as-strategy; same-window takeover pauses.
 - Chrome: real user Chrome via extension + Native Messaging + inactive task tab (not Playwright).
-- Pluggable decision maker: local Qwen3-VL subprocess (default) or the external Agent itself (`LCU_VISION_ACTOR=agent`, `lcu decide`/`lcu act`) — identical data surface and safety pipeline.
+- Pluggable decision maker: when `LCU_VISION_ACTOR` is unset/`auto`, tasks default to the external Agent (`lcu decide`/`lcu act`); `--actor vlm` selects the optional local Qwen3-VL subprocess per task. Both use the same data surface and safety pipeline.
 - Task `succeeded` only after explicit model `Done` and successful re-observation of the target.
+
+## Runtime verification boundary
+
+`Runtime-verified` requires a recorded live run on the target surface. The
+source-level items above are not a substitute for verifying a specific app,
+Chrome profile, permissions state, model, or user-coexistence scenario. No
+broad stability or compatibility claim is made by this status page.
+
+Live evidence recorded on 2026-08-11:
+
+- TextEdit: semantic `set_value` followed by explicit `Done` succeeded without making TextEdit frontmost.
+- Enterprise WeChat (`com.tencent.WeWorkMac`): screenshot capture works, but the app returned no AX windows/elements; the contact-search task was cancelled before any action. This surface is not yet runtime-verified.
 
 Hard product boundaries (not optional):
 
@@ -22,9 +38,9 @@ Hard product boundaries (not optional):
 - No Playwright / independent automation browser.
 - No public TCP control surface (private per-user Unix sockets only).
 
-## What is not a freeze gate
+## Outside the current source scope
 
-These are explicit non-goals for the current macOS core freeze:
+These are not part of the current macOS-core source scope:
 
 - Top100 multi-app certification suites and long soak / stress programs as release blockers.
 - macOS Developer ID signed installer / notarized packaging.
@@ -35,7 +51,7 @@ These are explicit non-goals for the current macOS core freeze:
 1. Signed macOS packaging and install/uninstall story.
 2. Windows compatibility on the same command-oriented model.
 
-Neither blocks claiming macOS core capability on `main`.
+Neither changes the current source-level delivery statement.
 
 ## Naming map
 

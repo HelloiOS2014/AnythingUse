@@ -30,25 +30,20 @@ enum DirectedInput {
         let y = target.bounds.minY + target.bounds.height * ny
         let point = CGPoint(x: x, y: y)
 
-        // Path A: AX press on the element under the requested point, only if it belongs
-        // to the target window. Skip synthetic focus when not key (press alone).
+        // Path A: operate on the element under the requested point, only if it belongs
+        // to the target window. Never write AX focus attributes.
         if let hit = AXBridge.elementAtScreenPoint(point, expectedPID: target.pid) {
             let hitIsInTarget = AXBridge.elementBelongsToTargetWindow(hit, target: target)
                 || WindowResolver.isTopmostProcessWindow(target: target, at: point)
             if hitIsInTarget {
-                if let editable = AXBridge.editableAtOrAbove(hit)
-                    ?? AXBridge.editableBelow(hit, containing: point),
-                   AXBridge.syntheticFocus(target: target, element: editable)
+                if AXBridge.editableAtOrAbove(hit) != nil
+                    || AXBridge.editableBelow(hit, containing: point) != nil
                 {
-                    // AX focus alone does not dispatch the mouse/input events that
-                    // Chromium-style controls use to update their business state.
-                    // Deliver a real click to the target process without touching
-                    // the global cursor or activating the application.
                     try postMouseClick(pid: target.pid, point: point)
                     return ActionReport(
-                        path: "ax_focus_editable_at_point+cgevent_post_to_pid_click",
+                        path: "editable_at_point+cgevent_post_to_pid_click",
                         detail: String(
-                            format: "focused and clicked editable under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
+                            format: "clicked editable under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
                             x, y, nx, ny, target.pid, target.windowID
                         ),
                         mouseEventsPosted: true,
@@ -56,10 +51,9 @@ enum DirectedInput {
                     )
                 }
                 if let pressable = AXBridge.pressableAtOrAbove(hit) {
-                    let focused = AXBridge.syntheticFocus(target: target, element: pressable)
                     try AXBridge.press(pressable)
                     return ActionReport(
-                        path: focused ? "ax_press_at_point+synthetic_focus" : "ax_press_at_point",
+                        path: "ax_press_at_point",
                         detail: String(
                             format: "pressed element under (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
                             x, y, nx, ny, target.pid, target.windowID

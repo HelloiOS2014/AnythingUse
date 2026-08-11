@@ -24,10 +24,14 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Operate a specific application window without activating it |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
-| Decision maker | External Agent by default (`lcu run --actor agent` + `lcu decide`/`lcu act`); local Qwen3-VL as an optional fallback (`--actor vlm`) |
+| Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
 | Safety | Effect-based risk checks, GUI-bound approval, takeover detection, fail-closed window isolation |
 | Persistence | Local SQLite task and event state |
+
+These are implemented source-level contracts, not a broad real-app
+compatibility or stability certification. Runtime verification remains
+scenario-specific.
 
 The current implementation is a developer build for Apple Silicon macOS (no signed installer yet).
 
@@ -46,7 +50,7 @@ flowchart LR
     USER["User input"] -. "same-target takeover" .-> RT
 ```
 
-The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: by default the external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`); the local VLM is an optional fallback (`lcu run --actor vlm`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
+The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: with the normal unset/`auto` Runtime default, the external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`); the local VLM is optional (`lcu run --actor vlm`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
 
 ## Quick start
 
@@ -59,12 +63,18 @@ cargo build -p lcu-cli -p lcu-desktop --release
 ./target/release/lcu-desktop &
 ./target/release/lcu doctor --json
 
-# submit a task (--source is display-only metadata)
+# external Agent path: the Skill continues with lcu decide / lcu act
 ./target/release/lcu run "Open Downloads in Finder" \
-  --app com.apple.finder --source agent --source-name codex --wait --json
+  --app com.apple.finder --actor agent --json
+
+# human/local path: requires the optional model assets below
+./target/release/lcu run "Open Downloads in Finder" \
+  --app com.apple.finder --actor vlm --wait --json
 ```
 
-Optional: Chrome surface (`./native/chrome-control/scripts/install-native-host.sh`, then `chrome://extensions` → Developer mode → **Load unpacked** → `native/chrome-control/extension`); local VLM (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`, then `./scripts/download_qwen3_vl.sh`).
+Agents use the bundled Skill; `--source` is display-only metadata.
+
+Optional: Chrome surface — run `./native/chrome-control/scripts/install-native-host.sh`, then in `chrome://extensions` enable Developer mode and **Load unpacked** only from the `extension:` path it prints (default: `~/Library/Application Support/AnythingUse/chrome-extension`). Local VLM: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`, then `./scripts/download_qwen3_vl.sh`.
 
 ## Install the Skill as a plugin
 
@@ -129,5 +139,5 @@ scripts/                      Model download and helper scripts
 
 ## Documentation
 
-- [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
+- [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS window service](native/macos-window-service/README.md) · [Chrome control](native/chrome-control/README.md)

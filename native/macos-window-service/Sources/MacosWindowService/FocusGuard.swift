@@ -42,7 +42,7 @@ enum FocusGuard {
     }
 
     /// Whether the target window is already the system key window (pid + windowID).
-    /// Required before any synthetic in-app focus that can re-key windows.
+    /// Required before PID-directed input that depends on system key-window routing.
     static func isTargetKeyWindow(target: MacWindowTarget) -> Bool {
         guard isFrontmost(pid: target.pid) else { return false }
         // Prefer AXWindowNumber when the app exposes it.

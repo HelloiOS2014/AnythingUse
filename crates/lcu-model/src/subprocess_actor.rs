@@ -56,6 +56,7 @@ fn coerce_action_value(
             for key in [
                 "type",
                 "element_id",
+                "url",
                 "value",
                 "delta_x",
                 "delta_y",
