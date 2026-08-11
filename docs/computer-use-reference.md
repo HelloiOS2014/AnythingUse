@@ -461,12 +461,14 @@ text still did not land in the AX-empty target. It was removed.
 A replacement input spike is explicitly opt-in. It uses the reviewed
 target-only sequence: synthetic focus and unfocus records contain only the
 strict target PSN/window, so the implementation cannot notify the real
-foreground process. It is not connected to automatic routing and is not an
-accepted product capability before the live focus gate passes.
+foreground process. On 2026-08-11, background TextEdit typing succeeded while
+the frontmost process remained Codex before and after the action. This accepts
+the focus/keyboard mechanism only; targeted click remains unverified and the
+product default remains disabled.
 
 Consequences:
 
-- no Wave 2 integration starts from that mechanism;
+- no automatic product routing starts from that mechanism;
 - targeted coordinate click/key actions remain R3, and model intent can only
   raise risk;
 - `1.1.0` adds observation target/transform metadata and Agent intent parity,
@@ -474,11 +476,10 @@ Consequences:
 - macOS currently uses strict window capture, AX semantic actions, and existing
   PID-directed actions only when their target proof succeeds;
 - AX-empty apps such as the tested Enterprise WeChat build remain unsupported
-  for unattended background typing;
+  until the same target-only mechanism passes a generic non-AX task gate;
 - startup removes stale Agent/VLM screenshots and the Chrome host rotates logs.
 
-The next execution mechanism must demonstrate real input isolation without
-changing the user's front process, key window, keyboard focus, pointer, or
-Space. Until such a primitive exists, fail closed. A separate desktop/session
-or VM is a valid future isolation boundary; switching to the target and back is
-not.
+The target-only mechanism must still pass targeted-click and non-AX app gates
+without changing the user's front process, key window, keyboard focus, pointer,
+or Space before it can become the default. Until then, fail closed; switching to
+the target and back is not an allowed fallback.

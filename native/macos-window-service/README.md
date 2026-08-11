@@ -38,8 +38,9 @@ Socket mode `0600`, parent directory `0700`. No TCP.
 `LCU_MACOS_EXPERIMENTAL_SKY_INPUT=1` enables the isolated execution-layer
 spike for background left clicks and PID-directed keyboard input. It sends
 synthetic focus records only to the strict target PID/window, never to the real
-foreground app, and has no fallback to activation or global HID input. It
-remains disabled until the live focus gate passes.
+foreground app, and has no fallback to activation or global HID input. The
+background typing gate passed on 2026-08-11; targeted click remains unverified,
+so the path stays disabled by default.
 
 ## Wire protocol
 
