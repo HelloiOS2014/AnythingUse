@@ -33,6 +33,14 @@ Override: `--socket PATH` or `LCU_MACOS_WINDOW_SOCK`.
 
 Socket mode `0600`, parent directory `0700`. No TCP.
 
+## Experimental target-only click
+
+`LCU_MACOS_EXPERIMENTAL_SKY_INPUT=1` enables the isolated execution-layer
+spike for background left clicks and PID-directed keyboard input. It sends
+synthetic focus records only to the strict target PID/window, never to the real
+foreground app, and has no fallback to activation or global HID input. It
+remains disabled until the live focus gate passes.
+
 ## Wire protocol
 
 Newline-delimited JSON:

@@ -20,6 +20,10 @@ let package = Package(
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("UniformTypeIdentifiers")
             ]
+        ),
+        .testTarget(
+            name: "MacosWindowServiceTests",
+            dependencies: ["MacosWindowService"]
         )
     ]
 )

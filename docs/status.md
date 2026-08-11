@@ -37,6 +37,10 @@ Live evidence recorded on 2026-08-11:
   records caused the user's active app to lose keyboard focus, and authenticated
   text still did not land in Enterprise WeChat. The candidate was removed and is
   not part of the backend.
+- A replacement target-only input spike now exists behind
+  `LCU_MACOS_EXPERIMENTAL_SKY_INPUT=1`. Its data model cannot address or send a
+  record to the real foreground process. It is disabled by default and is not a
+  product capability until the controlled live focus gate passes.
 
 Current limitation: there is no accepted generic background input route for a
 macOS app that exposes neither usable AX controls nor another independently

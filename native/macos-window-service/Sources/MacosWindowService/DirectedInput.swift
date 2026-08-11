@@ -67,6 +67,18 @@ enum DirectedInput {
 
         // Path B: coordinate click via postToPid. Prove the requested point belongs
         // to this exact same-process window before using the PID-only event route.
+        if ExperimentalSkyLightInput.isEnabled && !FocusGuard.isFrontmost(pid: target.pid) {
+            try ExperimentalSkyLightInput.click(target: target, screenPoint: point)
+            return ActionReport(
+                path: "experimental_skylight_target_only_click",
+                detail: String(
+                    format: "target-only background click at (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
+                    x, y, nx, ny, target.pid, target.windowID
+                ),
+                mouseEventsPosted: true,
+                keyEventsPosted: false
+            )
+        }
         guard WindowResolver.isTopmostProcessWindow(target: target, at: point) else {
             throw ServiceError.unsupported(
                 "click refused: cannot bind point to pid=\(target.pid) window_id=\(target.windowID)"
@@ -121,9 +133,23 @@ enum DirectedInput {
     /// Long input re-proves key-window ownership every segment so a user switch
     /// mid-type aborts immediately (never continue dumping into the wrong window).
     static func typeUnicode(target: MacWindowTarget, text: String) throws -> String {
+        if ExperimentalSkyLightInput.isEnabled && !FocusGuard.isFrontmost(pid: target.pid) {
+            return try ExperimentalSkyLightInput.withSyntheticTargetFocus(target: target) {
+                let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
+                try postUnicode(
+                    target: target,
+                    eventPID: eventPID,
+                    text: text,
+                    useSkyLight: true
+                )
+                return eventPID == target.pid
+                    ? "experimental_skylight_target_only_type"
+                    : "experimental_skylight_renderer_type"
+            }
+        }
         try establishKeyboardLead(target: target)
         let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
-        try postUnicode(target: target, eventPID: eventPID, text: text)
+        try postUnicode(target: target, eventPID: eventPID, text: text, useSkyLight: false)
         return eventPID == target.pid
             ? "cgevent_post_to_pid_type"
             : "cgevent_post_to_renderer_pid_type"
@@ -131,9 +157,23 @@ enum DirectedInput {
 
     /// Submit an already AX-bound editable without activating its app.
     static func pressReturn(target: MacWindowTarget) throws -> String {
+        if ExperimentalSkyLightInput.isEnabled && !FocusGuard.isFrontmost(pid: target.pid) {
+            return try ExperimentalSkyLightInput.withSyntheticTargetFocus(target: target) {
+                let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
+                try postKey(
+                    target: target,
+                    pid: eventPID,
+                    virtualKey: 36,
+                    useSkyLight: true
+                )
+                return eventPID == target.pid
+                    ? "experimental_skylight_target_only_return"
+                    : "experimental_skylight_renderer_return"
+            }
+        }
         try establishKeyboardLead(target: target)
         let eventPID = AXBridge.keyboardEventPID(applicationPID: target.pid)
-        try postKey(pid: eventPID, virtualKey: 36)
+        try postKey(target: target, pid: eventPID, virtualKey: 36, useSkyLight: false)
         return eventPID == target.pid
             ? "cgevent_post_to_pid_return"
             : "cgevent_post_to_renderer_pid_return"
@@ -214,14 +254,22 @@ enum DirectedInput {
     private static func postUnicode(
         target: MacWindowTarget,
         eventPID: pid_t,
-        text: String
+        text: String,
+        useSkyLight: Bool
     ) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ServiceError.actionFailed("CGEventSource create failed")
         }
         var index = 0
         for ch in text.unicodeScalars {
-            if index % typeSegmentChars == 0 {
+            if useSkyLight {
+                guard !FocusGuard.isFrontmost(pid: target.pid) else {
+                    throw ServiceError.unsupported(
+                        "experimental typing stopped: user became active in target pid=\(target.pid)"
+                    )
+                }
+                try ExperimentalSkyLightInput.validateWindow(target)
+            } else if index % typeSegmentChars == 0 {
                 // Re-confirm target is still the process key window before each segment.
                 try requireKeyboardTargetProof(target: target, capability: "type")
             }
@@ -237,24 +285,51 @@ enum DirectedInput {
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             down.flags = []
             up.flags = []
-            down.postToPid(eventPID)
+            if useSkyLight {
+                try ExperimentalSkyLightInput.postKeyboard(down, pid: eventPID)
+            } else {
+                down.postToPid(eventPID)
+            }
             usleep(8_000)
-            up.postToPid(eventPID)
+            if useSkyLight {
+                try ExperimentalSkyLightInput.postKeyboard(up, pid: eventPID)
+            } else {
+                up.postToPid(eventPID)
+            }
             usleep(8_000)
             index += 1
         }
     }
 
-    private static func postKey(pid: pid_t, virtualKey: CGKeyCode) throws {
+    private static func postKey(
+        target: MacWindowTarget,
+        pid: pid_t,
+        virtualKey: CGKeyCode,
+        useSkyLight: Bool
+    ) throws {
         guard let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
         else {
             throw ServiceError.actionFailed("keyboard event create failed")
         }
-        down.postToPid(pid)
+        if useSkyLight {
+            guard !FocusGuard.isFrontmost(pid: target.pid) else {
+                throw ServiceError.unsupported(
+                    "experimental key stopped: user became active in target pid=\(target.pid)"
+                )
+            }
+            try ExperimentalSkyLightInput.validateWindow(target)
+            try ExperimentalSkyLightInput.postKeyboard(down, pid: pid)
+        } else {
+            down.postToPid(pid)
+        }
         usleep(8_000)
-        up.postToPid(pid)
+        if useSkyLight {
+            try ExperimentalSkyLightInput.postKeyboard(up, pid: pid)
+        } else {
+            up.postToPid(pid)
+        }
         usleep(8_000)
     }
 

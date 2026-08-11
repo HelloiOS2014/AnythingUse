@@ -458,6 +458,12 @@ gate. The candidate SkyLight focus-without-raise sequence sent defocus/focus
 records that disrupted the user's active keyboard focus, while authenticated
 text still did not land in the AX-empty target. It was removed.
 
+A replacement input spike is explicitly opt-in. It uses the reviewed
+target-only sequence: synthetic focus and unfocus records contain only the
+strict target PSN/window, so the implementation cannot notify the real
+foreground process. It is not connected to automatic routing and is not an
+accepted product capability before the live focus gate passes.
+
 Consequences:
 
 - no Wave 2 integration starts from that mechanism;
