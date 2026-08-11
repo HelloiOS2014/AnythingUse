@@ -19,9 +19,9 @@ This document records the implemented source-level architecture and command
 contract. It is not evidence that every real application has stable runtime
 behavior; that requires target-specific verification.
 
-The approved target contract and minimal execution-layer rework are tracked in
-[Computer Use Reference Notes](computer-use-reference.md). This page remains the
-current-state architecture until that plan is implemented and accepted.
+The reference comparison and rejected screenshot-only Operator candidate are
+tracked in [Computer Use Reference Notes](computer-use-reference.md). This page
+records only the accepted current-state architecture.
 
 ## Components
 

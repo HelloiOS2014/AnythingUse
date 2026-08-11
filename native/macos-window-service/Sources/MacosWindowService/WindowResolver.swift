@@ -142,7 +142,9 @@ enum WindowResolver {
         target: MacWindowTarget,
         at point: CGPoint
     ) -> Bool {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        // Background targets can be fully occluded by the user's active app and
+        // disappear from optionOnScreenOnly even though window capture still works.
+        let options: CGWindowListOption = [.excludeDesktopElements]
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return false
         }

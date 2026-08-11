@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Public JSON schema version returned by `lcu doctor --json` and other envelopes.
-pub const PROTOCOL_SCHEMA_VERSION: &str = "1.0.0";
+pub const PROTOCOL_SCHEMA_VERSION: &str = "1.1.0";
 
 /// Stable process exit codes for the `lcu` CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +17,6 @@ pub enum ExitCode {
     RuntimeUnavailable = 69,
     InternalError = 70,
 }
-
 impl ExitCode {
     pub fn as_i32(self) -> i32 {
         self as i32
@@ -120,4 +119,3 @@ impl InternalProtocolVersion {
         self.0 == other.0
     }
 }
-

@@ -20,7 +20,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 
 | 领域 | 能力 |
 |---|---|
-| macOS 应用 | 在不激活窗口的前提下操作特定应用窗口 |
+| macOS 应用 | 对严格 PID + 窗口目标进行截图与 AX 语义操作；无法证明安全的后台输入会 fail closed |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
 | 决策器 | `LCU_VISION_ACTOR` 未设置或为 `auto` 时默认由外部 Agent 决策；本地 Qwen3-VL 可按任务显式选择（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
@@ -95,10 +95,14 @@ claude plugin update anythinguse    # 或：grok plugin update
 
 共存不是"目标应用在前台就暂停"：
 
-- macOS 任务绑定到特定 PID 和窗口；后台动作从不激活它。
+- macOS 任务绑定到特定 PID 和窗口；不会把激活目标作为兜底策略。
 - 用户接管该精确窗口时，任务暂停并释放执行。
 - Chrome 工作在非激活任务标签页进行，从不重新激活用户的标签页。
 - 无法维持严格目标身份时，操作失败，而不是猜测另一个窗口。
+
+对于没有可用 Accessibility 控件的应用，当前只能观察；除非既有的 PID
+定向动作能够证明安全投递。AnythingUse 不会通过让用户当前应用失焦来
+迫使后台目标接收输入。
 
 这是产品不变量。切到目标再切回去不算非干扰。
 

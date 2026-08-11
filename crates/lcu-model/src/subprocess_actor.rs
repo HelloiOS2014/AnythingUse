@@ -117,6 +117,32 @@ pub(crate) fn write_private_temp_file(path: &Path, bytes: &[u8]) -> std::io::Res
     }
 }
 
+/// Remove screenshots left by a crashed AnythingUse process. Live decisions
+/// finish within the product timeout, so files younger than one hour stay put.
+pub(crate) fn cleanup_stale_temp_files() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(3600))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("lcu-agent-") || name.starts_with("lcu-vlm-")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|modified| modified < cutoff)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub struct SubprocessVisionActor {
     python: PathBuf,
     worker_script: PathBuf,
@@ -155,6 +181,7 @@ impl SubprocessVisionActor {
         worker_script: impl Into<PathBuf>,
         model_dir: impl Into<PathBuf>,
     ) -> Self {
+        cleanup_stale_temp_files();
         Self {
             python: python.into(),
             worker_script: worker_script.into(),
@@ -566,7 +593,13 @@ for line in sys.stdin:
         ModelObservation {
             observation_id: "obs_1".into(),
             app_id: "com.example.App".into(),
+            pid: 1,
+            window_id: 2,
             window_title: "t".into(),
+            window_frame: [0.0, 0.0, 10.0, 10.0],
+            transform_id: "transform_1".into(),
+            image_hash: None,
+            display_scale: 1.0,
             elements: vec![],
             image_png: None,
             image_width: 10,

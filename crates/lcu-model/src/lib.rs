@@ -24,7 +24,14 @@ use serde::{Deserialize, Serialize};
 pub struct ModelObservation {
     pub observation_id: String,
     pub app_id: String,
+    pub pid: u32,
+    pub window_id: u64,
     pub window_title: String,
+    pub window_frame: [f64; 4],
+    pub transform_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_hash: Option<String>,
+    pub display_scale: f64,
     pub elements: Vec<ModelElement>,
     /// Image bytes stay in the model worker memory only; not serialized to agents.
     #[serde(skip)]
@@ -32,7 +39,6 @@ pub struct ModelObservation {
     pub image_width: u32,
     pub image_height: u32,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelElement {
     pub id: String,
@@ -47,7 +53,22 @@ impl From<&AppObservation> for ModelObservation {
         Self {
             observation_id: obs.observation_id.0.clone(),
             app_id: obs.target.app_id.clone(),
+            pid: obs.target.pid,
+            window_id: obs.target.window_id,
             window_title: obs.target.window_title.clone(),
+            window_frame: [
+                obs.window_frame.x,
+                obs.window_frame.y,
+                obs.window_frame.width,
+                obs.window_frame.height,
+            ],
+            transform_id: obs.transform_id.0.clone(),
+            image_hash: obs.image_hash.clone(),
+            display_scale: if obs.window_frame.width > 0.0 {
+                obs.model_size.width as f64 / obs.window_frame.width
+            } else {
+                1.0
+            },
             elements: obs
                 .elements
                 .iter()
@@ -237,4 +258,3 @@ mod tests {
         ));
     }
 }
-

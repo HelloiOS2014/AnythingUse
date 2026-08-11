@@ -756,6 +756,7 @@ impl Runtime {
         task_id: Option<&TaskId>,
         observation: &AppObservation,
         action: &Action,
+        model_effect_claim: Option<&str>,
         task_authorized_max_risk: RiskLevel,
         caller: Option<&CallerIdentity>,
     ) -> LcuResult<EvaluatedAction> {
@@ -763,7 +764,7 @@ impl Runtime {
             task_id,
             observation,
             action,
-            None,
+            model_effect_claim,
             task_authorized_max_risk,
             caller,
             false,
@@ -1535,6 +1536,7 @@ mod tests {
                 observation: obs.clone(),
                 target: obs.target,
                 risk: RiskLevel::R3,
+                effect_claim: None,
                 takeover_started: false,
             },
         );
@@ -1603,6 +1605,7 @@ mod tests {
                 observation: obs.clone(),
                 target: obs.target,
                 risk: evaluated.risk,
+                effect_claim: None,
                 takeover_started: false,
             },
         );
@@ -1711,6 +1714,7 @@ mod tests {
                     observation: obs.clone(),
                     target: obs.target.clone(),
                     risk: RiskLevel::R4,
+                    effect_claim: None,
                     takeover_started: false,
                 },
             );

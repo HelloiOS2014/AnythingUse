@@ -30,7 +30,18 @@ broad stability or compatibility claim is made by this status page.
 Live evidence recorded on 2026-08-11:
 
 - TextEdit: semantic `set_value` followed by explicit `Done` succeeded without making TextEdit frontmost.
-- Enterprise WeChat (`com.tencent.WeWorkMac`): screenshot capture works, but the app returned no AX windows/elements; the contact-search task was cancelled before any action. This surface is not yet runtime-verified.
+- Enterprise WeChat (`com.tencent.WeWorkMac`): screenshot capture works, but the
+  app returned no AX windows/elements and the contact-search goal did not
+  complete. This surface is not runtime-verified.
+- A candidate SkyLight coordinate-input spike was rejected: its focus-without-raise
+  records caused the user's active app to lose keyboard focus, and authenticated
+  text still did not land in Enterprise WeChat. The candidate was removed and is
+  not part of the backend.
+
+Current limitation: there is no accepted generic background input route for a
+macOS app that exposes neither usable AX controls nor another independently
+isolated target API. Such tasks must fail closed; switching focus away and back
+is not an allowed fallback.
 
 Hard product boundaries (not optional):
 

@@ -39,7 +39,9 @@ Wire name is `waiting_user` (legacy alias `waiting_approval` may appear in older
 
 - The target app exposed a screenshot but no usable macOS Accessibility tree.
 - AnythingUse keeps coordinate click and Return/Enter at R3; it does not silently weaken the gate to automate an unknown Send/Delete/Pay control.
-- In the current `1.0.0` build, cancel the task if no safe semantic action is available. Enterprise WeChat is one known example. The planned `1.1.0` fix is the generic screenshot-bound macOS operator; do not add an application-specific workaround.
+- Cancel the task if no safe semantic action is available. Enterprise WeChat is
+  one known example. Do not add an application-specific workaround, weaken R3,
+  or use defocus/focus records to simulate background isolation.
 
 ## VLM slow or OOM on 16GB
 

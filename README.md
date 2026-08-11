@@ -22,7 +22,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 
 | Area | Current capability |
 |---|---|
-| macOS applications | Operate a specific application window without activating it |
+| macOS applications | Window capture and AX semantic actions on a strict PID + window target; unsupported background input fails closed |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
 | Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
@@ -101,10 +101,14 @@ Skill updates ride the repo; the `lcu` binaries stay a separate build.
 
 Coexistence is not "pause whenever the target app is frontmost":
 
-- A macOS task is bound to a specific PID and window; background actions never activate it.
+- A macOS task is bound to a specific PID and window; activation is never used as a fallback.
 - If the user takes over that exact window, the task pauses and releases execution.
 - Chrome work runs in an inactive task tab and never reactivates the user's tabs.
 - If strict target identity cannot be maintained, the operation fails rather than guessing another window.
+
+Apps that expose no usable Accessibility controls are currently observation-only
+unless an existing PID-directed action can prove safe delivery. AnythingUse does
+not defocus the user's app to make a background target accept input.
 
 This is a product invariant. Switching to the target and switching back is not non-interference.
 

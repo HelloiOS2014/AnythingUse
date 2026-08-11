@@ -160,6 +160,7 @@ pub fn run_gated_step(
         Some(task_id),
         &before,
         &proposal.action,
+        proposal.effect_claim.as_deref(),
         RiskLevel::R4,
         Some(caller),
     )?;
@@ -175,7 +176,14 @@ pub fn run_gated_step(
                     ),
                 ));
             }
-            Some(runtime.perform_gated_action(task_id, target, &before, &proposal.action, None)?)
+            Some(runtime.perform_gated_action(
+                task_id,
+                target,
+                &before,
+                &proposal.action,
+                proposal.effect_claim.as_deref(),
+                None,
+            )?)
         }
         Action::Observe | Action::Wait { .. } => None,
         Action::Done { .. } | Action::Fail { .. } | Action::RequestUser { .. } => None,

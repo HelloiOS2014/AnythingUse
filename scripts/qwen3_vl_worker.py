@@ -149,6 +149,10 @@ Action must be one of:
 {"kind":"request_user","reason":"..."}
 
 Rules:
+- effect_claim is required for targeted click/key actions and must be exactly one of:
+  focus, open, search, select, navigate, scroll, edit, send, submit, upload,
+  delete, publish, confirm, auth, credential, security, finance, pay, purchase.
+- expected_effect briefly names the visible evidence expected after the action.
 - Never invent element ids.
 - Avoid destructive actions (delete/trash/pay/send) unless goal requires.
 - One action only.
@@ -165,7 +169,9 @@ When Elements is empty, these screenshot-targeted actions are also allowed:
 {"kind":"targeted","type":"type_text","text":"..."}
 {"kind":"targeted","type":"key_combo","keys":["RETURN"]}
 Coordinates are normalized to the current window screenshot: x=0 left, x=1 right,
-y=0 top, y=1 bottom. Use type_text only after the intended field is focused.
+y=0 top, y=1 bottom. Coordinate click+type is not available on macOS because
+it cannot be isolated from the user's keyboard focus. Use plain type_text only
+after an approved click and a fresh screenshot proves the intended field is focused.
 On macOS, the only supported key_combo is exactly ["RETURN"] or ["ENTER"].
 Use RETURN after filling a search/filter field when results require submission.
 """

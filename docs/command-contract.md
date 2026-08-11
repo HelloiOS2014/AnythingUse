@@ -1,6 +1,6 @@
 # `lcu` Command Contract
 
-Schema version: `1.0.0`  
+Schema version: `1.1.0`
 Internal private IPC protocol version: `1`  
 Status: product surface (macOS window + Chrome tab)  
 Product: **AnythingUse** (binary remains `lcu`)
@@ -35,7 +35,7 @@ stable runtime behavior across all target applications.
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "status": "ok | waiting_user | failed | permission_denied | unavailable",
   "error": { "code": "snake_case", "message": "..." },
   "data": {}
@@ -111,13 +111,13 @@ CLI, Agent, and model credentials must not produce an approval result. Exit code
 
 Schema and internal protocol versions.
 
-### `lcu decide <task-id> [--wait] [--json]` / `lcu act <task-id> --observation-id <obs> --action <json> [--json]`
+### `lcu decide <task-id> [--wait] [--json]` / `lcu act <task-id> --observation-id <obs> --action <json> [--intent <intent>] [--json]`
 
 Agent decision mode for a task submitted with `--actor agent`. No Runtime
 restart is needed; the task-level actor overrides the process default.
 
-`decide` returns the observation the worker is waiting on: compact elements,
-goal/step, and a `image_path` to a 0600 temp screenshot (read it before
+`decide` returns the strict target, capture transform/hash, compact elements,
+goal/step, and an `image_path` to a 0600 temp screenshot (read it before
 submitting — the file is removed once the decision is consumed or times
 out). `--wait` polls until a decision is available. `act` submits an action
 JSON for that observation; the action then flows through the exact same
@@ -125,6 +125,11 @@ pipeline as VLM proposals (validation, EffectGuard, approvals, control
 gates). A stale `observation_id` is rejected with exit 3; use `decide` again.
 Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s).
 Cancel/pause aborts a parked decision immediately (exit 2 semantics preserved).
+
+Screenshot coordinates are bound to that observation. Targeted click/key actions remain
+R3 regardless of a claimed ordinary intent. `--intent` may only raise risk
+(for example payment/security to R4); it never lowers independently classified
+risk.
 
 For a Chrome task, an Agent may submit browser navigation through the shared
 action contract: `{"kind":"semantic","type":"navigate","url":"https://example.com/"}`.

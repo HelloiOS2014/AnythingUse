@@ -59,6 +59,7 @@ impl AgentActor {
     /// Decision timeout from `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s,
     /// min 5s).
     pub fn new() -> Self {
+        crate::subprocess_actor::cleanup_stale_temp_files();
         let secs = std::env::var("LCU_AGENT_DECISION_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -185,8 +186,7 @@ impl VisionActor for AgentActor {
 
         let mut guard = self.slot.lock().expect("agent slot lock");
         // Replace any stale pending decision (previous timeout/abort) and its
-        // image file. `ponytail:` a killed process can leave lcu-agent-*.png
-        // behind, same known trait as the VLM temp files; no startup sweep.
+        // image file. Startup also sweeps crash leftovers older than one hour.
         if let Some(old) = guard.take() {
             if let Some(p) = old.image_path {
                 let _ = std::fs::remove_file(p);
@@ -273,7 +273,13 @@ mod tests {
         ModelObservation {
             observation_id: id.into(),
             app_id: "com.example.App".into(),
+            pid: 1,
+            window_id: 2,
             window_title: "t".into(),
+            window_frame: [0.0, 0.0, 10.0, 10.0],
+            transform_id: "transform_1".into(),
+            image_hash: None,
+            display_scale: 1.0,
             elements: vec![],
             image_png: None,
             image_width: 10,

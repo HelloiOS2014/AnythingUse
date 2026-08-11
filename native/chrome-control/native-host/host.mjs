@@ -48,6 +48,8 @@ const RUNTIME_ROOT = runtimeRoot();
 const SOCK_PATH = path.join(RUNTIME_ROOT, "chrome-control.sock");
 const RUNTIME_SOCK = path.join(RUNTIME_ROOT, "runtime.sock");
 const LOG_PATH = path.join(RUNTIME_ROOT, "logs", "chrome-control-host.log");
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+const MAX_LOG_FILES = 5;
 
 const pending = new Map(); // id -> { resolve, reject, timer }
 let nextId = 1;
@@ -74,6 +76,15 @@ function log(...args) {
     .join(" ")}\n`;
   try {
     ensureDirs();
+    if (fs.existsSync(LOG_PATH) && fs.statSync(LOG_PATH).size >= MAX_LOG_BYTES) {
+      fs.rmSync(`${LOG_PATH}.${MAX_LOG_FILES - 1}`, { force: true });
+      for (let i = MAX_LOG_FILES - 2; i >= 1; i -= 1) {
+        if (fs.existsSync(`${LOG_PATH}.${i}`)) {
+          fs.renameSync(`${LOG_PATH}.${i}`, `${LOG_PATH}.${i + 1}`);
+        }
+      }
+      fs.renameSync(LOG_PATH, `${LOG_PATH}.1`);
+    }
     fs.appendFileSync(LOG_PATH, line);
   } catch {
     /* ignore */

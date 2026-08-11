@@ -35,8 +35,17 @@ pub struct StaticEffectGuard;
 
 impl EffectGuard for StaticEffectGuard {
     fn judge(&self, ctx: &EffectContext<'_>) -> EffectJudgement {
-        let (mut risk, rationale) = classify(ctx.action, ctx.observation);
+        let (mut risk, mut rationale) = classify(ctx.action, ctx.observation);
         let mut overridden = false;
+
+        // Model intent may only raise independently classified risk.
+        if let Some((declared, reason)) = ctx.model_effect_claim.and_then(intent_risk) {
+            if declared > risk {
+                risk = declared;
+                rationale = reason.into();
+                overridden = true;
+            }
+        }
 
         // Never trust a lower model claim; unknown/missing semantics elevate.
         if let Some(claim) = ctx.model_effect_claim {
@@ -261,6 +270,21 @@ fn looks_like_external_submit(claim: &str) -> bool {
     is_submit_like(&claim.to_lowercase())
 }
 
+fn intent_risk(intent: &str) -> Option<(RiskLevel, &'static str)> {
+    match intent.trim().to_ascii_lowercase().as_str() {
+        "focus" | "open" | "search" | "select" | "navigate" | "scroll" | "edit" => {
+            Some((RiskLevel::R2, "declared local navigation/edit intent"))
+        }
+        "send" | "submit" | "upload" | "delete" | "publish" | "confirm" => {
+            Some((RiskLevel::R3, "declared external or irreversible intent"))
+        }
+        "auth" | "credential" | "security" | "finance" | "pay" | "purchase" => {
+            Some((RiskLevel::R4, "declared security or finance intent"))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -386,5 +410,30 @@ mod tests {
         );
         // 6-digit numeric OTP shape triggers the secret heuristic.
         assert_eq!(judge(&guard, &obs, "482913"), RiskLevel::R4);
+    }
+
+    #[test]
+    fn intent_never_lowers_targeted_risk() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("button");
+        let action = Action::Targeted(TargetedInput::Click {
+            x: 0.5,
+            y: 0.5,
+            button: Default::default(),
+        });
+        let risk = |intent: Option<&str>| {
+            guard
+                .judge(&EffectContext {
+                    observation: &obs,
+                    action: &action,
+                    model_effect_claim: intent,
+                    task_authorized_max_risk: RiskLevel::R4,
+                })
+                .risk
+        };
+        assert_eq!(risk(Some("search")), RiskLevel::R3);
+        assert_eq!(risk(Some("send")), RiskLevel::R3);
+        assert_eq!(risk(Some("pay")), RiskLevel::R4);
+        assert_eq!(risk(None), RiskLevel::R3);
     }
 }

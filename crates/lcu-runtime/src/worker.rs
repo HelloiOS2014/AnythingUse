@@ -63,6 +63,7 @@ pub struct PendingAction {
     pub observation: lcu_core::observation::AppObservation,
     pub target: AppTarget,
     pub risk: RiskLevel,
+    pub effect_claim: Option<String>,
     /// R4 only: user has started human takeover but has not yet marked it done.
     pub takeover_started: bool,
 }
@@ -469,6 +470,7 @@ impl Runtime {
                     observation: observation.clone(),
                     target: target.clone(),
                     risk: evaluated.risk,
+                    effect_claim: proposal.effect_claim.clone(),
                     takeover_started: false,
                 },
             );
@@ -492,6 +494,7 @@ impl Runtime {
                     observation: observation.clone(),
                     target: target.clone(),
                     risk: evaluated.risk,
+                    effect_claim: proposal.effect_claim.clone(),
                     takeover_started: false,
                 },
             );
@@ -508,6 +511,7 @@ impl Runtime {
             &target,
             &observation,
             &proposal.action,
+            proposal.effect_claim.as_deref(),
             None,
         ) {
             Ok(r) => r,
@@ -675,6 +679,7 @@ impl Runtime {
             Some(task_id),
             &fresh,
             &pending.action,
+            pending.effect_claim.as_deref(),
             RiskLevel::R4,
             Some(&task.caller),
         )?;
@@ -697,6 +702,7 @@ impl Runtime {
                     observation: fresh,
                     target: pending.target.clone(),
                     risk: reeval.risk,
+                    effect_claim: pending.effect_claim.clone(),
                     takeover_started: false,
                 },
             );
@@ -724,6 +730,7 @@ impl Runtime {
             &pending.target,
             &fresh,
             &pending.action,
+            pending.effect_claim.as_deref(),
             Some(&grant),
         );
         self.clear_task_pending(task_id);
@@ -831,6 +838,7 @@ impl Runtime {
         target: &AppTarget,
         observation: &lcu_core::observation::AppObservation,
         action: &Action,
+        model_effect_claim: Option<&str>,
         grant: Option<&ExecutionGrant>,
     ) -> LcuResult<lcu_core::task::ActionReceipt> {
         let task = self.get_task(task_id)?;
@@ -846,7 +854,7 @@ impl Runtime {
             .judge(&lcu_core::effect_guard::EffectContext {
                 observation,
                 action,
-                model_effect_claim: None,
+                model_effect_claim,
                 task_authorized_max_risk: RiskLevel::R4,
             });
         let _ = task;
@@ -1336,6 +1344,7 @@ mod tests {
                 observation: observation.clone(),
                 target,
                 risk: evaluated.risk,
+                effect_claim: None,
                 takeover_started: false,
             },
         );
@@ -1398,6 +1407,7 @@ mod tests {
                 observation,
                 target,
                 risk: evaluated.risk,
+                effect_claim: None,
                 takeover_started: false,
             },
         );

@@ -37,7 +37,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 | `lcu approve <approval-id> [--json]` | **Only opens GUI**; never completes approval |
 | `lcu schema [--json]` | Schema / protocol versions |
 | `lcu decide <task-id> [--wait] [--json]` | **Agent decision mode**: fetch the observation the worker is waiting on (compact elements + screenshot path + goal/step). The task must use `--actor agent` |
-| `lcu act <task-id> --observation-id <obs> --action '<json>' [--json]` | Submit an agent decision (action JSON). Same safety pipeline as VLM proposals: EffectGuard + approvals still apply |
+| `lcu act <task-id> --observation-id <obs> --action '<json>' [--intent <intent>] [--json]` | Submit an observation-bound decision. Intent can raise risk but never bypass targeted-action approval |
 
 Agent decision mode workflow (decision maker = the agent itself, data surface identical to the local VLM):
 

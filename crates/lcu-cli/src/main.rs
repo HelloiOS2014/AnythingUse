@@ -132,11 +132,13 @@ enum Commands {
         /// Action JSON, e.g. '{"kind":"semantic","type":"invoke","element_id":"e1"}'.
         #[arg(long)]
         action: String,
+        /// Optional consequence intent; it may only raise independently classified risk.
+        #[arg(long)]
+        intent: Option<String>,
         #[arg(long)]
         json: bool,
     },
 }
-
 fn main() -> StdExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -189,8 +191,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             task_id,
             observation_id,
             action,
+            intent,
             json,
-        } => act(task_id, observation_id, action, json),
+        } => act(task_id, observation_id, action, intent, json),
         Commands::Run {
             goal,
             app,
@@ -521,6 +524,20 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
                     print_json(&JsonEnvelope::ok(serde_json::json!({
                         "task_id": task_id,
                         "observation_id": observation.observation_id,
+                        "target": {
+                            "app_id": observation.app_id,
+                            "pid": observation.pid,
+                            "window_id": observation.window_id,
+                            "window_title": observation.window_title,
+                        },
+                        "transform": {
+                            "id": observation.transform_id,
+                            "frame": observation.window_frame,
+                            "model_size": [observation.image_width, observation.image_height],
+                            "display_scale": observation.display_scale,
+                            "image_hash": observation.image_hash,
+                        },
+                        "ui_state": "captured",
                         "goal": context.goal,
                         "step": context.step,
                         "last_action_summary": context.last_action_summary,
@@ -571,6 +588,7 @@ fn act(
     task_id: String,
     observation_id: String,
     action: String,
+    intent: Option<String>,
     json: bool,
 ) -> Result<ExitCode, ExitCode> {
     let value: serde_json::Value = serde_json::from_str(&action).map_err(|e| {
@@ -581,7 +599,7 @@ fn act(
         task_id: task_id.clone(),
         observation_id,
         action: value,
-        effect_claim: None,
+        effect_claim: intent,
         expected_effect: None,
         confidence: None,
     })?;
@@ -745,5 +763,3 @@ fn emit_error(json: bool, code: ErrorCode, message: impl Into<String>) {
         eprintln!("error[{code}]: {message}");
     }
 }
-
-

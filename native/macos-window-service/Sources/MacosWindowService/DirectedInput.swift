@@ -65,7 +65,13 @@ enum DirectedInput {
             }
         }
 
-        // Path B: coordinate click via postToPid — only when target is already key window.
+        // Path B: coordinate click via postToPid. Prove the requested point belongs
+        // to this exact same-process window before using the PID-only event route.
+        guard WindowResolver.isTopmostProcessWindow(target: target, at: point) else {
+            throw ServiceError.unsupported(
+                "click refused: cannot bind point to pid=\(target.pid) window_id=\(target.windowID)"
+            )
+        }
         try requireKeyWindowForCGEvent(target: target, capability: "click")
         try postMouseClick(pid: target.pid, point: point)
         return ActionReport(
@@ -229,7 +235,10 @@ enum DirectedInput {
             var utf16 = Array(s.utf16)
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            down.flags = []
+            up.flags = []
             down.postToPid(eventPID)
+            usleep(8_000)
             up.postToPid(eventPID)
             usleep(8_000)
             index += 1
