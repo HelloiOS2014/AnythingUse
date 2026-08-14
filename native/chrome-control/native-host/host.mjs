@@ -114,7 +114,7 @@ function readChromeMessages() {
         const msg = JSON.parse(json);
         onChromeMessage(msg);
       } catch (err) {
-        log("bad chrome json", String(err), json.slice(0, 200));
+        log("bad chrome json", String(err), { bytes: Buffer.byteLength(json) });
       }
     }
   });
@@ -181,10 +181,30 @@ function onChromeMessage(msg) {
 
 function summarizeForLog(msg) {
   if (!msg || typeof msg !== "object") return msg;
-  if (msg.observation) {
-    return { ...msg, observation: { elements: msg.observation.elements?.length } };
+  const summary = {};
+  for (const key of ["id", "type", "event", "ok", "controlState"]) {
+    if (msg[key] != null) summary[key] = msg[key];
   }
-  return msg;
+  if (msg.reason != null) summary.reason = String(msg.reason).slice(0, 200);
+  if (msg.error != null) summary.error = String(msg.error).slice(0, 200);
+  if (msg.result && typeof msg.result === "object") {
+    summary.resultKeys = Object.keys(msg.result).sort();
+  }
+  return summary;
+}
+
+if (process.argv.includes("--self-check")) {
+  const summary = JSON.stringify(summarizeForLog({
+    id: 1,
+    ok: true,
+    result: {
+      observation: { image_png_b64: "SECRET_IMAGE", elements: [{ label: "SECRET_UI" }] },
+      activeTab: { url: "SECRET_URL" },
+    },
+  }));
+  if (summary.includes("SECRET")) throw new Error("log summary leaked payload data");
+  process.stderr.write("self-check ok: Chrome host log summary\n");
+  process.exit(0);
 }
 
 function failAllPending(reason) {

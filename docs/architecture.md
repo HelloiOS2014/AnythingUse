@@ -81,19 +81,19 @@ decision paths, not two Computer Use implementations.
 stateDiagram-v2
     [*] --> queued
     queued --> running
-    running --> waiting_user: approval required
-    waiting_user --> running: approved
+    running --> waiting_actor: gate or Agent continuation
+    waiting_actor --> running: fresh proposal ready
     running --> paused: same-target takeover
     paused --> running: resume
     running --> succeeded: explicit Done + re-observe
     running --> failed: invalid action / target lost / limit
     queued --> cancelled
     running --> cancelled
-    waiting_user --> cancelled
+    waiting_actor --> cancelled
     paused --> cancelled
     queued --> paused: process restart recovery
     running --> paused: process restart recovery
-    waiting_user --> paused: process restart recovery
+    waiting_actor --> paused: process restart recovery
     succeeded --> [*]
     failed --> [*]
     cancelled --> [*]
@@ -103,9 +103,23 @@ On startup, any non-terminal task left by a dead process is recovered to
 `paused` (with a rebuilt step budget), so the user decides via resume/cancel;
 recovered paused tasks do not occupy queue slots.
 
-Wire state names match the Runtime JSON: `waiting_user` (Rust variant `WaitingApproval`; legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), and `cancelled`.
+Wire state names match the Runtime JSON: `waiting_actor` (older persisted aliases
+`waiting_user` / `waiting_approval`), `paused` (alias `paused_by_user`), and
+`cancelled`.
 
-The implemented scheduler executes one automatic task at a time. `waiting_user` and user-paused tasks do **not** hold the execution slot; after approval or resume the task returns to `running` and is re-enqueued on the same FIFO (state goes back to `running`, not to `queued`).
+The scheduler executes one desktop action at a time. `waiting_actor` and paused
+tasks do **not** hold the global execution slot; an external Agent continuation
+retains only its strict target reservation. A gate decision discards the old
+proposal, captures a fresh observation, and returns it to the same Actor. At
+most one foreground session exists at any time.
+
+The task-scoped foreground capability survives an external-Agent decision, but
+native ownership does not: it is suspended while the Actor thinks. Resume never
+activates an app and succeeds only when the same exact window is still
+foreground and the native HID monitor observed no user input.
+The native service increments a session epoch on sleep/wake or login-session
+activation changes; Runtime pauses only tasks holding temporary target/grant
+state and releases those resources before any later action.
 
 ## Execution loop
 
@@ -117,7 +131,7 @@ resolve target
     → observe target
     → propose one action
     → control-state gate
-    → validate observation binding and risk
+    → validate observation binding + closed-set effect + independent risk floor
     → act
     → observe again
 ```
@@ -139,17 +153,32 @@ The Swift service resolves a concrete target using PID and `CGWindowID`. Accessi
 
 Rules:
 
-- do not activate the application as an execution strategy;
+- background semantic first, then provably isolated background targeted input;
+  activation is used only inside one GUI-approved foreground session;
 - do not fall back to another focused or first window when identity fails;
 - directed input must remain bound to the same target;
-- same-window user takeover pauses the task;
+- real user HID on the reserved window pauses the task;
 - target loss fails safely.
+
+**Foreground session (single slot, GUI-approved):** the Runtime keeps one
+`(task_id, pid, window_id)` session slot. It starts only after a task-scoped
+foreground grant (`auto` after `foreground_required`, or `foreground` at task
+start) and is cleared on terminal / pause / target change / release /
+runtime recovery. The Swift service mirrors it in a single slot; while active,
+the agent's own promotion is neither a FocusGuard steal nor user takeover, and
+`foreground_activate` (the only `NSRunningApplication.activate` entry) must
+raise or uniquely prove the exact window before activation and re-prove it
+after activation and before every directed input. The previous app is never
+restored. Real user HID on the target ends the session and pauses the task
+automatically; focus changes without target HID are not takeover. Ordinary actions
+inside an approved session do not repeat capability approval; consequences use
+separate one-time confirmation or takeover gates.
 
 ### Chrome backend
 
 Chrome control uses the user's installed browser rather than a separate automation profile. This is a source-level execution design; real-profile coexistence is verified separately.
 
-The extension creates or owns an inactive task tab, while Native Messaging connects it to the local Runtime. A tab/debugger lease is released on completion, cancellation, failure, or takeover. The backend does not restore focus by activating another tab.
+The extension creates or owns an inactive task tab, while Native Messaging connects it to the local Runtime. Its profile-local stable key, tab lease, and current page scope bind the target. Chrome surface ownership is serial FIFO; unrelated macOS targets may run while a Chrome Agent waits. A tab/debugger lease is released on completion, cancellation, failure, or takeover. The backend does not restore focus by activating another tab.
 
 ### Future endpoints
 
@@ -168,7 +197,9 @@ It does not require a new Agent-facing protocol.
 - No public TCP listener.
 - Runtime sockets use local filesystem permissions.
 - Screenshots and semantic trees are not returned through normal CLI results.
-- High-risk actions require a GUI-bound approval tied to task, observation, action, target, expiry, and nonce.
+- App access, foreground activation, and consequence confirmation/takeover are
+  distinct GUI-bound grants. Consequence matching uses Runtime-derived identity;
+  screenshot-only input additionally requires exact fresh image/action evidence.
 - Agent source metadata is display-only and does not grant authority.
 - Model output is treated as untrusted input and validated before execution.
 - Local model subprocess isolation is not described as an OS sandbox.

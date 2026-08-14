@@ -15,12 +15,22 @@ const TASK_GROUP_TITLE = "LCU Task";
 const TASK_GROUP_COLOR = "blue";
 const DEBUGGER_PROTOCOL = "1.3";
 const RECONNECT_MS = 2500;
-/** Default Chrome profile key when the browser does not expose one. */
-const DEFAULT_PROFILE = "Default";
+const PROFILE_STORAGE_KEY = "anythinguseProfileKey";
+let cachedProfileKey = null;
 
 /** @type {chrome.runtime.Port | null} */
 let nativePort = null;
 let reconnectTimer = null;
+
+async function getProfileKey() {
+  if (cachedProfileKey) return cachedProfileKey;
+  const stored = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
+  cachedProfileKey = stored?.[PROFILE_STORAGE_KEY] || `profile_${crypto.randomUUID()}`;
+  if (!stored?.[PROFILE_STORAGE_KEY]) {
+    await chrome.storage.local.set({ [PROFILE_STORAGE_KEY]: cachedProfileKey });
+  }
+  return cachedProfileKey;
+}
 
 /**
  * @typedef {object} TabLease
@@ -78,7 +88,7 @@ function emitEvent(type, payload = {}) {
   }
 }
 
-function connectNative() {
+async function connectNative() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -119,7 +129,7 @@ function connectNative() {
       type: "hello",
       extensionId: chrome.runtime.id,
       version: chrome.runtime.getManifest().version,
-      profile: DEFAULT_PROFILE,
+      profile: await getProfileKey(),
       surface: "chrome_tab",
     });
   } catch (err) {
@@ -131,7 +141,7 @@ function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connectNative();
+    void connectNative();
   }, RECONNECT_MS);
 }
 
@@ -169,7 +179,7 @@ async function dispatch(method, params) {
       return {
         pong: true,
         extensionId: chrome.runtime.id,
-        profile: DEFAULT_PROFILE,
+        profile: await getProfileKey(),
         lease: summarizeLease(),
         activeTab: await snapshotActive(),
         surface: "chrome_tab",
@@ -177,7 +187,7 @@ async function dispatch(method, params) {
     case "get_state":
       return {
         extensionId: chrome.runtime.id,
-        profile: DEFAULT_PROFILE,
+        profile: await getProfileKey(),
         lease: summarizeLease(),
         activeTab: await snapshotActive(),
         controlState: lease?.controlState || "none",
@@ -301,7 +311,7 @@ async function startTask(params = {}) {
   // Background task tab only; navigation is done later via normal VLM actions.
   // Debugger cannot attach to chrome:// / chrome-extension:// / devtools:// pages.
   const url = sanitizeClaimUrl(params.url);
-  const profile = params.profile || DEFAULT_PROFILE;
+  const profile = params.profile || (await getProfileKey());
   const taskId = params.taskId || params.task_id || null;
 
   const userTab = await getActiveTab();
@@ -809,10 +819,6 @@ async function act(params = {}) {
     return { kind, success: true, passthrough: true, action };
   }
 
-  if (kind === "exclusive") {
-    throw new Error("exclusive input is not applicable on ChromeTab surface");
-  }
-
   if (kind === "semantic") {
     // serde tag is flattened as action.type under Semantic variant in some forms;
     // also accept nested { kind: "semantic", type, ... } or { kind, semantic: {...} }
@@ -1171,7 +1177,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.action.onClicked.addListener(() => {
   log("action clicked; native connected=", !!nativePort, "lease=", summarizeLease());
-  if (!nativePort) connectNative();
+  if (!nativePort) void connectNative();
 });
 
 // Best-effort release if the service worker is suspended while holding a lease.
@@ -1180,5 +1186,5 @@ self.addEventListener?.("unload", () => {
   void forceCleanup("service_worker_unload");
 });
 
-connectNative();
+void connectNative();
 log("service worker started", chrome.runtime.id);

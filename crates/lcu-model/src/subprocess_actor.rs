@@ -403,10 +403,9 @@ struct WorkerProposeResp {
     error: Option<String>,
     #[serde(default)]
     action: Option<serde_json::Value>,
+    /// Closed-set consequence claim; invalid kinds fail the parse here.
     #[serde(default)]
-    effect_claim: Option<String>,
-    #[serde(default)]
-    expected_effect: Option<String>,
+    effect: Option<lcu_core::action::EffectClaim>,
     #[serde(default)]
     confidence: Option<f32>,
     #[serde(default)]
@@ -468,6 +467,7 @@ impl VisionActor for SubprocessVisionActor {
             "max_time": propose_budget_secs,
             "step": context.step,
             "last_action_summary": context.last_action_summary,
+            "transition_result": context.transition_result,
         });
         // Product default: send target window screenshot. LCU_VLM_NO_IMAGE=1 is
         // debug-only; release builds always require image when PNG is present.
@@ -550,9 +550,7 @@ impl VisionActor for SubprocessVisionActor {
         Ok(ProposedAction {
             observation_id: ObservationId(observation.observation_id.clone()),
             action,
-            effect_claim: resp.effect_claim,
-            expected_effect: resp.expected_effect,
-            model_claimed_risk: None,
+            effect: resp.effect,
             confidence: resp.confidence.unwrap_or(0.5),
         })
     }
@@ -651,6 +649,7 @@ for line in sys.stdin:
             goal: "g".into(),
             step: 0,
             last_action_summary: Some("image_path=/tmp/stub.png".into()),
+            transition_result: None,
         };
         let proposal = actor.propose_action(&sample_obs(), &ctx).unwrap();
         assert!(matches!(proposal.action, Action::Wait { .. }));

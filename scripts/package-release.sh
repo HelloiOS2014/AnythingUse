@@ -7,7 +7,9 @@ set -euo pipefail
 
 VERSION="${1:-0.1.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-STAGE="$(mktemp -d)/AnythingUse-$VERSION"
+STAGE_ROOT="$(mktemp -d)"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+STAGE="$STAGE_ROOT/AnythingUse-$VERSION"
 
 echo "==> Assembling $STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/scripts" "$STAGE/skills" "$STAGE/native-host"

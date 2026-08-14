@@ -60,6 +60,11 @@ enum Commands {
         /// `LCU_VISION_ACTOR` (unset/auto defaults to agent).
         #[arg(long)]
         actor: Option<String>,
+        /// Control mode: `auto` (default; background first, one foreground
+        /// grant when needed), `background_only` (never activate), `foreground`
+        /// (one task-scoped foreground grant at task start).
+        #[arg(long)]
+        control_mode: Option<String>,
     },
     /// List tasks.
     List {
@@ -132,9 +137,10 @@ enum Commands {
         /// Action JSON, e.g. '{"kind":"semantic","type":"invoke","element_id":"e1"}'.
         #[arg(long)]
         action: String,
-        /// Optional consequence intent; it may only raise independently classified risk.
+        /// Closed-set consequence claim JSON, e.g.
+        /// '{"kind":"navigate","summary":"open"}' (required for executable actions).
         #[arg(long)]
-        intent: Option<String>,
+        effect: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -191,9 +197,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             task_id,
             observation_id,
             action,
-            intent,
+            effect,
             json,
-        } => act(task_id, observation_id, action, intent, json),
+        } => act(task_id, observation_id, action, effect, json),
         Commands::Run {
             goal,
             app,
@@ -203,6 +209,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             source,
             source_name,
             actor,
+            control_mode,
         } => {
             let resp = call(InternalRequest::SubmitTask {
                 goal,
@@ -211,6 +218,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
                 source_name,
                 max_steps,
                 actor,
+                control_mode,
             })?;
             if wait {
                 wait_for_task(resp, json)
@@ -254,14 +262,14 @@ fn dispatch(cli: Cli) -> Result<ExitCode, ExitCode> {
             interval_ms,
         } => watch_task(task_id, seconds, interval_ms),
         Commands::Approve { approval_id, json } => {
-            // Contract: never complete approval in CLI.
-            match call(InternalRequest::OpenApprovalUi { approval_id })? {
-                InternalResponse::ApprovalUi { launch } => {
+            // Contract: never complete a gate in CLI.
+            match call(InternalRequest::OpenGateUi { grant_id: approval_id })? {
+                InternalResponse::GateUi { launch } => {
                     if !launch.gui_only {
                         emit_error(
                             json,
                             ErrorCode::InternalError,
-                            "approval path must be GUI-only",
+                            "gate path must be GUI-only",
                         );
                         return Err(ExitCode::InternalError);
                     }
@@ -467,14 +475,14 @@ fn wait_for_task(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCod
                 // Park states: still "running" from user POV but need interaction.
                 if matches!(
                     task.state,
-                    lcu_core::task::TaskState::WaitingApproval
+                    lcu_core::task::TaskState::WaitingActor
                         | lcu_core::task::TaskState::PausedByUser
                 ) {
                     if json {
                         print_json(&JsonEnvelope::ok(&task));
                     } else {
                         println!(
-                            "task {} parked state={:?} (approve/resume/cancel as needed)",
+                            "task {} parked state={:?} (decide/resume/cancel as needed)",
                             task.task_id.0, task.state
                         );
                     }
@@ -541,6 +549,7 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
                         "goal": context.goal,
                         "step": context.step,
                         "last_action_summary": context.last_action_summary,
+                        "transition_result": context.transition_result,
                         "elements": observation.elements,
                         "image_path": image_path,
                         "expires_in_secs": expires_in_secs,
@@ -549,6 +558,9 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
                     println!("observation_id: {}", observation.observation_id);
                     println!("goal: {}", context.goal);
                     println!("step: {}", context.step);
+                    if let Some(result) = context.transition_result {
+                        println!("transition_result: {result}");
+                    }
                     println!("image_path: {}", image_path.unwrap_or_else(|| "(none)".into()));
                     println!("elements:");
                     for e in &observation.elements {
@@ -583,24 +595,33 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
     }
 }
 
-/// Agent decision mode: submit an action for a pending observation.
+/// Agent decision mode: submit an action + closed-set effect for a pending observation.
 fn act(
     task_id: String,
     observation_id: String,
     action: String,
-    intent: Option<String>,
+    effect: Option<String>,
     json: bool,
 ) -> Result<ExitCode, ExitCode> {
     let value: serde_json::Value = serde_json::from_str(&action).map_err(|e| {
         emit_error(json, ErrorCode::UsageError, format!("action is not valid JSON: {e}"));
         ExitCode::UsageError
     })?;
+    let effect_value: Option<serde_json::Value> = match effect {
+        Some(raw) => {
+            let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                emit_error(json, ErrorCode::UsageError, format!("effect is not valid JSON: {e}"));
+                ExitCode::UsageError
+            })?;
+            Some(parsed)
+        }
+        None => None,
+    };
     let resp = call(InternalRequest::SubmitDecision {
         task_id: task_id.clone(),
         observation_id,
         action: value,
-        effect_claim: intent,
-        expected_effect: None,
+        effect: effect_value,
         confidence: None,
     })?;
     match resp {
@@ -631,8 +652,8 @@ fn watch_task(task_id: String, seconds: u64, interval_ms: u64) -> Result<ExitCod
             task_id: task_id.clone(),
         })? {
             InternalResponse::Task { task } => {
-                // Wire state name (waiting_user / paused / ...), not the Rust
-                // Debug variant (WaitingApproval / PausedByUser) — the JSON
+                // Wire state name (waiting_actor / paused / ...), not the Rust
+                // Debug variant (WaitingActor / PausedByUser) — the JSON
                 // serde rename is the machine contract.
                 let state = serde_json::to_value(&task.state)
                     .ok()

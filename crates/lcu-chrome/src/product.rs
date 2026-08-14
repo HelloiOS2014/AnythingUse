@@ -1,5 +1,8 @@
-//! Product platform backend: routes Chrome goals to the Chrome tab surface and
-//! everything else to the macOS window backend (I1).
+//! Product platform backend: routes an explicitly targeted Chrome app identity
+//! to the Chrome tab surface and everything else to the macOS window backend.
+//!
+//! Realignment contract §4.1/§5: the surface is chosen from the explicit
+//! target/surface only — goal text is never parsed for Chrome/browser keywords.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,21 +60,10 @@ impl ProductBackend {
         self.window.as_ref()
     }
 
+    /// Exact explicit Chrome app identities (surface routing only — never a
+    /// substring or goal-keyword match, and never an execution-policy special).
     fn is_chrome_app(app_id: &str) -> bool {
-        let id = app_id.to_lowercase();
-        id.contains("chrome") || id == "com.google.chrome" || id == "com.google.chrome.canary"
-    }
-
-    fn wants_chrome(selector: &AppSelector, goal: Option<&str>) -> bool {
-        if let Some(ref id) = selector.app_id {
-            if Self::is_chrome_app(id) {
-                return true;
-            }
-        }
-        if let Some(g) = goal {
-            return ChromeTabSurface::is_chrome_selector(selector.app_id.as_deref(), g);
-        }
-        false
+        matches!(app_id, "com.google.Chrome" | "com.google.Chrome.canary")
     }
 
     fn chrome_available(&self) -> bool {
@@ -100,7 +92,7 @@ impl ProductBackend {
         // Never use chrome://newtab — claim would fail and/or steal focus paths.
         let url = "https://example.com/";
         let mut surface = ChromeTabSurface::new(self.chrome_client.clone());
-        let tab = surface.claim(url, task_id, Some("Default")).map_err(|e| {
+        let tab = surface.claim(url, task_id, None).map_err(|e| {
             LcuError::coded(
                 e.code(),
                 format!("chrome claim failed for url={url}: {e}"),
@@ -136,6 +128,14 @@ impl ProductBackend {
 }
 
 impl PlatformBackend for ProductBackend {
+    fn serial_surface_key(&self, selector: &AppSelector) -> Option<String> {
+        selector
+            .app_id
+            .as_deref()
+            .filter(|app_id| Self::is_chrome_app(app_id))
+            .map(|_| "chrome_extension_lease".into())
+    }
+
     fn resolve_target(&self, selector: &AppSelector) -> LcuResult<AppTarget> {
         let goal = self
             .state
@@ -143,7 +143,12 @@ impl PlatformBackend for ProductBackend {
             .expect("product state")
             .goal
             .clone();
-        if Self::wants_chrome(selector, goal.as_deref()) && self.chrome_available() {
+        let chrome_explicit = selector
+            .app_id
+            .as_deref()
+            .map(Self::is_chrome_app)
+            .unwrap_or(false);
+        if chrome_explicit && self.chrome_available() {
             let app_id = selector
                 .app_id
                 .clone()
@@ -166,8 +171,8 @@ impl PlatformBackend for ProductBackend {
                 window_title: goal.unwrap_or_default(),
             });
         }
-        // Chrome requested but host unavailable → clear error (do not fall back to AX).
-        if Self::wants_chrome(selector, goal.as_deref()) {
+        // Chrome explicitly targeted but host unavailable → clear error (do not fall back to AX).
+        if chrome_explicit {
             return Err(LcuError::coded(
                 ErrorCode::RuntimeUnavailable,
                 "Chrome surface required but chrome-control host is not connected; \
@@ -214,36 +219,53 @@ impl PlatformBackend for ProductBackend {
         self.window.perform_targeted_input(target, action)
     }
 
-    fn perform_exclusive_input(
-        &self,
-        target: &AppTarget,
-        action: &TargetedInput,
-    ) -> LcuResult<ActionReceipt> {
-        if Self::is_chrome_app(&target.app_id) {
-            return Err(LcuError::coded(
-                ErrorCode::UnsupportedCapability,
-                "exclusive input is not applicable on ChromeTab surface",
-            ));
-        }
-        self.window.perform_exclusive_input(target, action)
-    }
-
     fn detect_user_conflict(&self, target: &AppTarget) -> LcuResult<ControlState> {
         if Self::is_chrome_app(&target.app_id) {
             let mut st = self.state.lock().expect("product state");
             let Some(active) = st.chrome.as_mut() else {
                 return Ok(ControlState::None);
             };
-            return match active.surface.refresh_control_state() {
-                Ok(cs) => Ok(cs),
-                Err(_) => Ok(ControlState::None),
-            };
+            return active.surface.refresh_control_state();
         }
         self.window.detect_user_conflict(target)
     }
 
     fn permission_state(&self) -> LcuResult<PermissionState> {
         self.window.permission_state()
+    }
+
+    fn stable_app_identity(&self, target: &AppTarget) -> LcuResult<String> {
+        if Self::is_chrome_app(&target.app_id) {
+            let ping = self.chrome_client.ping()?;
+            let extension = ping
+                .get("extensionId")
+                .or_else(|| ping.get("extension_id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    LcuError::coded(ErrorCode::TaskFailed, "Chrome identity missing extensionId")
+                })?;
+            let profile = ping
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .or_else(|| self.chrome_tab_for(target).map(|tab| tab.profile))
+                .ok_or_else(|| {
+                    LcuError::coded(ErrorCode::TaskFailed, "Chrome identity missing profile key")
+                })?;
+            return Ok(format!("chrome:{extension}:profile:{profile}"));
+        }
+        self.window.stable_app_identity(target)
+    }
+
+    fn set_takeover_watch(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
+        if Self::is_chrome_app(&target.app_id) {
+            return Ok(());
+        }
+        self.window.set_takeover_watch(target, active)
+    }
+
+    fn control_epoch(&self) -> LcuResult<u64> {
+        self.window.control_epoch()
     }
 
     fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
@@ -254,28 +276,52 @@ impl PlatformBackend for ProductBackend {
         let _ = active;
         Ok(())
     }
+    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+        if Self::is_chrome_app(&target.app_id) {
+            return Ok(());
+        }
+        self.window.suspend_agent_session(target)
+    }
+
+    fn resume_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+        if Self::is_chrome_app(&target.app_id) {
+            return Ok(());
+        }
+        self.window.resume_agent_session(target)
+    }
 
     fn bind_task_context(&self, goal: &str, task_id: Option<&str>) {
         let mut st = self.state.lock().expect("product state");
         st.goal = Some(goal.to_string());
         st.task_id = task_id.map(|s| s.to_string());
-        // New task: drop previous chrome lease if task id changed.
-        if let Some(active) = st.chrome.as_ref() {
-            let same = match (&active.task_id, task_id) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            };
-            if !same {
-                Self::release_chrome_locked(&mut st);
-            }
-        }
+        // Runtime owns the serial Chrome-surface reservation. A macOS task may
+        // run while a Chrome task waits for its Actor and must not drop its tab.
     }
 
     fn clear_task_context(&self) {
         let mut st = self.state.lock().expect("product state");
-        Self::release_chrome_locked(&mut st);
+        let owns_active = st.chrome.as_ref().is_some_and(|active| {
+            active.task_id.as_deref() == st.task_id.as_deref()
+        });
+        if owns_active {
+            Self::release_chrome_locked(&mut st);
+        }
         st.goal = None;
         st.task_id = None;
+    }
+
+    fn release(&self, target: &AppTarget) -> LcuResult<()> {
+        if Self::is_chrome_app(&target.app_id) {
+            let mut st = self.state.lock().expect("product state");
+            let matches = st.chrome.as_ref().is_some_and(|active| {
+                active.tab.tab_id.max(0) as u64 == target.window_id
+            });
+            if matches {
+                Self::release_chrome_locked(&mut st);
+            }
+            return Ok(());
+        }
+        self.window.release(target)
     }
 
     fn chrome_tab_for(&self, target: &AppTarget) -> Option<ChromeTab> {

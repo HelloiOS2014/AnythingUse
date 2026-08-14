@@ -17,10 +17,15 @@ pub mod surface;
 pub mod task;
 pub mod types;
 
-pub use action::{Action, ActionKind, ProposedAction, SemanticAction, TargetedInput};
-pub use approval::{ApprovalBinding, ApprovalId, ApprovalRequest, ApprovalStatus};
+pub use action::{
+    Action, ActionKind, EffectClaim, EffectKind, ProposedAction, SemanticAction, TargetedInput,
+};
+pub use approval::{
+    AppAccessDecision, AppPermission, ConsequenceGrant, ConsequenceIdentity, ForegroundGrant,
+    GateKind, GateRequest, GrantId, GrantStatus, ScreenshotEvidence,
+};
 pub use capability::CapabilityLevel;
-pub use effect_guard::{EffectGuard, StaticEffectGuard};
+pub use effect_guard::{EffectContext, EffectGuard, EffectJudgement, StaticEffectGuard};
 pub use error::{ErrorCode, LcuError, LcuResult};
 pub use observation::{
     AppObservation, AppSelector, AppTarget, ElementNode, ObservationId, Rect, TransformId,
@@ -32,8 +37,8 @@ pub use protocol::{
 pub use risk::RiskLevel;
 pub use schema::SchemaDocument;
 pub use surface::{
-    action_is_surface_applicable, control_target_from_app_target, control_target_from_observation,
-    ChromeTab, ControlState, ControlTarget, MacWindow,
+    control_target_from_app_target, control_target_from_observation, ChromeTab, ControlState,
+    ControlTarget, MacWindow,
 };
 pub use task::{
     ActionReceipt, TaskCommand, TaskEvent, TaskId, TaskRecord, TaskState, TaskStateMachine,

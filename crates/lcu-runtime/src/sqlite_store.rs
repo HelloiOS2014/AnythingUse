@@ -4,7 +4,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
-use lcu_core::task::{TaskEvent, TaskId, TaskRecord, TaskState};
+use lcu_core::approval::{AppAccessDecision, AppPermission};
+use lcu_core::task::{ControlMode, TaskEvent, TaskId, TaskRecord, TaskState};
 use lcu_core::types::CallerIdentity;
 use rusqlite::{params, Connection};
 
@@ -16,8 +17,9 @@ impl SqliteTaskStore {
     pub fn open(path: impl AsRef<Path>) -> LcuResult<Self> {
         let conn = Connection::open(path)
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("sqlite open: {e}")))?;
-        let store = Self { conn };
+        let mut store = Self { conn };
         store.migrate()?;
+        store.prune_terminal_tasks(Utc::now(), 1000)?;
         Ok(store)
     }
 
@@ -57,6 +59,11 @@ impl SqliteTaskStore {
                   message TEXT NOT NULL,
                   step INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS app_permissions (
+                  app_key TEXT PRIMARY KEY,
+                  decision TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
                 "#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("migrate: {e}")))?;
@@ -67,6 +74,41 @@ impl SqliteTaskStore {
         {
             tracing::debug!(error = %e, "tasks.actor column already present");
         }
+        // Older databases predate the task control_mode column.
+        if let Err(e) = self
+            .conn
+            .execute(
+                "ALTER TABLE tasks ADD COLUMN control_mode TEXT NOT NULL DEFAULT 'auto'",
+                [],
+            )
+        {
+            tracing::debug!(error = %e, "tasks.control_mode column already present");
+        }
+        Ok(())
+    }
+
+    /// Startup-only retention: keep terminal tasks only when they are both
+    /// within 30 days and among the newest `max_count`. Active tasks are never touched.
+    fn prune_terminal_tasks(&mut self, now: DateTime<Utc>, max_count: usize) -> LcuResult<()> {
+        let cutoff = (now - chrono::Duration::days(30)).to_rfc3339();
+        let terminal = r#"state IN ('"succeeded"','"failed"','"cancelled"')"#;
+        let stale = format!(
+            "{terminal} AND (updated_at < ?1 OR task_id IN (\
+             SELECT task_id FROM tasks WHERE {terminal} \
+             ORDER BY updated_at DESC LIMIT -1 OFFSET ?2))"
+        );
+        let tx = self.conn.transaction().map_err(sql_err)?;
+        tx.execute(
+            &format!("DELETE FROM events WHERE task_id IN (SELECT task_id FROM tasks WHERE {stale})"),
+            params![cutoff, max_count as i64],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            &format!("DELETE FROM tasks WHERE {stale}"),
+            params![cutoff, max_count as i64],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(())
     }
 
@@ -76,9 +118,9 @@ impl SqliteTaskStore {
                 r#"
                 INSERT INTO tasks (
                   task_id, goal, state, caller_json, created_at, updated_at,
-                  app_selector_json, actor, step_count, last_observation_id, last_action_hash,
+                  app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
                   summary, error
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
                 ON CONFLICT(task_id) DO UPDATE SET
                   goal=excluded.goal,
                   state=excluded.state,
@@ -86,6 +128,7 @@ impl SqliteTaskStore {
                   updated_at=excluded.updated_at,
                   app_selector_json=excluded.app_selector_json,
                   actor=excluded.actor,
+                  control_mode=excluded.control_mode,
                   step_count=excluded.step_count,
                   last_observation_id=excluded.last_observation_id,
                   last_action_hash=excluded.last_action_hash,
@@ -104,6 +147,7 @@ impl SqliteTaskStore {
                         .as_ref()
                         .map(|s| serde_json::to_string(s).unwrap()),
                     record.actor.clone(),
+                    serde_json::to_string(&record.control_mode).unwrap(),
                     record.step_count as i64,
                     record.last_observation_id.as_ref().map(|o| o.0.clone()),
                     record.last_action_hash.clone(),
@@ -120,7 +164,7 @@ impl SqliteTaskStore {
             .conn
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
-                          app_selector_json, actor, step_count, last_observation_id, last_action_hash,
+                          app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
                           summary, error FROM tasks WHERE task_id=?1"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
@@ -142,7 +186,7 @@ impl SqliteTaskStore {
             .conn
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
-                          app_selector_json, actor, step_count, last_observation_id, last_action_hash,
+                          app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
                           summary, error FROM tasks ORDER BY created_at ASC"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
@@ -224,11 +268,22 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
     let updated: String = row.get(5).map_err(sql_err)?;
     let sel_s: Option<String> = row.get(6).map_err(sql_err)?;
     let actor: Option<String> = row.get(7).map_err(sql_err)?;
-    let step: i64 = row.get(8).map_err(sql_err)?;
-    let last_obs: Option<String> = row.get(9).map_err(sql_err)?;
-    let last_hash: Option<String> = row.get(10).map_err(sql_err)?;
-    let summary: Option<String> = row.get(11).map_err(sql_err)?;
-    let error: Option<String> = row.get(12).map_err(sql_err)?;
+    let control_mode_s: String = row.get(8).map_err(sql_err)?;
+    let step: i64 = row.get(9).map_err(sql_err)?;
+    let last_obs: Option<String> = row.get(10).map_err(sql_err)?;
+    let last_hash: Option<String> = row.get(11).map_err(sql_err)?;
+    let summary: Option<String> = row.get(12).map_err(sql_err)?;
+    let error: Option<String> = row.get(13).map_err(sql_err)?;
+
+    let control_mode: ControlMode = serde_json::from_str(&control_mode_s).or_else(|_| match control_mode_s.as_str() {
+        "auto" => Ok(ControlMode::Auto),
+        "background_only" => Ok(ControlMode::BackgroundOnly),
+        "foreground" => Ok(ControlMode::Foreground),
+        _ => Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unknown legacy control_mode",
+        ))),
+    }).map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("control_mode json: {e}")))?;
 
     let state: TaskState = serde_json::from_str(&state_s)
         .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("state json: {e}")))?;
@@ -253,12 +308,79 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("updated: {e}")))?,
         app_selector,
         actor,
+        control_mode,
         step_count: step as u32,
         last_observation_id: last_obs.map(lcu_core::observation::ObservationId),
         last_action_hash: last_hash,
         summary,
         error,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Persistent app permissions (always_allow; revocable via settings)
+// ---------------------------------------------------------------------------
+
+impl SqliteTaskStore {
+    pub fn list_app_permissions(&self) -> LcuResult<Vec<AppPermission>> {
+        let mut stmt = self
+            .conn
+            .prepare(r#"SELECT app_key, decision, created_at FROM app_permissions"#)
+            .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let app_key: String = row.get(0)?;
+                let decision: String = row.get(1)?;
+                let created: String = row.get(2)?;
+                Ok((app_key, decision, created))
+            })
+            .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("map: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (app_key, decision, created) =
+                r.map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("row: {e}")))?;
+            let decision: AppAccessDecision = serde_json::from_str(&decision).map_err(|e| {
+                LcuError::coded(ErrorCode::InternalError, format!("decision json: {e}"))
+            })?;
+            let created_at = DateTime::parse_from_rfc3339(&created)
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("created: {e}")))?;
+            out.push(AppPermission {
+                app_key,
+                decision,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn upsert_app_permission(&self, permission: &AppPermission) -> LcuResult<()> {
+        self.conn
+            .execute(
+                r#"INSERT INTO app_permissions (app_key, decision, created_at)
+                   VALUES (?1,?2,?3)
+                   ON CONFLICT(app_key) DO UPDATE SET
+                     decision=excluded.decision,
+                     created_at=excluded.created_at"#,
+                params![
+                    permission.app_key,
+                    serde_json::to_string(&permission.decision).unwrap(),
+                    permission.created_at.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("perm upsert: {e}")))?;
+        Ok(())
+    }
+
+    pub fn delete_app_permission(&self, app_key: &str) -> LcuResult<bool> {
+        self.conn
+            .execute(
+                "DELETE FROM app_permissions WHERE app_key = ?1",
+                params![app_key],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("perm delete: {e}")))
+    }
 }
 
 fn sql_err(e: rusqlite::Error) -> LcuError {
@@ -284,6 +406,42 @@ mod tests {
         let got = store.get_task(&rec.task_id).unwrap().unwrap();
         assert_eq!(got.step_count, 3);
         assert_eq!(store.list_tasks().unwrap().len(), 1);
+
+        store.conn.execute(
+            "UPDATE tasks SET control_mode='auto' WHERE task_id=?1",
+            params![rec.task_id.0],
+        ).unwrap();
+        assert_eq!(store.get_task(&rec.task_id).unwrap().unwrap().control_mode, ControlMode::Auto);
+    }
+
+    #[test]
+    fn startup_prunes_only_old_or_excess_terminal_tasks() {
+        let mut store = SqliteTaskStore::open_in_memory().unwrap();
+        let now = Utc::now();
+        for (name, age_days, state) in [
+            ("active-old", 90, TaskState::Running),
+            ("terminal-old", 40, TaskState::Succeeded),
+            ("terminal-3", 3, TaskState::Failed),
+            ("terminal-2", 2, TaskState::Cancelled),
+            ("terminal-1", 1, TaskState::Succeeded),
+        ] {
+            let mut rec = TaskRecord::new(name, CallerIdentity::HumanCli, None);
+            rec.state = state;
+            rec.updated_at = now - chrono::Duration::days(age_days);
+            store.upsert_task(&rec).unwrap();
+            store.push_event(&TaskEvent {
+                task_id: rec.task_id,
+                state,
+                at: rec.updated_at,
+                message: name.into(),
+                step: None,
+            }).unwrap();
+        }
+
+        store.prune_terminal_tasks(now, 2).unwrap();
+        let goals = store.list_tasks().unwrap().into_iter().map(|task| task.goal).collect::<Vec<_>>();
+        assert_eq!(goals, vec!["active-old", "terminal-2", "terminal-1"]);
+        let event_count: i64 = store.conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+        assert_eq!(event_count, 3);
     }
 }
-

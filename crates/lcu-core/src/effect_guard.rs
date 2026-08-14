@@ -1,8 +1,18 @@
-//! Independent side-effect re-evaluation. Model claims are never authoritative.
+//! Independent side-effect re-evaluation (realignment §3.3).
+//!
+//! Actor effect declarations are structured safety classifications, never
+//! authorization and never trusted as final risk. This guard computes the
+//! Runtime risk floor from the fresh observation and the action; the actor
+//! declaration can only raise it. Coordinates, elements, mouse and keyboard
+//! are action expression, not risk: a screenshot-only click classified
+//! `navigate` by a trusted decision actor runs without per-action approval,
+//! because Runtime has no evidence contradicting the closed-set classification.
+//! Evidence in the observation (send/delete/pay labels, credential text,
+//! sensitive URL parameters) always floors the risk.
 
 use serde::{Deserialize, Serialize};
 
-use crate::action::{Action, SemanticAction, TargetedInput};
+use crate::action::{Action, EffectClaim, EffectKind, SemanticAction, TargetedInput};
 use crate::observation::AppObservation;
 use crate::risk::RiskLevel;
 
@@ -11,7 +21,9 @@ use crate::risk::RiskLevel;
 pub struct EffectContext<'a> {
     pub observation: &'a AppObservation,
     pub action: &'a Action,
-    pub model_effect_claim: Option<&'a str>,
+    /// Actor-declared closed-set consequence. `None` for control actions is
+    /// fine; `None` for executable actions fails closed as unknown.
+    pub effect: Option<&'a EffectClaim>,
     pub task_authorized_max_risk: RiskLevel,
 }
 
@@ -20,11 +32,14 @@ pub struct EffectContext<'a> {
 pub struct EffectJudgement {
     pub risk: RiskLevel,
     pub rationale: String,
-    /// True when the model claim was ignored or contradicted.
+    /// True when the actor claim was ignored or contradicted.
     pub model_claim_overridden: bool,
+    /// Actor declared `unknown` (or executable action had no effect): stop and
+    /// ask the user; never auto-execute and never map to a hidden default.
+    pub unknown: bool,
 }
 
-/// Trait implemented by Runtime policy. Unknown effects default to R3.
+/// Trait implemented by Runtime policy.
 pub trait EffectGuard: Send + Sync {
     fn judge(&self, ctx: &EffectContext<'_>) -> EffectJudgement;
 }
@@ -35,58 +50,71 @@ pub struct StaticEffectGuard;
 
 impl EffectGuard for StaticEffectGuard {
     fn judge(&self, ctx: &EffectContext<'_>) -> EffectJudgement {
-        let (mut risk, mut rationale) = classify(ctx.action, ctx.observation);
         let mut overridden = false;
 
-        // Model intent may only raise independently classified risk.
-        if let Some((declared, reason)) = ctx.model_effect_claim.and_then(intent_risk) {
-            if declared > risk {
-                risk = declared;
-                rationale = reason.into();
-                overridden = true;
+        // Evidence floor from the fresh observation + action (never lowered).
+        let (mut risk, mut rationale) = classify(ctx.action, ctx.observation);
+
+        // Actor closed-set classification → base policy risk. Only raises.
+        if let Some(claim) = ctx.effect {
+            if let Some((declared, reason)) = effect_policy(claim.kind) {
+                if declared > risk {
+                    risk = declared;
+                    rationale = format!("{reason}; actor claim elevated risk");
+                    overridden = true;
+                } else if declared < risk {
+                    rationale = format!("{rationale}; actor claim could not lower evidence floor");
+                    overridden = true;
+                }
             }
-        }
-
-        // Never trust a lower model claim; unknown/missing semantics elevate.
-        if let Some(claim) = ctx.model_effect_claim {
-            if looks_like_external_submit(claim) && risk < RiskLevel::R3 {
-                risk = RiskLevel::R3;
-                overridden = true;
+            if claim.kind == EffectKind::Unknown {
+                return EffectJudgement {
+                    risk: risk.max(RiskLevel::R3),
+                    rationale: "actor declared unknown consequence; stop and ask the user".into(),
+                    model_claim_overridden: false,
+                    unknown: true,
+                };
             }
+        } else if is_executable(ctx.action) {
+            // Executable action without a closed-set effect: fail closed.
+            return EffectJudgement {
+                risk: risk.max(RiskLevel::R3),
+                rationale: "executable action has no effect declaration; treat as unknown".into(),
+                model_claim_overridden: false,
+                unknown: true,
+            };
         }
-
-        // Only elevate "unknown" R0. Observe/wait/control and pure focus are intentionally R0/R1
-        // and must not force GUI approval (that blocks ordinary typing product paths).
-        if risk == RiskLevel::R0
-            && !matches!(
-                ctx.action,
-                Action::Observe
-                    | Action::Wait { .. }
-                    | Action::Done { .. }
-                    | Action::Fail { .. }
-                    | Action::RequestUser { .. }
-                    | Action::Semantic(SemanticAction::Focus { .. })
-            )
-        {
-            risk = RiskLevel::R3;
-            overridden = true;
-        }
-
-        // Cap by task authorization is enforced by Runtime; guard only scores.
-        let _ = ctx.task_authorized_max_risk;
 
         EffectJudgement {
             risk,
-            rationale: if overridden {
-                format!("{rationale}; model claim overridden or elevated")
-            } else {
-                rationale
-            },
+            rationale,
             model_claim_overridden: overridden,
+            unknown: false,
         }
     }
 }
 
+fn is_executable(action: &Action) -> bool {
+    matches!(action, Action::Semantic(_) | Action::Targeted(_))
+}
+
+/// Base policy risk of a closed-set consequence classification (§3.3 table).
+fn effect_policy(kind: EffectKind) -> Option<(RiskLevel, &'static str)> {
+    Some(match kind {
+        EffectKind::Observe => (RiskLevel::R0, "observe classification"),
+        EffectKind::Navigate => (RiskLevel::R1, "navigate classification"),
+        EffectKind::LocalEdit => (RiskLevel::R2, "local edit classification"),
+        EffectKind::ExternalCommunication
+        | EffectKind::ExternalSubmit
+        | EffectKind::Destructive => (RiskLevel::R3, "external or irreversible consequence"),
+        EffectKind::PermissionChange | EffectKind::Financial | EffectKind::Credential => {
+            (RiskLevel::R4, "permission/finance/credential consequence")
+        }
+        EffectKind::Unknown => return None,
+    })
+}
+
+/// Evidence-based classification of the action against the current observation.
 fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String) {
     match action {
         Action::Observe | Action::Wait { .. } => (RiskLevel::R0, "observation or wait".into()),
@@ -166,11 +194,17 @@ fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String
         }
         Action::Semantic(SemanticAction::Focus { .. }) => (RiskLevel::R0, "focus only".into()),
         Action::Semantic(SemanticAction::Scroll { .. }) => (RiskLevel::R1, "scroll".into()),
-        Action::Targeted(TargetedInput::TypeText { text }) => {
-            // Same content classification as SetValue: targeted typing has no
-            // element context, but the text itself can be a credential. Without
-            // this check a model could type a password/OTP/card number and
-            // bypass the R4 gate that SetValue enforces.
+        // Input primitives carry no risk floor by themselves (§3.3): the
+        // actor's closed-set classification + observation evidence decide.
+        Action::Targeted(input) => classify_targeted(input),
+    }
+}
+
+fn classify_targeted(input: &TargetedInput) -> (RiskLevel, String) {
+    match input {
+        // Content evidence only: typed text that looks like a credential
+        // elevates regardless of the actor's classification.
+        TargetedInput::TypeText { text, .. } => {
             if is_security_or_finance(text)
                 || text.to_lowercase().contains("password")
                 || text.to_lowercase().contains("passwd")
@@ -182,21 +216,14 @@ fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String
             {
                 (RiskLevel::R4, "credential or sensitive typed text".into())
             } else {
-                (RiskLevel::R2, "targeted text entry".into())
+                (RiskLevel::R0, "targeted text input".into())
             }
         }
-        Action::Targeted(TargetedInput::Click { .. })
-        | Action::Targeted(TargetedInput::KeyCombo { .. }) => {
-            // Untyped click/key defaults high until richer classification exists.
-            (
-                RiskLevel::R3,
-                "untargeted semantic click/key defaults to R3".into(),
-            )
+        // No evidence either way: the actor classification (or observation
+        // evidence) decides; a bare coordinate click is never auto-R3.
+        TargetedInput::Click { .. } | TargetedInput::KeyCombo { .. } => {
+            (RiskLevel::R0, "targeted input".into())
         }
-        Action::Exclusive(_) => (
-            RiskLevel::R3,
-            "exclusive input requires explicit consent".into(),
-        ),
     }
 }
 
@@ -266,29 +293,11 @@ fn looks_like_secret_value(value: &str) -> bool {
     v.len() == 6 && v.chars().all(|c| c.is_ascii_digit())
 }
 
-fn looks_like_external_submit(claim: &str) -> bool {
-    is_submit_like(&claim.to_lowercase())
-}
-
-fn intent_risk(intent: &str) -> Option<(RiskLevel, &'static str)> {
-    match intent.trim().to_ascii_lowercase().as_str() {
-        "focus" | "open" | "search" | "select" | "navigate" | "scroll" | "edit" => {
-            Some((RiskLevel::R2, "declared local navigation/edit intent"))
-        }
-        "send" | "submit" | "upload" | "delete" | "publish" | "confirm" => {
-            Some((RiskLevel::R3, "declared external or irreversible intent"))
-        }
-        "auth" | "credential" | "security" | "finance" | "pay" | "purchase" => {
-            Some((RiskLevel::R4, "declared security or finance intent"))
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
     use super::*;
+    use crate::action::{EffectClaim, TargetedInput};
     use crate::observation::{
         AppObservation, AppTarget, ElementNode, ModelSize, ObservationId, Rect, TransformId,
     };
@@ -328,35 +337,59 @@ mod tests {
                 actions: vec!["invoke".into()],
             }],
             transform_id: TransformId("t".into()),
+            surface_scope: None,
             image_hash: None,
             capture_backend: None,
             image_png: None,
         }
     }
 
+    fn judge(
+        guard: &StaticEffectGuard,
+        obs: &AppObservation,
+        action: &Action,
+        effect: Option<EffectKind>,
+    ) -> EffectJudgement {
+        let effect = effect.map(|kind| EffectClaim::new(kind, "summary"));
+        guard.judge(&EffectContext {
+            observation: obs,
+            action,
+            effect: effect.as_ref(),
+            task_authorized_max_risk: RiskLevel::R4,
+        })
+    }
+
     #[test]
-    fn submit_button_is_r3_and_password_is_r4() {
+    fn submit_label_floors_r3_and_password_r4_even_with_navigate_claim() {
         let guard = StaticEffectGuard;
-        let obs = obs_with_button("发送");
         let action = Action::Semantic(SemanticAction::Invoke {
             element_id: "e1".into(),
         });
-        let j = guard.judge(&EffectContext {
-            observation: &obs,
-            action: &action,
-            model_effect_claim: None,
-            task_authorized_max_risk: RiskLevel::R4,
-        });
+        // Actor claims navigate on a Send-labeled control: evidence floors R3.
+        let j = judge(&guard, &obs_with_button("发送"), &action, Some(EffectKind::Navigate));
         assert_eq!(j.risk, RiskLevel::R3);
+        assert!(j.model_claim_overridden);
 
-        let obs = obs_with_button("Password");
-        let j = guard.judge(&EffectContext {
-            observation: &obs,
-            action: &action,
-            model_effect_claim: None,
-            task_authorized_max_risk: RiskLevel::R4,
-        });
+        // Password control stays R4 regardless of claim.
+        let j = judge(
+            &guard,
+            &obs_with_button("Password"),
+            &action,
+            Some(EffectKind::Navigate),
+        );
         assert_eq!(j.risk, RiskLevel::R4);
+    }
+
+    #[test]
+    fn ordinary_invoke_with_navigate_claim_stays_r1() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("Open");
+        let action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let j = judge(&guard, &obs, &action, Some(EffectKind::Navigate));
+        assert_eq!(j.risk, RiskLevel::R1);
+        assert!(!j.unknown);
     }
 
     #[test]
@@ -365,14 +398,7 @@ mod tests {
         let obs = obs_with_button("button");
         let risk = |url: &str| {
             let action = Action::Semantic(SemanticAction::Navigate { url: url.into() });
-            guard
-                .judge(&EffectContext {
-                    observation: &obs,
-                    action: &action,
-                    model_effect_claim: None,
-                    task_authorized_max_risk: RiskLevel::R4,
-                })
-                .risk
+            judge(&guard, &obs, &action, Some(EffectKind::Navigate)).risk
         };
         assert_eq!(risk("https://example.com/path"), RiskLevel::R1);
         assert_eq!(risk("https://example.com/?password=secret"), RiskLevel::R4);
@@ -382,58 +408,84 @@ mod tests {
     }
 
     #[test]
-    fn targeted_type_text_classifies_secrets_as_r4() {
+    fn targeted_click_follows_actor_classification_not_input_primitive() {
         let guard = StaticEffectGuard;
         let obs = obs_with_button("button");
-
-        fn judge(guard: &StaticEffectGuard, obs: &AppObservation, text: &str) -> RiskLevel {
-            let action = Action::Targeted(TargetedInput::TypeText { text: text.into() });
-            guard
-                .judge(&EffectContext {
-                    observation: obs,
-                    action: &action,
-                    model_effect_claim: None,
-                    task_authorized_max_risk: RiskLevel::R4,
-                })
-                .risk
-        }
-
-        // Plain text stays R2 (auto-executable).
-        assert_eq!(judge(&guard, &obs, "hello world"), RiskLevel::R2);
-        // Credential-like text is elevated to R4 (requires user takeover).
-        assert_eq!(judge(&guard, &obs, "password hunter2"), RiskLevel::R4);
-        assert_eq!(judge(&guard, &obs, "OTP 123456"), RiskLevel::R4);
-        assert_eq!(judge(&guard, &obs, "验证码 8888"), RiskLevel::R4);
-        assert_eq!(
-            judge(&guard, &obs, "信用卡 4111111111111111"),
-            RiskLevel::R4
-        );
-        // 6-digit numeric OTP shape triggers the secret heuristic.
-        assert_eq!(judge(&guard, &obs, "482913"), RiskLevel::R4);
-    }
-
-    #[test]
-    fn intent_never_lowers_targeted_risk() {
-        let guard = StaticEffectGuard;
-        let obs = obs_with_button("button");
-        let action = Action::Targeted(TargetedInput::Click {
+        let click = Action::Targeted(TargetedInput::Click {
             x: 0.5,
             y: 0.5,
             button: Default::default(),
         });
-        let risk = |intent: Option<&str>| {
-            guard
-                .judge(&EffectContext {
-                    observation: &obs,
-                    action: &action,
-                    model_effect_claim: intent,
-                    task_authorized_max_risk: RiskLevel::R4,
-                })
-                .risk
-        };
-        assert_eq!(risk(Some("search")), RiskLevel::R3);
-        assert_eq!(risk(Some("send")), RiskLevel::R3);
-        assert_eq!(risk(Some("pay")), RiskLevel::R4);
-        assert_eq!(risk(None), RiskLevel::R3);
+        // The core policy change: an ordinary screenshot click classified
+        // navigate is not auto-R3; send/pay classifications raise.
+        let j = judge(&guard, &obs, &click, Some(EffectKind::Navigate));
+        assert_eq!(j.risk, RiskLevel::R1);
+        let j = judge(&guard, &obs, &click, Some(EffectKind::ExternalCommunication));
+        assert_eq!(j.risk, RiskLevel::R3);
+        let j = judge(&guard, &obs, &click, Some(EffectKind::Financial));
+        assert_eq!(j.risk, RiskLevel::R4);
+    }
+
+    #[test]
+    fn targeted_type_text_classifies_secrets_as_r4() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("button");
+
+        fn judge_text(
+            guard: &StaticEffectGuard,
+            obs: &AppObservation,
+            text: &str,
+        ) -> EffectJudgement {
+            let action = Action::Targeted(TargetedInput::TypeText {
+                text: text.into(),
+                x: None,
+                y: None,
+            });
+            judge(guard, obs, &action, Some(EffectKind::LocalEdit))
+        }
+
+        // Plain text with local_edit classification stays R2 (auto-executable).
+        assert_eq!(judge_text(&guard, &obs, "hello world").risk, RiskLevel::R2);
+        // Credential-like text is elevated to R4 (requires user takeover).
+        assert_eq!(judge_text(&guard, &obs, "password hunter2").risk, RiskLevel::R4);
+        assert_eq!(judge_text(&guard, &obs, "OTP 123456").risk, RiskLevel::R4);
+        assert_eq!(judge_text(&guard, &obs, "验证码 8888").risk, RiskLevel::R4);
+        assert_eq!(
+            judge_text(&guard, &obs, "信用卡 4111111111111111").risk,
+            RiskLevel::R4
+        );
+        // 6-digit numeric OTP shape triggers the secret heuristic.
+        assert_eq!(judge_text(&guard, &obs, "482913").risk, RiskLevel::R4);
+    }
+
+    #[test]
+    fn unknown_or_missing_effect_stops() {
+        let guard = StaticEffectGuard;
+        let obs = obs_with_button("button");
+        let click = Action::Targeted(TargetedInput::Click {
+            x: 0.5,
+            y: 0.5,
+            button: Default::default(),
+        });
+        // Explicit unknown → stop and ask the user.
+        let j = judge(&guard, &obs, &click, Some(EffectKind::Unknown));
+        assert!(j.unknown);
+        // Missing effect on an executable action → fail closed as unknown.
+        let j = guard.judge(&EffectContext {
+            observation: &obs,
+            action: &click,
+            effect: None,
+            task_authorized_max_risk: RiskLevel::R4,
+        });
+        assert!(j.unknown);
+        // Control actions do not need an effect.
+        let j = guard.judge(&EffectContext {
+            observation: &obs,
+            action: &Action::Done { summary: "ok".into() },
+            effect: None,
+            task_authorized_max_risk: RiskLevel::R4,
+        });
+        assert!(!j.unknown);
+        assert_eq!(j.risk, RiskLevel::R0);
     }
 }

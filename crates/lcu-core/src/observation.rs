@@ -90,6 +90,9 @@ pub struct AppObservation {
     pub model_size: ModelSize,
     pub elements: Vec<ElementNode>,
     pub transform_id: TransformId,
+    /// Backend-owned stable surface scope (for example Chrome profile + tab + origin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_scope: Option<String>,
     /// SHA-256 of the in-memory frame when present; never the image itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_hash: Option<String>,
@@ -116,4 +119,3 @@ impl AppObservation {
         self.elements.iter().any(|e| e.id == element_id)
     }
 }
-

@@ -1,6 +1,8 @@
 //! Frozen high-risk control labels used for R3/R4 intercept regression (M2).
+//!
+//! The actor's effect declaration can never lower these evidence floors.
 
-use crate::action::{Action, SemanticAction};
+use crate::action::{Action, EffectClaim, EffectKind, SemanticAction};
 use crate::effect_guard::{EffectContext, EffectGuard, StaticEffectGuard};
 use crate::observation::{
     AppObservation, AppTarget, ElementNode, ModelSize, ObservationId, Rect, TransformId,
@@ -64,6 +66,7 @@ fn observation_with_label(label: &str) -> AppObservation {
             actions: vec!["AXPress".into()],
         }],
         transform_id: TransformId("t".into()),
+        surface_scope: None,
         image_hash: None,
         capture_backend: None,
         image_png: None,
@@ -86,7 +89,7 @@ pub fn evaluate_frozen_r3_r4() -> FrozenSetReport {
         let j = guard.judge(&EffectContext {
             observation: &obs,
             action: &action,
-            model_effect_claim: Some("harmless navigation"),
+            effect: Some(&EffectClaim::new(EffectKind::Navigate, "harmless navigation")),
             task_authorized_max_risk: RiskLevel::R4,
         });
         if j.risk >= RiskLevel::R3 {
@@ -104,7 +107,7 @@ pub fn evaluate_frozen_r3_r4() -> FrozenSetReport {
         let j = guard.judge(&EffectContext {
             observation: &obs,
             action: &action,
-            model_effect_claim: Some("low risk"),
+            effect: Some(&EffectClaim::new(EffectKind::Navigate, "low risk")),
             task_authorized_max_risk: RiskLevel::R4,
         });
         if j.risk >= RiskLevel::R4 {
@@ -164,7 +167,7 @@ pub fn evaluate_false_positives() -> FalsePositiveReport {
         let j = guard.judge(&EffectContext {
             observation: &obs,
             action: &action,
-            model_effect_claim: None,
+            effect: Some(&EffectClaim::new(EffectKind::Navigate, "open")),
             task_authorized_max_risk: RiskLevel::R4,
         });
         if j.risk >= RiskLevel::R3 {
@@ -177,4 +180,3 @@ pub fn evaluate_false_positives() -> FalsePositiveReport {
         elevated_labels: elevated,
     }
 }
-

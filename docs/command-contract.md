@@ -63,13 +63,13 @@ Surface permissions (online `doctor`, i.e. Runtime reachable):
 
 When the Runtime is unreachable, offline `doctor` reports `mac_window_service` / `chrome_control_host` socket presence instead.
 
-### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--actor vlm|agent] [--json]`
+### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--actor vlm|agent] [--control-mode auto|background_only|foreground] [--json]`
 
 Submit a high-level natural-language task.
 
-`source` and `source-name` are display metadata, not authentication. `--actor vlm|agent` selects the decision maker for this task (default: the Runtime process setting, `LCU_VISION_ACTOR`; unset/`auto` selects Agent); tasks of either kind may coexist in one queue. Tasks enter one serial FIFO queue; `waiting_user` and user-paused tasks release the execution slot.
+`source` and `source-name` are display metadata, not authentication. `--actor vlm|agent` selects the decision maker for this task (default: the Runtime process setting, `LCU_VISION_ACTOR`; unset/`auto` selects Agent). `--control-mode` selects background-first automatic fallback, background-only, or a task-scoped foreground session. Tasks of either Actor kind share one serial FIFO queue; `waiting_actor` and user-paused tasks release the global execution slot.
 
-Task wire states include `queued`, `running`, `waiting_user` (legacy alias `waiting_approval`), `paused` (alias `paused_by_user`), `succeeded`, `failed`, `cancelled`. After GUI approval or user resume, the task returns to `running` (not a new `queued` enqueue).
+Task wire states include `queued`, `running`, `waiting_actor` (older persisted aliases: `waiting_user` / `waiting_approval`), `paused` (alias `paused_by_user`), `succeeded`, `failed`, `cancelled`. A gate decision discards the old proposal, re-observes the target, and returns the task to the same Actor through `waiting_actor` continuation.
 
 Task success requires an explicit model `Done` and a successful re-observation of the target. A successful action, repeated action, step count, or queued state is not completion.
 
@@ -99,11 +99,15 @@ Cancel and release target resources.
 
 ### `lcu approve <approval-id> [--json]`
 
-Opens local GUI confirmation bound to:
+Opens the local GUI for one of three distinct gates:
 
-```text
-task_id + observation_id + action_hash + target_app + expires_at + one_time_nonce
-```
+- app access: stable signed application identity;
+- foreground activation: task + strict target + expiry + one-time nonce;
+- consequence confirmation/takeover: task + stable app identity + effect kind + Runtime-derived consequence identity + expiry + one-time nonce.
+
+Screenshot-only consequence requests additionally retain the original
+`observation_id + image_hash + action_hash` as audit/exact-frame evidence, but
+the old action is never stored for replay.
 
 CLI, Agent, and model credentials must not produce an approval result. Exit code is typically `2` (waiting user).
 
@@ -111,7 +115,7 @@ CLI, Agent, and model credentials must not produce an approval result. Exit code
 
 Schema and internal protocol versions.
 
-### `lcu decide <task-id> [--wait] [--json]` / `lcu act <task-id> --observation-id <obs> --action <json> [--intent <intent>] [--json]`
+### `lcu decide <task-id> [--wait] [--json]` / `lcu act <task-id> --observation-id <obs> --action <json> [--effect <json>] [--json]`
 
 Agent decision mode for a task submitted with `--actor agent`. No Runtime
 restart is needed; the task-level actor overrides the process default.
@@ -126,10 +130,13 @@ gates). A stale `observation_id` is rejected with exit 3; use `decide` again.
 Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s).
 Cancel/pause aborts a parked decision immediately (exit 2 semantics preserved).
 
-Screenshot coordinates are bound to that observation. Targeted click/key actions remain
-R3 regardless of a claimed ordinary intent. `--intent` may only raise risk
-(for example payment/security to R4); it never lowers independently classified
-risk.
+Every executable semantic/targeted action requires the same closed-set
+`effect` object used by the local VLM. Runtime independently raises the risk
+floor from the fresh observation and action; the Actor claim is never an
+authorization and cannot lower that floor. Screenshot coordinates remain
+bound to the returned observation. A one-time confirmation is consumed only
+by an equivalent Runtime consequence identity, or for screenshot-only input by
+an exact fresh `image_hash + action_hash` match.
 
 For a Chrome task, an Agent may submit browser navigation through the shared
 action contract: `{"kind":"semantic","type":"navigate","url":"https://example.com/"}`.
@@ -142,10 +149,26 @@ host method directly.
 1. Run `lcu doctor --json` when environment health is unknown.
 2. Submit with `lcu run ... --actor agent --source agent --source-name <name> --json`.
 3. On `waiting_user` / exit `2`, hand control to the human immediately.
-4. Never invent mouse/keyboard primitives; never approve high-risk actions.
+4. Use only fresh observation-bound actions; never approve high-risk actions.
 5. Judge success only from `lcu` result/status fields.
+
+## Foreground session
+
+Background execution is preferred, not promised. When a macOS target cannot be
+driven in the background, Runtime parks **one task-scoped foreground grant**
+that discloses the target window may come to the front once. After the GUI
+grant the exact pid + window may be activated;
+activation verifies both the foreground app and the exact key window, and never
+restores the previous app. The session is single-slot, task-scoped, and
+cleared on terminal / pause / target change / release / runtime recovery.
+It is suspended while an external Agent decides and resumes without activation
+only if that exact window stayed foreground and no real user HID touched it.
+Inside an approved session, ordinary actions do not repeat capability approval;
+consequences (send/delete/pay/…) still use separate one-time confirmation or
+takeover gates. Real user HID on the target automatically ends the session and
+pauses the task; `pause` / `cancel` remain explicit controls.
 
 ## Source-level non-interference contract
 
-- macOS tasks do not activate their target window. User focus on the same PID and window pauses the task; a lost target fails it.
+- macOS tasks prefer background semantic/targeted input and never guess another window when identity fails. Activation happens only inside one GUI-approved foreground session (see above). Only real user HID on the reserved target is takeover; focus/frontmost changes alone are not. A lost target fails the task.
 - Chrome tasks use an inactive task tab. User takeover detaches the debugger and the Runtime does not reactivate a previous or task tab.

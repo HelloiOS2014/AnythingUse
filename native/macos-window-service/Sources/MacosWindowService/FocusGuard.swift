@@ -5,11 +5,13 @@ import Foundation
 
 /// Prevent agent actions from stealing system frontmost / key window.
 ///
-/// Product rule: agent must never change system `frontmost app`, key window,
-/// user-active tab, real mouse, or keyboard ownership.
+/// Product rule: outside a GUI-approved foreground session the agent must never
+/// change system `frontmost app`, key window, user-active tab, real mouse, or
+/// keyboard ownership.
 ///
 /// Hard rules:
-/// - Never call `NSRunningApplication.activate()` (or any post-hoc restore).
+/// - `NSRunningApplication.activate()` is allowed only inside an approved
+///   foreground session (`Service.foregroundActivate`); never post-hoc restore.
 /// - Detecting a steal after the fact is fail-closed only — damage may already
 ///   be visible; the fix is to refuse paths that can steal, not to "undo" them.
 /// - Same-app window A vs window B must be distinguished by `pid + windowID`.
@@ -41,16 +43,49 @@ enum FocusGuard {
         return front != 0 && front == pid
     }
 
-    /// Whether the target window is already the system key window (pid + windowID).
-    /// Required before PID-directed input that depends on system key-window routing.
-    static func isTargetKeyWindow(target: MacWindowTarget) -> Bool {
-        guard isFrontmost(pid: target.pid) else { return false }
-        // Prefer AXWindowNumber when the app exposes it.
-        if let key = focusedWindowNumber(pid: target.pid) {
-            return key == target.windowID
+    /// Exact-window proof after a foreground activation (realignment §4.5).
+    /// Preferred: the app's AX key-window number equals the target window.
+    /// Without an AX identity: the target CGWindowID must equal the unique
+    /// topmost same-PID on-screen window — multiple candidates or unprovable
+    /// fails. PID-frontmost alone is never sufficient for input.
+    static func provesExactWindow(pid: pid_t, windowID: CGWindowID) -> Bool {
+        if let key = focusedWindowNumber(pid: pid) {
+            return key == windowID
         }
-        // TextEdit etc. omit AXWindowNumber: match focused AX window frame to CG bounds.
-        return focusedWindowMatches(target: target)
+        guard let top = uniqueTopmostSamePIDWindow(pid: pid) else {
+            return false
+        }
+        return top == windowID
+    }
+
+    static func currentExactWindowNumber(pid: pid_t) -> CGWindowID? {
+        focusedWindowNumber(pid: pid) ?? uniqueTopmostSamePIDWindow(pid: pid)
+    }
+
+    /// The unique topmost on-screen CGWindow for `pid`, or nil when there are
+    /// zero or multiple candidates. CGWindowListCopyWindowInfo returns windows
+    /// front-to-back; the first same-PID entry is the topmost.
+    static func uniqueTopmostSamePIDWindow(pid: pid_t) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return nil
+        }
+        var candidates: [CGWindowID] = []
+        for info in list {
+            guard let owner = info[kCGWindowOwnerPID as String] as? Int, owner == pid else {
+                continue
+            }
+            if let number = info[kCGWindowNumber as String] as? Int {
+                candidates.append(CGWindowID(number))
+            }
+        }
+        // Screen-recording permission may hide window info; empty means unprovable.
+        guard candidates.count == 1 else {
+            return nil
+        }
+        return candidates[0]
     }
 
     /// CGWindowNumber of the app's focused/main AX window when available.
@@ -101,6 +136,12 @@ enum FocusGuard {
         target: MacWindowTarget,
         _ body: () throws -> T
     ) throws -> T {
+        // An approved foreground session legitimately promotes the target; the
+        // promotion is the grant's disclosed effect, not a steal. All other
+        // paths keep the strict post-hoc check.
+        if ForegroundSession.shared.isActive(pid: target.pid, windowID: target.windowID) {
+            return try body()
+        }
         let before = snapshot(target: target)
         // body may throw after a partial steal; still assert so defects surface.
         do {
@@ -128,7 +169,7 @@ enum FocusGuard {
            before.frontmostPid != target.pid,
            after.frontmostPid == target.pid
         {
-            throw ServiceError.actionFailed(
+            throw ServiceError.foregroundRequired(
                 "refused: action promoted target app to frontmost (pid=\(target.pid)); "
                     + "background control must not steal frontmost (no post-hoc activate)"
             )

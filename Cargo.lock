@@ -1226,10 +1226,12 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
+ "hex",
  "lcu-core",
  "lcu-platform",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "uuid",
 ]

@@ -162,12 +162,12 @@ runtime, or dependency graph.
 
 ## Reviewed AnythingUse execution contract
 
-This section preserves the reviewed target shape. Only the observation metadata,
-upward-only intent propagation, and cleanup items described in the gate result
-are currently implemented.
+This section records the current source contract. It is not a claim that Gate 1
+real-app acceptance has passed.
 
 The public wire version is `1.1.0`. Existing `1.0.0` semantic actions stay valid.
-Coordinate click/key actions remain R3 with or without ordinary effect intent.
+Both Actors submit the same closed-set `effect`; Runtime's independent evidence
+floor may raise but never lower risk.
 
 ### Observation
 
@@ -222,71 +222,61 @@ decision is consumed, replaced, cancelled, or expired.
   supplies a title selector, or the Agent chooses from a read-only window list.
 - `lcu apps --json` provides read-only app and window discovery for Agents and
   humans.
-- A task may change apps only through an explicit `switch_target` action. The
-  Runtime releases the old target, checks access for the new app, resolves one
-  window, and emits a fresh observation before any other action.
+- A current task remains bound to one strict app/window target. Multi-app target
+  switching is not part of the implemented contract.
 - Before the first screenshot or action for an app, reuse the existing desktop
   approval UI for an app-access decision: allow once, always allow, or deny.
   Agents and CLI commands cannot approve. Persistent decisions are local,
-  per-user, revocable, and keyed by bundle ID plus signing Team Identifier; an
+  per-user, revocable from the menu-bar settings, and keyed by bundle ID plus signing Team Identifier, signing ID, and code hash; an
   unsigned app uses its canonical bundle path and must be approved again if that
   path or code identity changes.
 
 ### Action
 
-Both external Agent and local VLM use the same action set:
+Both decision Actors use the same implemented action and `effect` schema:
 
-- semantic invoke, set-value, selection, and secondary action when an element
-  exists;
-- target-window click, double-click, right-click, drag, scroll, text input, and
-  key/key-combination when working from the screenshot;
-- wait, request-user, fail, and explicit done;
-- Chrome navigation through the existing real-Chrome control surface.
+- semantic: `navigate` (Chrome only), `invoke`, `set_value`, `focus`, `scroll`;
+- targeted: single `click`, `type_text`, `key_combo` (backend capabilities may
+  reject a valid shared action before input);
+- control: `observe`, `wait`, `request_user`, `fail`, explicit `done`.
 
-The canonical new actions are intentionally small:
-
-```json
-{"kind":"targeted","type":"click","x":0.25,"y":0.20,"button":"left","click_count":1}
-{"kind":"targeted","type":"drag","from_x":0.2,"from_y":0.2,"to_x":0.8,"to_y":0.2}
-{"kind":"targeted","type":"scroll","x":0.5,"y":0.5,"delta_x":0,"delta_y":-0.5}
-{"kind":"targeted","type":"type_text","text":"查询词"}
-{"kind":"targeted","type":"key_combo","keys":["RETURN"]}
-{"kind":"switch_target","app_id":"com.example.TargetApp","window_title_contains":null}
-```
-
-The current `lcu act` exposes only an optional upward-only intent label:
-
-```text
+```bash
 lcu act <task-id> --observation-id <obs> \
-  --intent search \
-  --action '<canonical action json>'
+  --action '{"kind":"targeted","type":"click","x":0.25,"y":0.20,"button":"left"}' \
+  --effect '{"kind":"navigate","summary":"Open the selected item"}'
 ```
 
-Both decision actors populate the same existing `effect_claim` field. It is
-model/Agent output, not authorization, and can only raise the independently
-classified risk. Rich evidence, destination metadata, and a proposal-level hash
-remain unimplemented future design.
-
-Targeted input validation is fixed and shared across callers:
-
-- coordinates and deltas are finite normalized values in `[0,1]` (scroll deltas
-  may be `[-1,1]`);
-- `click_count` is `1...3`;
-- key names use one canonical set: `CMD`, `CTRL`, `ALT`, `SHIFT`, `RETURN`,
-  `TAB`, `ESC`, arrows, function keys, or one printable base key;
-- text, URL, and key-count limits reuse the existing trust-boundary limits;
-- unsupported buttons/keys fail validation before reaching a backend.
+Executable semantic/targeted actions require one closed-set `effect.kind`:
+`observe`, `navigate`, `local_edit`, `external_communication`,
+`external_submit`, `destructive`, `permission_change`, `financial`,
+`credential`, or `unknown`. It is Actor output, not authorization. Runtime
+computes an independent evidence floor and can only raise the risk; missing,
+illegal, or `unknown` effects stop for the user.
 
 Every UI action carries the current `observation_id`. Runtime resolves that ID
-to the stored target and transform; callers never submit raw PIDs or window IDs
-for an action. Immediately before execution, the backend rechecks app/window
-identity, frame, scale, and current frontmost ownership. A geometry mismatch
-returns a fresh observation; coordinates are never silently remapped.
+to the stored strict target and transform, validates finite normalized
+coordinates and bounded text/keys/URLs, then rechecks the target before input.
+The current macOS surface supports only actions its backend explicitly reports;
+there is no `exclusive`, drag, multi-click, right/middle-click downgrade, or
+`switch_target` action.
+
+App access, foreground activation, and consequence confirmation/takeover are
+separate gates. Approval never replays the old proposal: Runtime takes a fresh
+observation and returns it to the same Actor. A consequence grant is consumed
+once by an equivalent Runtime-derived identity, or for screenshot-only input by
+an exact fresh `image_hash + action_hash` match.
 
 ### Execution and coexistence
 
-- Never activate, raise, switch to, or later restore the target as an execution
-  strategy.
+- Background semantic first, then provably isolated background targeted input.
+  Activation is used only inside one GUI-approved foreground session
+  (`foreground_activate` is the only `NSRunningApplication.activate` entry);
+  the previous app is never restored afterwards.
+- The foreground-session approval dialog discloses that the target window may
+  come to the front once. Ordinary focus/open/search/select/navigate/scroll/edit
+  inside an approved session do not repeat capability approval; consequences
+  remain approved action by action, and the user takes over with
+  `lcu pause` / `lcu cancel`.
 - Never move the user's physical pointer or emit global keyboard shortcuts.
 - Deliver input to the selected application/window. A PID-only path must prove
   the selected window at execution time; otherwise it fails without touching
@@ -300,13 +290,15 @@ The macOS operator proof is deliberately narrow:
 
 - screenshot coordinates map only through the bound window transform;
 - AX hit-test/press remains the preferred acceleration when available;
-- the non-AX path posts only to the target process and first proves the target
-  is the topmost window of that process at the requested point;
-- mouse delivery must not require or create system frontmost/key-window state;
+- raw non-AX coordinate click is not a product path;
+- mouse delivery must not require or create system frontmost/key-window state
+  outside an approved session;
 - keyboard delivery follows a successful bound click or proven editable target,
   rechecking target ownership between chunks;
-- inability to prove the destination fails before input. It never activates the
-  app, restores another app afterward, or introduces an app-specific shortcut.
+- inability to prove the destination fails before input. `foreground_required`
+  is reported only before any input occurred, and is answered by at most one
+  session approval (retry once on a fresh observation; ambiguous same-app
+  windows fail instead of guessing);
 - operator, risk, settle, and retry code may branch on platform capability and
   action type only. Bundle ID, process name, application title, vendor, and
   acceptance-case strings are forbidden implementation conditions.
@@ -334,10 +326,11 @@ Backends return stable outcomes instead of free-form failure guessing:
 | Outcome | Runtime behavior |
 |---|---|
 | `stale_observation` / geometry changed | discard proposal, return fresh decision |
-| `waiting_user` | release execution slot; resume from fresh observation after decision |
+| `waiting_actor` | release execution slot; continue with the same Actor on a fresh observation after the gate decision |
 | `taken_over` | pause task, release target; explicit resume required |
 | `target_lost` | fail current step/task; never select another window implicitly |
 | `unsupported_capability` | fail without fallback input; report exact missing action |
+| `foreground_required` | in `auto`, request a task-scoped foreground grant; after approval activate the exact target, discard the old proposal, and return a fresh observation to the same Actor — never restore the previous app. A suspended session resumes without activation only while the exact target stayed foreground and untouched; otherwise a later activation needs a new grant. |
 | `permission_denied` | block before observation/action and surface through `doctor` |
 | `ui_state=changing` | valid observation; actor may issue one bounded wait |
 
@@ -347,13 +340,21 @@ Backends return stable outcomes instead of free-form failure guessing:
   observation can succeed; an action receipt alone never proves the goal.
 - Runtime re-observes the final target and records the target sequence for a
   multi-app task before accepting Done.
-- SQLite keeps task state, target identities, proposal hash, intent, risk,
+- SQLite keeps task state, target identities, proposal hash, effect, risk,
   approval decision, capability path, and action result. It does not persist raw
   screenshots, full semantic trees, or unredacted credential/text values.
 - Logs use the existing redaction path; no new telemetry or cloud service is
   introduced.
 
 ### Storage and artifact lifecycle
+
+> **Mixed status.** Current code deletes decision screenshots on every exit
+> path, prunes owned crash leftovers older than one hour, retains only terminal
+> SQLite tasks within 30 days and the newest 1,000, and removes release staging
+> through a shell exit trap. Runtime logs are stderr-only; the Chrome native host
+> rotates at 5 files × 5 MiB. The quota, storage/cleanup commands, crash-diagnostic
+> cap, managed model upgrade, and database compaction
+> below remain future design intent and must not be quoted as delivered.
 
 AnythingUse runtime storage is bounded. Temporary process output is never an
 unlimited task history.
@@ -411,36 +412,36 @@ Risk is classified from the intended and visible effect:
 | coordinate click/key or unknown effect | confirmation (R3) |
 
 Coordinate click and key input remain R3 until an independent execution-time
-signal can classify the hit control; model intent alone never lowers them.
+signal can classify the hit control; Actor effect alone never lowers them.
 Conversely, semantic `invoke` is not automatically safe merely because AX
 supplied a label.
 
-`intent` is model/Agent output and is therefore not authorization. Runtime uses
-it as one policy signal:
+`effect` is Actor output and is therefore not authorization. Runtime uses it as
+one policy signal:
 
-- action shape, semantic label/value, typed text, URL, and declared intent each
+- action shape, semantic label/value, typed text, URL, and declared effect each
   may raise risk;
 - the highest result wins;
 - `send`, `submit`, `upload`, `delete`, and `publish` cannot fall below the
   confirmation tier;
 - `authenticate`, `security`, and `finance` cannot fall below handoff;
-- absent or `unknown` intent requires confirmation;
-- the user-authored goal may pre-authorize only the specific consequence and
-  destination allowed by policy; screen content never grants permission.
+- absent, illegal, or `unknown` effect stops for the user;
+- the user-authored goal scopes the task but does not approve a real
+  consequence; screen content never grants permission.
 
 ### Queue and ownership
 
 - One desktop action executes at a time per login user. This remains the queue's
   only concurrency rule.
-- Observation/model decision time does not hold the desktop execution slot or a
-  target lease. This applies equally to external Agent and local VLM tasks.
+- Observation/model decision time does not hold the desktop execution slot.
+  An external Agent continuation retains only its strict target reservation.
 - When a proposal arrives, the task re-enters FIFO order and Runtime performs the
   pre-execution target/geometry check. A changed target produces a fresh
   observation instead of executing the stale proposal.
-- Waiting for app access, consequential-action confirmation, or user takeover
+- Waiting for app access, consequence confirmation, foreground activation, or takeover
   also releases the execution slot.
-- A task holds exactly one target lease only during observe/execute/settle. An
-  explicit `switch_target` releases the old lease before acquiring the new one.
+- A current task remains bound to one strict target; a different task can run
+  only after the scheduler safely releases or hands off execution ownership.
 
 ### Screen-content trust boundary
 
@@ -451,35 +452,40 @@ transmission. Only the original user request and explicit user follow-ups may
 change those decisions. Both Agent and VLM prompts carry this rule; Runtime still
 enforces target, app access, and consequence gates independently.
 
-## Gate result and current boundary (2026-08-11)
+## Gate result and current boundary (2026-08-12)
 
 The generic screenshot-only macOS Operator spike failed its first required
-gate. The candidate SkyLight focus-without-raise sequence sent defocus/focus
-records that disrupted the user's active keyboard focus, while authenticated
-text still did not land in the AX-empty target. It was removed.
+gate, and the replacement SkyLight SPI transport (opt-in synthetic focus
+records) was removed in the same freeze: focus records disrupted the user's
+active keyboard focus, authenticated text did not land in the AX-empty target,
+and delivery could not be proven independently of the app.
 
-A replacement input spike is explicitly opt-in. It uses the reviewed
-target-only sequence: synthetic focus and unfocus records contain only the
-strict target PSN/window, so the implementation cannot notify the real
-foreground process. On 2026-08-11, background TextEdit typing succeeded while
-the frontmost process remained Codex before and after the action. This accepts
-the focus/keyboard mechanism only; targeted click remains unverified and the
-product default remains disabled.
+The execution ladder is now: background semantic → provably isolated background
+targeted → **GUI-approved task-scoped foreground session** → explicit failure.
+The approved session raises or uniquely proves the exact window before activation,
+then re-proves it after activation and before input; ambiguous same-process windows fail closed. It never
+restores the previous app and is cleared on terminal / pause / target change /
+release / runtime recovery. External-Agent think time suspends native ownership;
+resume is non-activating and requires the same untouched foreground window.
+Real user HID on the target ends the session and pauses the task automatically.
 
 Consequences:
 
-- no automatic product routing starts from that mechanism;
-- targeted coordinate click/key actions remain R3, and model intent can only
-  raise risk;
-- `1.1.0` adds observation target/transform metadata and Agent intent parity,
+- no automatic product routing starts from the removed mechanism;
+- screenshot-coordinate input uses the selected Actor's mandatory closed-set
+  consequence classification when Runtime has no contradictory UI evidence;
+  missing/unknown classification stops, and send/delete/pay/credential evidence
+  independently raises the floor;
+- `1.1.0` adds observation target/transform metadata and shared Agent/VLM effect parity,
   not a claimed generic background-input capability;
 - macOS currently uses strict window capture, AX semantic actions, and existing
   PID-directed actions only when their target proof succeeds;
-- AX-empty apps such as the tested Enterprise WeChat build remain unsupported
-  until the same target-only mechanism passes a generic non-AX task gate;
+- AX-empty controls are answered by the approved foreground-session fallback
+  when the user grants it; otherwise they fail closed; no application-specific
+  exception is allowed;
 - startup removes stale Agent/VLM screenshots and the Chrome host rotates logs.
 
-The target-only mechanism must still pass targeted-click and non-AX app gates
-without changing the user's front process, key window, keyboard focus, pointer,
-or Space before it can become the default. Until then, fail closed; switching to
-the target and back is not an allowed fallback.
+Live acceptance remains one generic background case, one screenshot-only
+foreground-required case, and one Chrome background-tab case. Until accepted,
+fail closed;
+switching to the target and back without approval is not an allowed fallback.

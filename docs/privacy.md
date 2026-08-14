@@ -8,13 +8,13 @@ Product: **AnythingUse**. Runtime data root on macOS defaults to `~/Library/Appl
 |---|---|---|
 | Task metadata | Runtime SQLite | No screenshot blobs |
 | Events | SQLite `events` table | Compact messages only |
-| Screenshots (if any) | Runtime `screenshots/` with 0700/0600 | TTL cleanup; not agent-visible |
+| Decision screenshots (if any) | private 0600 files in the OS temp directory | one pending observation only; removed on consume/replace/timeout/pause/terminal, startup prunes owned leftovers older than 1 hour |
 | Model weights | `models/` (user provided) | Offline inference preferred |
 
 ## What Agents see
 
 Only `lcu` JSON fields: task id, goal, state, summary/error, step count, app selector, and doctor flags.  
-Agents do **not** receive screenshots, full AX trees, model chain-of-thought, or approval internals.
+Agents do **not** receive screenshots outside the explicit Agent decision mode, full AX trees, model chain-of-thought, or approval internals.
 
 **Agent decision mode exception** (`--actor agent`): when the external Agent
 is the decision maker, `lcu decide` deliberately hands it the same data

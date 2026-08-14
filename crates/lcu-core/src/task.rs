@@ -28,16 +28,19 @@ impl Default for TaskId {
 
 /// Lifecycle states for a single task.
 ///
-/// Wire names match product language: `waiting_user` covers approval + takeover parks
-/// (`WaitingApproval` is kept as the Rust variant for existing call sites).
+/// Wire names match product language: `waiting_actor` is the unified park for
+/// app access, consequence confirmation and foreground activation (realignment
+/// §3.4) — the old proposal is never retained for replay. Deserialize aliases
+/// keep previously persisted `waiting_user` / `waiting_approval` rows readable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     Queued,
     Running,
-    /// Waiting for human confirm / takeover (JSON: `waiting_user`).
-    #[serde(rename = "waiting_user", alias = "waiting_approval")]
-    WaitingApproval,
+    /// Waiting for a human gate decision (app access / consequence / foreground)
+    /// and then the actor's continuation on a fresh observation.
+    #[serde(alias = "waiting_user", alias = "waiting_approval")]
+    WaitingActor,
     /// User paused / same-app takeover (JSON: `paused`).
     #[serde(rename = "paused", alias = "paused_by_user")]
     PausedByUser,
@@ -56,13 +59,33 @@ impl TaskState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCommand {
     Start,
-    RequireApproval,
+    /// Park the task in `waiting_actor` for any human gate (app access /
+    /// consequence / foreground / takeover).
+    WaitActor,
+    /// A gate was decided in the GUI; resume toward the actor continuation.
     Approve,
+    /// External Agent submitted a decision for the current observation.
+    ActorReady,
     PauseByUser,
     Resume,
     Succeed,
     Fail,
     Cancel,
+}
+
+/// Task-level control mode (realignment §3.2): user/task choice, never an
+/// app hardcode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    /// Background first; when the operator reports `foreground_required`,
+    /// request one task-scoped ForegroundGrant.
+    #[default]
+    Auto,
+    /// Never activate; `foreground_required` is an explicit error.
+    BackgroundOnly,
+    /// Request one task-scoped ForegroundGrant when the task starts.
+    Foreground,
 }
 
 /// Durable task metadata (no screenshots).
@@ -80,6 +103,9 @@ pub struct TaskRecord {
     /// (external agent via lcu decide/act). None = follow the Runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// Task control mode (auto / background_only / foreground).
+    #[serde(default)]
+    pub control_mode: ControlMode,
     pub step_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observation_id: Option<ObservationId>,
@@ -107,6 +133,7 @@ impl TaskRecord {
             updated_at: now,
             app_selector,
             actor: None,
+            control_mode: ControlMode::Auto,
             step_count: 0,
             last_observation_id: None,
             last_action_hash: None,
@@ -153,16 +180,17 @@ impl TaskStateMachine {
             // after a process restart; pause it for the user to decide.
             (TaskState::Queued, TaskCommand::PauseByUser) => TaskState::PausedByUser,
 
-            (TaskState::Running, TaskCommand::RequireApproval) => TaskState::WaitingApproval,
+            (TaskState::Running, TaskCommand::WaitActor) => TaskState::WaitingActor,
             (TaskState::Running, TaskCommand::PauseByUser) => TaskState::PausedByUser,
             (TaskState::Running, TaskCommand::Succeed) => TaskState::Succeeded,
             (TaskState::Running, TaskCommand::Fail) => TaskState::Failed,
             (TaskState::Running, TaskCommand::Cancel) => TaskState::Cancelled,
 
-            (TaskState::WaitingApproval, TaskCommand::Approve) => TaskState::Running,
-            (TaskState::WaitingApproval, TaskCommand::Fail) => TaskState::Failed,
-            (TaskState::WaitingApproval, TaskCommand::Cancel) => TaskState::Cancelled,
-            (TaskState::WaitingApproval, TaskCommand::PauseByUser) => TaskState::PausedByUser,
+            (TaskState::WaitingActor, TaskCommand::Approve) => TaskState::Running,
+            (TaskState::WaitingActor, TaskCommand::ActorReady) => TaskState::Running,
+            (TaskState::WaitingActor, TaskCommand::Fail) => TaskState::Failed,
+            (TaskState::WaitingActor, TaskCommand::Cancel) => TaskState::Cancelled,
+            (TaskState::WaitingActor, TaskCommand::PauseByUser) => TaskState::PausedByUser,
 
             (TaskState::PausedByUser, TaskCommand::Resume) => TaskState::Running,
             (TaskState::PausedByUser, TaskCommand::Cancel) => TaskState::Cancelled,
@@ -200,14 +228,17 @@ mod tests {
 
     
     #[test]
-    fn happy_path_and_approval_gate() {
+    fn happy_path_and_actor_gate() {
         let mut task = TaskRecord::new("demo", CallerIdentity::HumanCli, None);
         assert_eq!(task.state, TaskState::Queued);
         TaskStateMachine::apply(&mut task, TaskCommand::Start).unwrap();
         assert_eq!(task.state, TaskState::Running);
-        TaskStateMachine::apply(&mut task, TaskCommand::RequireApproval).unwrap();
-        assert_eq!(task.state, TaskState::WaitingApproval);
+        TaskStateMachine::apply(&mut task, TaskCommand::WaitActor).unwrap();
+        assert_eq!(task.state, TaskState::WaitingActor);
         TaskStateMachine::apply(&mut task, TaskCommand::Approve).unwrap();
+        assert_eq!(task.state, TaskState::Running);
+        TaskStateMachine::apply(&mut task, TaskCommand::WaitActor).unwrap();
+        TaskStateMachine::apply(&mut task, TaskCommand::ActorReady).unwrap();
         assert_eq!(task.state, TaskState::Running);
         TaskStateMachine::apply(&mut task, TaskCommand::Succeed).unwrap();
         assert_eq!(task.state, TaskState::Succeeded);
@@ -220,4 +251,3 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::InvalidRequest);
     }
 }
-

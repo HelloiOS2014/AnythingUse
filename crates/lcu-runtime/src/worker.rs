@@ -1,70 +1,55 @@
-//! Desktop-owned product loop: observe → decide → EffectGuard → act → re-observe.
+//! Desktop-owned product loop: gate → observe → decide → effect guard → act → re-observe.
 //!
 //! Real OS actions may only execute through [`Runtime::perform_gated_action`].
+//!
+//! Realignment contract §4.4: app access, consequence confirmation and
+//! foreground activation all park the task in `waiting_actor`; after the gate
+//! the worker makes a fresh observation and hands `transition_result` to the
+//! same actor kind. The old proposal is never retained and never replayed.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration as StdDuration;
 
-use lcu_core::action::Action;
+use lcu_core::action::{Action, EffectClaim, SemanticAction, TargetedInput};
+use lcu_core::approval::{ConsequenceGrant, ConsequenceIdentity, GateKind, GrantStatus, ScreenshotEvidence};
+use lcu_core::effect_guard::EffectContext;
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
-use lcu_core::observation::{AppSelector, AppTarget};
+use lcu_core::observation::{AppObservation, AppSelector, AppTarget};
 use lcu_core::risk::RiskLevel;
-use lcu_core::task::{TaskCommand, TaskId, TaskState};
+use lcu_core::task::{ControlMode, TaskCommand, TaskId, TaskState};
 use lcu_model::{
-    ensure_observation_binding, validate_action, LoopGuard, LoopGuardConfig, ModelObservation,
-    ModelTaskContext, SubprocessVisionActor, VisionActor,
+    ensure_observation_binding, validate_action, validate_effect, LoopGuard, LoopGuardConfig,
+    ModelObservation, ModelTaskContext, SubprocessVisionActor, VisionActor,
 };
 
-use crate::{ExecutionGrant, Runtime};
-
-/// Scope guard: always releases agent control on drop (success, fail, ? paths).
-struct AgentSessionGuard<'a> {
-    backend: &'a dyn lcu_platform::PlatformBackend,
-    target: AppTarget,
-    active: bool,
-}
-
-impl<'a> AgentSessionGuard<'a> {
-    fn begin(
-        backend: &'a dyn lcu_platform::PlatformBackend,
-        target: &AppTarget,
-    ) -> LcuResult<Self> {
-        backend.set_agent_session(target, true)?;
-        Ok(Self {
-            backend,
-            target: target.clone(),
-            active: true,
-        })
-    }
-}
-
-impl Drop for AgentSessionGuard<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            let _ = self.backend.set_agent_session(&self.target, false);
-            self.active = false;
-        }
-    }
-}
+use crate::{consequence_identity_for, screenshot_evidence_for, AppAccessOutcome, Runtime};
 
 /// Queued work item for the background product worker.
 #[derive(Debug, Clone)]
 pub struct WorkItem {
     pub task_id: TaskId,
+    /// Set only by the external-Agent decision TTL timer.
+    pub agent_timeout_observation: Option<String>,
 }
 
-/// Pending high-risk action waiting for GUI approval before gated execution.
+/// A parked gate for one task. Only the confirmation request plus the runtime
+/// consequence identity / exact-match screenshot evidence are kept — never an
+/// executable Action (realignment §3.4).
 #[derive(Debug, Clone)]
-pub struct PendingAction {
-    pub approval_id: String,
-    pub action: Action,
-    pub observation: lcu_core::observation::AppObservation,
+pub struct PendingGate {
+    pub grant_id: String,
+    pub kind: GateKind,
+    pub task_id: TaskId,
+    pub app_key: String,
     pub target: AppTarget,
-    pub risk: RiskLevel,
-    pub effect_claim: Option<String>,
-    /// R4 only: user has started human takeover but has not yet marked it done.
+    /// Runtime-extracted consequence identity (consequence gates).
+    pub consequence: Option<ConsequenceIdentity>,
+    /// Exact-match screenshot evidence (screenshot-only proposals).
+    pub evidence: Option<ScreenshotEvidence>,
+    /// transition_result handed to the actor after the gate passes.
+    pub transition: String,
     pub takeover_started: bool,
 }
 
@@ -73,7 +58,7 @@ pub struct PendingAction {
 pub enum StepOutcome {
     /// Continue the loop immediately.
     Continue,
-    /// Park until approval / resume / cancel changes state.
+    /// Park until a gate decision / resume / cancel changes state.
     WaitExternal,
     /// Task reached a terminal state.
     Terminal,
@@ -101,9 +86,41 @@ impl TaskScheduler {
                 "task scheduler not started; start lcu-desktop (product path)",
             ));
         };
-        tx.send(WorkItem { task_id }).map_err(|_| {
+        tx.send(WorkItem {
+            task_id,
+            agent_timeout_observation: None,
+        })
+        .map_err(|_| {
             LcuError::coded(ErrorCode::RuntimeUnavailable, "task scheduler worker died")
         })
+    }
+
+    pub fn schedule_agent_timeout(
+        &self,
+        task_id: TaskId,
+        observation_id: String,
+        timeout: StdDuration,
+    ) -> LcuResult<()> {
+        let tx = self
+            .tx
+            .lock()
+            .expect("scheduler lock")
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                LcuError::coded(
+                    ErrorCode::RuntimeUnavailable,
+                    "task scheduler not started; start lcu-desktop (product path)",
+                )
+            })?;
+        thread::spawn(move || {
+            thread::sleep(timeout);
+            let _ = tx.send(WorkItem {
+                task_id,
+                agent_timeout_observation: Some(observation_id),
+            });
+        });
+        Ok(())
     }
 
     pub fn is_started(&self) -> bool {
@@ -132,6 +149,21 @@ impl Runtime {
 
     fn worker_loop(self: Arc<Self>, rx: Receiver<WorkItem>) {
         while let Ok(item) = rx.recv() {
+            if let Some(observation_id) = item.agent_timeout_observation {
+                let task = self.get_task(&item.task_id);
+                let still_waiting = task.as_ref().is_ok_and(|task| {
+                    task.state == TaskState::WaitingActor
+                        && task.last_observation_id.as_ref().is_some_and(|id| id.0 == observation_id)
+                });
+                if still_waiting && self.agent_actor.expire(&observation_id) {
+                    let _ = self.apply_command(
+                        &item.task_id,
+                        TaskCommand::PauseByUser,
+                        "external Agent decision timed out",
+                    );
+                }
+                continue;
+            }
             if let Err(err) = self.run_task_to_completion(&item.task_id) {
                 tracing::warn!(
                     task_id = %item.task_id.0,
@@ -143,7 +175,7 @@ impl Runtime {
         }
     }
 
-    /// Drive one task until terminal, or until it parks on approval/user pause.
+    /// Drive one task until terminal, or until it parks on a gate / user pause.
     pub fn run_task_to_completion(&self, task_id: &TaskId) -> LcuResult<()> {
         let mut loop_guard = LoopGuard::new(LoopGuardConfig::default());
         let mut last_summary: Option<String> = None;
@@ -158,18 +190,11 @@ impl Runtime {
                 TaskState::PausedByUser => {
                     return Ok(());
                 }
-                TaskState::WaitingApproval => {
-                    match self.try_execute_pending(task_id, &mut last_summary)? {
-                        Some(StepOutcome::Continue) => continue,
-                        Some(StepOutcome::Terminal) => return Ok(()),
-                        Some(StepOutcome::WaitExternal) | None => return Ok(()),
-                    }
-                }
                 TaskState::Queued => {
                     let _ =
                         self.apply_command(task_id, TaskCommand::Start, "worker recovered start");
                 }
-                TaskState::Running => {}
+                TaskState::Running | TaskState::WaitingActor => {}
                 TaskState::Succeeded | TaskState::Failed | TaskState::Cancelled => return Ok(()),
             }
 
@@ -181,7 +206,7 @@ impl Runtime {
         }
     }
 
-    /// One observe → decide → guard → (approve?) → act cycle on the product path.
+    /// One gate → observe → decide → guard → (gate?) → act cycle on the product path.
     pub fn run_one_product_step(
         &self,
         task_id: &TaskId,
@@ -192,26 +217,41 @@ impl Runtime {
         if task.state.is_terminal() {
             return Ok(StepOutcome::Terminal);
         }
-        if task.state != TaskState::Running {
+        if task.state != TaskState::Running && task.state != TaskState::WaitingActor {
+            return Ok(StepOutcome::WaitExternal);
+        }
+        if self.refresh_control_epoch(task_id)? {
             return Ok(StepOutcome::WaitExternal);
         }
 
-        if let Some(outcome) = self.try_execute_pending(task_id, last_summary)? {
+        // Advance an approved gate first: no old action is replayed; the step
+        // continues to fresh observe → actor proposal with the transition result.
+        let mut transition: Option<String> = None;
+        if let Some(outcome) = self.advance_gate(task_id, &mut transition)? {
             return Ok(outcome);
+        }
+        if task.state == TaskState::WaitingActor {
+            // A waiting_actor task without a pending gate has no driver; park.
+            return Ok(StepOutcome::WaitExternal);
         }
 
         self.check_step_budget(task_id)?;
 
-        self.release_other_target(task_id);
+        let selector = resolve_selector(&task.goal, task.app_selector.clone())?;
+        if !self.reserve_serial_surface(task_id, &selector) {
+            let mut rec = self.get_task(task_id)?;
+            rec.summary = Some("waiting_surface: backend capacity is reserved by another task".into());
+            self.persist_task(&rec, None);
+            return Ok(StepOutcome::WaitExternal);
+        }
         self.backend
             .bind_task_context(&task.goal, Some(task_id.0.as_str()));
-
-        let selector = resolve_selector(&task.goal, task.app_selector.clone())?;
         let target = match self.current_target_for(task_id) {
             Some(target) => target,
             None => {
                 let target = self.backend.resolve_target(&selector).map_err(|e| {
                     self.backend.clear_task_context();
+                    self.release_serial_surface(task_id);
                     LcuError::coded(
                         e.code(),
                         format!(
@@ -220,17 +260,128 @@ impl Runtime {
                         ),
                     )
                 })?;
-                self.set_current_target(task_id, target.clone());
+                if !self.set_current_target(task_id, target.clone())? {
+                    let mut rec = self.get_task(task_id)?;
+                    rec.summary = Some(format!(
+                        "waiting_target: {} pid={} window={}",
+                        target.app_id, target.pid, target.window_id
+                    ));
+                    self.persist_task(&rec, None);
+                    self.backend.clear_task_context();
+                    return Ok(StepOutcome::WaitExternal);
+                }
                 target
             }
         };
+
+        // App access gate (first control of a stable app identity).
+        let app_key = self.stable_app_key(&target)?;
+        match self.app_access_state(task_id, &app_key) {
+            AppAccessOutcome::Allowed => {}
+            AppAccessOutcome::Denied => {
+                self.fail_task(
+                    task_id,
+                    format!("app access denied by user decision for {app_key}"),
+                )?;
+                return Ok(StepOutcome::Terminal);
+            }
+            AppAccessOutcome::RequestDecision => {
+                let grant_id = self.insert_app_access_gate(task_id, &app_key, &target);
+                self.park_for_gate(
+                    task_id,
+                    PendingGate {
+                        grant_id: grant_id.clone(),
+                        kind: GateKind::AppAccess,
+                        task_id: task_id.clone(),
+                        app_key: app_key.clone(),
+                        target: target.clone(),
+                        consequence: None,
+                        evidence: None,
+                        transition: format!("app access granted for {app_key}"),
+                        takeover_started: false,
+                    },
+                    format!("app access required ({grant_id}): {app_key}"),
+                )?;
+                return Ok(StepOutcome::WaitExternal);
+            }
+        }
+
+        // A foreground grant authorizes the task, not every Agent turn. Resume
+        // without activation only when the exact window stayed foreground and
+        // no real user input touched it while the Actor was thinking.
+        if !self.foreground_is_active(task_id, &target)
+            && self.foreground_is_authorized(task_id, &target)
+        {
+            match self.resume_foreground_session(task_id, &target) {
+                Ok(()) => {}
+                Err(e) if e.code() == ErrorCode::WaitingUser => {
+                    let _ = self.apply_command(
+                        task_id,
+                        TaskCommand::PauseByUser,
+                        format!("paused: user took over foreground target ({e})"),
+                    );
+                    return Ok(StepOutcome::WaitExternal);
+                }
+                Err(e) if e.code() == ErrorCode::ForegroundRequired => {
+                    self.close_foreground_session_for(task_id);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // `foreground` control mode: request the one task-scoped ForegroundGrant
+        // before any observation or action.
+        if task.control_mode == ControlMode::Foreground
+            && !self.foreground_is_active(task_id, &target)
+        {
+            let grant_id = self.insert_foreground_gate(
+                task_id,
+                &app_key,
+                &target,
+                "task control mode is foreground; one-time activation required".into(),
+            );
+            self.park_for_gate(
+                task_id,
+                PendingGate {
+                    grant_id: grant_id.clone(),
+                    kind: GateKind::Foreground,
+                    task_id: task_id.clone(),
+                    app_key: app_key.clone(),
+                    target: target.clone(),
+                    consequence: None,
+                    evidence: None,
+                    transition: "foreground activation complete; re-observe".into(),
+                    takeover_started: false,
+                },
+                format!("foreground activation required ({grant_id})"),
+            )?;
+            return Ok(StepOutcome::WaitExternal);
+        }
 
         // Backend control state only (taken_over / target_lost).
         if let Some(outcome) = self.apply_control_gate(task_id, &target, "pre-observe")? {
             return Ok(outcome);
         }
 
-        let _agent = AgentSessionGuard::begin(self.backend.as_ref(), &target)?;
+        let uses_agent = self.uses_agent_actor(task.actor.as_deref());
+        let resumed_agent = if uses_agent {
+            match task.last_observation_id.as_ref() {
+                Some(id) => match self.agent_actor.take_submitted(&id.0) {
+                    Ok(ready) => ready,
+                    Err(e) => {
+                        let _ = self.apply_command(
+                            task_id,
+                            TaskCommand::PauseByUser,
+                            format!("external Agent decision ended: {e}"),
+                        );
+                        return Ok(StepOutcome::WaitExternal);
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
 
         let observation = match self.backend.observe(&target) {
             Ok(o) => o,
@@ -262,34 +413,57 @@ impl Runtime {
             goal: task.goal.clone(),
             step,
             last_action_summary: last_summary.clone(),
+            transition_result: transition.take(),
         };
         let propose_t0 = std::time::Instant::now();
-        // Per-task decision maker (--actor override or Runtime default).
-        let decision_actor = self.decision_actor(task.actor.as_deref());
-        // One automatic retry: propose failures are frequently transient on MPS
-        // (budget-cut generation, first-inference compile, momentary system
-        // load). A single failed propose must not kill a task that would
-        // succeed one attempt later. The worker-level budget and the Rust hard
-        // timeout still bound total time.
-        let mut proposal = None;
-        for attempt in 0..2 {
-            // A cancel/pause during propose (agent mode can park for minutes)
-            // must not re-enter propose with a fresh decision request.
-            if !self.task_is_running(task_id) {
-                return Ok(StepOutcome::Continue);
-            }
-            match decision_actor.propose_action(&model_obs, &ctx) {
-                Ok(p) => {
-                    proposal = Some(p);
-                    break;
+        let (proposal, actor_name) = if uses_agent {
+            match resumed_agent {
+                Some((previous, previous_ctx, mut proposal)) => {
+                    if !same_decision_frame(&previous, &model_obs, &proposal.action) {
+                        self.agent_actor.begin_decision(&model_obs, &previous_ctx)?;
+                        self.scheduler.schedule_agent_timeout(
+                            task_id.clone(),
+                            model_obs.observation_id.clone(),
+                            self.agent_actor.timeout(),
+                        )?;
+                        self.apply_command(
+                            task_id,
+                            TaskCommand::WaitActor,
+                            "Agent proposal became stale; waiting on fresh observation",
+                        )?;
+                        return Ok(StepOutcome::WaitExternal);
+                    }
+                    proposal.observation_id = observation.observation_id.clone();
+                    (proposal, "agent".to_string())
                 }
-                Err(e) => {
-                    if attempt == 0 {
-                        // Abort (WaitingUser) is expected control flow, not a
-                        // retryable failure.
-                        if e.code() == ErrorCode::WaitingUser {
-                            return Ok(StepOutcome::Continue);
-                        }
+                None => {
+                    self.agent_actor.begin_decision(&model_obs, &ctx)?;
+                    self.scheduler.schedule_agent_timeout(
+                        task_id.clone(),
+                        model_obs.observation_id.clone(),
+                        self.agent_actor.timeout(),
+                    )?;
+                    self.apply_command(
+                        task_id,
+                        TaskCommand::WaitActor,
+                        "waiting for external Agent decision",
+                    )?;
+                    return Ok(StepOutcome::WaitExternal);
+                }
+            }
+        } else {
+            let decision_actor = self.decision_actor(task.actor.as_deref());
+            let mut proposal = None;
+            for attempt in 0..2 {
+                if !self.task_is_running(task_id) {
+                    return Ok(StepOutcome::Continue);
+                }
+                match decision_actor.propose_action(&model_obs, &ctx) {
+                    Ok(p) => {
+                        proposal = Some(p);
+                        break;
+                    }
+                    Err(e) if attempt == 0 => {
                         tracing::warn!(
                             task_id = %task_id.0,
                             error = %e,
@@ -297,30 +471,26 @@ impl Runtime {
                             propose_ms = propose_t0.elapsed().as_millis() as u64,
                             "vision propose failed; retrying once"
                         );
-                        // Prefer pause-on-takeover over retrying against a user-owned window.
                         if let Some(outcome) =
                             self.apply_control_gate(task_id, &target, "propose-failed")?
                         {
                             return Ok(outcome);
                         }
-                        continue;
                     }
-                    tracing::warn!(
-                        task_id = %task_id.0,
-                        error = %e,
-                        actor = decision_actor.name(),
-                        propose_ms = propose_t0.elapsed().as_millis() as u64,
-                        "vision propose failed twice; task FAILED (no heuristic auto-fallback)"
-                    );
-                    self.fail_task(
-                        task_id,
-                        format!("VLM propose failed twice ({}); queue continues", e),
-                    )?;
-                    return Ok(StepOutcome::Terminal);
+                    Err(e) => {
+                        self.fail_task(
+                            task_id,
+                            format!("VLM propose failed twice ({e}); queue continues"),
+                        )?;
+                        return Ok(StepOutcome::Terminal);
+                    }
                 }
             }
-        }
-        let proposal = proposal.expect("proposal set by retry loop");
+            (
+                proposal.expect("proposal set by retry loop"),
+                decision_actor.name().to_string(),
+            )
+        };
         let propose_ms = propose_t0.elapsed().as_millis() as u64;
 
         // Action payloads may embed model-typed content (set_value value,
@@ -334,24 +504,20 @@ impl Runtime {
             step,
             propose_ms,
             action = ?redacted_action,
+            effect = ?proposal.effect.as_ref().map(|e| e.kind),
             last_action_summary = ?last_summary,
-            actor = decision_actor.name(),
+            actor = actor_name,
             "product step model proposal"
         );
 
         // The model proposal can take minutes (VLM); the user may have paused
         // or cancelled meanwhile. Drop the proposal entirely — proceeding would
-        // register an approval / pending state for a task that must not act,
-        // and RequireApproval from PausedByUser is an illegal transition that
-        // left the task stuck Running with nobody driving it.
+        // register a gate / pending state for a task that must not act.
         if !self.task_is_running(task_id) {
             return Ok(StepOutcome::Continue);
         }
 
         // Only an explicit Action::Done may complete the product task.
-        // Repeated set_value / observe / wait go through LoopGuard below — never
-        // forge success from "model re-proposed the same write".
-
         match &proposal.action {
             Action::Done { summary } => {
                 // Lightweight deterministic check: re-observe must succeed (target still present).
@@ -397,9 +563,6 @@ impl Runtime {
                 return Ok(StepOutcome::Continue);
             }
             Action::Observe => {
-                // Observe must enter LoopGuard. Previously it returned before
-                // record_and_check, so the model could burn the full step budget
-                // on empty re-observes.
                 if let Err(e) = loop_guard.record_and_check(&proposal.action) {
                     self.fail_task(task_id, format!("loop guard: {e}"))?;
                     return Ok(StepOutcome::Terminal);
@@ -408,13 +571,6 @@ impl Runtime {
                 self.record_step(task_id)?;
                 thread::sleep(StdDuration::from_millis(50));
                 return Ok(StepOutcome::Continue);
-            }
-            Action::Exclusive(_) => {
-                self.fail_task(
-                    task_id,
-                    "product loop refuses exclusive input without exclusive consent",
-                )?;
-                return Ok(StepOutcome::Terminal);
             }
             Action::Targeted(_) | Action::Semantic(_) => {}
         }
@@ -428,7 +584,6 @@ impl Runtime {
         ensure_observation_binding(&observation, &proposal.observation_id)?;
         if let Err(e) = validate_action(&observation, &proposal.action) {
             // Invalid model output is recoverable feedback, not a product crash.
-            // Existing LoopGuard stops a model that repeats the same invalid action.
             loop_guard.record_and_check(&proposal.action)?;
             let valid_ids = observation.element_ids().take(16).collect::<Vec<_>>().join(",");
             *last_summary = Some(format!(
@@ -437,82 +592,260 @@ impl Runtime {
             self.record_step(task_id)?;
             return Ok(StepOutcome::Continue);
         }
+        // Trust boundary: executable proposals need a closed-set effect.
+        if let Err(e) = validate_effect(&proposal.action, proposal.effect.as_ref()) {
+            *last_summary = Some(format!("REJECTED effect: {e}"));
+            self.record_step(task_id)?;
+            return Ok(StepOutcome::Continue);
+        }
         loop_guard.record_and_check(&proposal.action)?;
 
+        let effect = proposal.effect.as_ref().expect("effect validated above");
         let evaluated = self.evaluate_action_for_task(
             Some(task_id),
             &observation,
             &proposal.action,
-            proposal.effect_claim.as_deref(),
+            Some(effect),
             RiskLevel::R4,
             Some(&task.caller),
         )?;
 
         // The control gate above is an RPC; the user may have paused during it.
-        // Remove the approval this evaluation just registered (nobody would
-        // consume it) and let the worker loop re-check the state.
         if !self.task_is_running(task_id) {
-            if let Some(approval_id) = &evaluated.approval_id {
-                self.approvals.lock().expect("approvals lock").remove(approval_id);
-            }
             return Ok(StepOutcome::Continue);
         }
 
-        if evaluated.requires_takeover {
-            self.store_pending(
-                task_id,
-                PendingAction {
-                    approval_id: evaluated
-                        .approval_id
-                        .clone()
-                        .unwrap_or_else(|| "takeover".into()),
-                    action: proposal.action.clone(),
-                    observation: observation.clone(),
-                    target: target.clone(),
-                    risk: evaluated.risk,
-                    effect_claim: proposal.effect_claim.clone(),
-                    takeover_started: false,
-                },
-            );
-            let _ = self.apply_command(
-                task_id,
-                TaskCommand::RequireApproval,
-                format!("R4 user takeover required: {}", evaluated.rationale),
-            );
-            return Ok(StepOutcome::WaitExternal);
+        // Consequence gate: match an approved grant (§3.4), else park a fresh
+        // gate — never replay the old action.
+        if let Some(outcome) = self.consequence_step(
+            task_id,
+            &target,
+            &app_key,
+            &observation,
+            &proposal.action,
+            effect,
+            &evaluated,
+            last_summary,
+        )? {
+            return Ok(outcome);
         }
 
-        if evaluated.requires_approval {
-            let approval_id = evaluated.approval_id.clone().ok_or_else(|| {
-                LcuError::coded(ErrorCode::InternalError, "approval required without id")
-            })?;
-            self.store_pending(
+        thread::sleep(StdDuration::from_millis(250));
+        Ok(StepOutcome::Continue)
+    }
+
+    /// Match the new proposal against an approved consequence grant, or park a
+    /// fresh consequence/takeover gate. Returns `Some(outcome)` when the step
+    /// ended (gate parked / executed / terminal).
+    fn consequence_step(
+        &self,
+        task_id: &TaskId,
+        target: &AppTarget,
+        app_key: &str,
+        observation: &AppObservation,
+        action: &Action,
+        effect: &EffectClaim,
+        evaluated: &crate::EvaluatedAction,
+        last_summary: &mut Option<String>,
+    ) -> LcuResult<Option<StepOutcome>> {
+        let grant = self.pending_consequence_grant(task_id, app_key);
+        let Some(grant) = grant else {
+            return self.park_or_execute(
                 task_id,
-                PendingAction {
-                    approval_id: approval_id.clone(),
-                    action: proposal.action.clone(),
-                    observation: observation.clone(),
-                    target: target.clone(),
-                    risk: evaluated.risk,
-                    effect_claim: proposal.effect_claim.clone(),
-                    takeover_started: false,
-                },
+                target,
+                app_key,
+                observation,
+                action,
+                effect,
+                evaluated,
+                last_summary,
+                None,
             );
+        };
+
+        match self.match_grant(&grant, observation, action, effect) {
+            // Exact match: consume the grant once and execute.
+            Some(consumed) => {
+                return self.park_or_execute(
+                    task_id,
+                    target,
+                    app_key,
+                    observation,
+                    action,
+                    effect,
+                    evaluated,
+                    last_summary,
+                    Some(consumed),
+                );
+            }
+            None => {
+                // Same-candidate or different proposal: the old grant must not
+                // wait for later consumption (§3.4.7). Same-candidate proposals
+                // re-confirm at the grant's own risk even if the actor lowered
+                // the effect kind; truly different proposals are judged anew.
+                let same_candidate = grant
+                    .screenshot_evidence
+                    .as_ref()
+                    .map(|_| is_same_candidate(&grant, observation, action))
+                    .unwrap_or(false);
+                self.invalidate_consequence_grant(&grant.grant_id.0);
+                let grant_risk = if same_candidate {
+                    if grant.effect_kind
+                        == lcu_core::action::EffectKind::Credential
+                        || grant.effect_kind == lcu_core::action::EffectKind::Financial
+                        || grant.effect_kind == lcu_core::action::EffectKind::PermissionChange
+                    {
+                        RiskLevel::R4
+                    } else {
+                        RiskLevel::R3
+                    }
+                } else {
+                    evaluated.risk
+                };
+                let evaluated = if same_candidate {
+                    crate::EvaluatedAction {
+                        risk: grant_risk,
+                        requires_takeover: grant_risk.requires_user_takeover(),
+                        unknown: false,
+                        rationale: "same high-risk candidate as the confirmed proposal; re-confirm or takeover required".into(),
+                    }
+                } else {
+                    evaluated.clone()
+                };
+                return self.park_or_execute(
+                    task_id,
+                    target,
+                    app_key,
+                    observation,
+                    action,
+                    effect,
+                    &evaluated,
+                    last_summary,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Consume or reject a grant against the current proposal (§3.4):
+    /// - Runtime consequence identity equal → consume;
+    /// - screenshot-only: exact `image_hash + action_hash` after re-observe → consume;
+    /// - otherwise `None` (grant invalidated by the caller).
+    fn match_grant(
+        &self,
+        grant: &ConsequenceGrant,
+        observation: &AppObservation,
+        action: &Action,
+        effect: &EffectClaim,
+    ) -> Option<ConsequenceGrant> {
+        if proposal_matches_grant(grant, observation, action, effect) {
+            return self.consume_consequence_grant(&grant.grant_id.0).ok();
+        }
+        None
+    }
+
+    /// Park a fresh gate (or handoff) for this proposal, or execute when
+    /// allowed. With `consumed_grant` the proposal already matched an approved
+    /// grant and executes.
+    fn park_or_execute(
+        &self,
+        task_id: &TaskId,
+        target: &AppTarget,
+        app_key: &str,
+        observation: &AppObservation,
+        action: &Action,
+        effect: &EffectClaim,
+        evaluated: &crate::EvaluatedAction,
+        last_summary: &mut Option<String>,
+        consumed_grant: Option<ConsequenceGrant>,
+    ) -> LcuResult<Option<StepOutcome>> {
+        if evaluated.unknown {
+            // Actor cannot classify the consequence: stop and ask the user.
             let _ = self.apply_command(
                 task_id,
-                TaskCommand::RequireApproval,
-                format!("approval required ({approval_id}): {}", evaluated.rationale),
+                TaskCommand::PauseByUser,
+                format!("request user: actor cannot classify consequence ({})", evaluated.rationale),
             );
-            return Ok(StepOutcome::WaitExternal);
+            let mut rec = self.get_task(task_id)?;
+            rec.summary = Some(format!(
+                "waiting_user: actor cannot classify consequence: {}",
+                evaluated.rationale
+            ));
+            self.persist_task(&rec, None);
+            return Ok(Some(StepOutcome::WaitExternal));
+        }
+
+        if evaluated.requires_takeover {
+            let grant_id = self.insert_consequence_gate(
+                task_id,
+                app_key,
+                observation,
+                action,
+                effect,
+                &lcu_core::effect_guard::EffectJudgement {
+                    risk: evaluated.risk,
+                    rationale: evaluated.rationale.clone(),
+                    model_claim_overridden: false,
+                    unknown: false,
+                },
+            );
+            self.park_for_gate(
+                task_id,
+                PendingGate {
+                    grant_id: grant_id.clone(),
+                    kind: GateKind::Takeover,
+                    task_id: task_id.clone(),
+                    app_key: app_key.to_string(),
+                    target: target.clone(),
+                    consequence: Some(consequence_identity_for(observation, action)),
+                    evidence: screenshot_evidence_for(observation, action, effect),
+                    transition: "takeover complete; re-observe".into(),
+                    takeover_started: false,
+                },
+                format!("R4 user takeover required ({grant_id}): {}", evaluated.rationale),
+            )?;
+            return Ok(Some(StepOutcome::WaitExternal));
+        }
+
+        if evaluated.risk.requires_per_action_approval() {
+            let grant_id = self.insert_consequence_gate(
+                task_id,
+                app_key,
+                observation,
+                action,
+                effect,
+                &lcu_core::effect_guard::EffectJudgement {
+                    risk: evaluated.risk,
+                    rationale: evaluated.rationale.clone(),
+                    model_claim_overridden: false,
+                    unknown: false,
+                },
+            );
+            self.park_for_gate(
+                task_id,
+                PendingGate {
+                    grant_id: grant_id.clone(),
+                    kind: GateKind::Consequence,
+                    task_id: task_id.clone(),
+                    app_key: app_key.to_string(),
+                    target: target.clone(),
+                    consequence: Some(consequence_identity_for(observation, action)),
+                    evidence: screenshot_evidence_for(observation, action, effect),
+                    transition: "consequence confirmed; re-observe".into(),
+                    takeover_started: false,
+                },
+                format!("confirmation required ({grant_id}): {}", evaluated.rationale),
+            )?;
+            return Ok(Some(StepOutcome::WaitExternal));
         }
 
         let receipt = match self.perform_gated_action(
             task_id,
-            &target,
-            &observation,
-            &proposal.action,
-            proposal.effect_claim.as_deref(),
-            None,
+            target,
+            observation,
+            action,
+            Some(effect),
+            consumed_grant.as_ref(),
         ) {
             Ok(r) => r,
             Err(e) if e.code() == ErrorCode::WaitingUser => {
@@ -522,44 +855,72 @@ impl Runtime {
                     TaskCommand::PauseByUser,
                     format!("paused (act-time): {e}"),
                 );
-                return Ok(StepOutcome::WaitExternal);
+                return Ok(Some(StepOutcome::WaitExternal));
+            }
+            Err(e) if e.code() == ErrorCode::ForegroundRequired => {
+                // Background path unavailable. Control mode decides: auto /
+                // foreground request the one task-scoped ForegroundGrant;
+                // background_only fails with a clear error. The original action
+                // is never retried after activation — the actor re-proposes.
+                let task = self.get_task(task_id)?;
+                if task.control_mode == ControlMode::BackgroundOnly {
+                    self.fail_task(
+                        task_id,
+                        format!(
+                            "background_only control mode: background delivery unavailable ({e})"
+                        ),
+                    )?;
+                    return Ok(Some(StepOutcome::Terminal));
+                }
+                self.close_foreground_session_for(task_id);
+                let grant_id = self.insert_foreground_gate(
+                    task_id,
+                    app_key,
+                    target,
+                    format!("background input unavailable; foreground activation may bring the target window to the front: {e}"),
+                );
+                self.park_for_gate(
+                    task_id,
+                    PendingGate {
+                        grant_id: grant_id.clone(),
+                        kind: GateKind::Foreground,
+                        task_id: task_id.clone(),
+                        app_key: app_key.to_string(),
+                        target: target.clone(),
+                        consequence: None,
+                        evidence: None,
+                        transition: "foreground activation complete; re-observe".into(),
+                        takeover_started: false,
+                    },
+                    format!("foreground activation required ({grant_id}): {e}"),
+                )?;
+                return Ok(Some(StepOutcome::WaitExternal));
             }
             Err(e) if is_recoverable_action_error(&e) => {
                 *last_summary = Some(format!(
                     "ACTION_REJECTED by execution layer: {e}; re-observe and choose a current element"
                 ));
                 self.record_step(task_id)?;
-                return Ok(StepOutcome::Continue);
+                return Ok(Some(StepOutcome::Continue));
             }
             Err(e) => return Err(e),
         };
 
-        *last_summary = Some(match &proposal.action {
-            Action::Semantic(lcu_core::action::SemanticAction::SetValue { element_id, value }) => {
-                format!(
-                    "SUCCESS set_value {element_id} value_len={}",
-                    value.len()
-                )
-            }
-            _ => receipt
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("acted step={}", task.step_count + 1)),
-        });
+        *last_summary = Some(proposal_action_summary(action, &receipt));
         {
             let mut rec = self.get_task(task_id)?;
-            rec.last_action_hash = Some(proposal.action.action_hash());
+            rec.last_action_hash = Some(action.action_hash());
             self.persist_task(&rec, None);
         }
-
-        thread::sleep(StdDuration::from_millis(250));
-        Ok(StepOutcome::Continue)
+        Ok(None)
     }
 
-    fn try_execute_pending(
+    /// Advance an approved gate. Successful gates return `None` so this same
+    /// step continues to fresh observe and hands the transition to the Actor.
+    fn advance_gate(
         &self,
         task_id: &TaskId,
-        last_summary: &mut Option<String>,
+        transition: &mut Option<String>,
     ) -> LcuResult<Option<StepOutcome>> {
         let pending = {
             let map = self.pending.lock().expect("pending lock");
@@ -569,183 +930,66 @@ impl Runtime {
             return Ok(None);
         };
 
-        use lcu_core::approval::ApprovalStatus;
         let status = {
-            let mut approvals = self.approvals.lock().expect("approvals lock");
-            let request = approvals
-                .get_mut(&pending.approval_id)
-                .ok_or_else(|| {
-                    LcuError::coded(ErrorCode::ApprovalInvalid, "pending approval missing")
-                })?;
-            // A pending approval that outlived its 5-minute binding must not keep
-            // the task stuck in WaitingApproval forever.
-            if request.status == ApprovalStatus::Pending
-                && request.binding.is_expired(chrono::Utc::now())
-            {
-                request.status = ApprovalStatus::Expired;
+            let mut gates = self.gates.lock().expect("gates lock");
+            let request = gates.get_mut(&pending.grant_id).ok_or_else(|| {
+                LcuError::coded(ErrorCode::ApprovalInvalid, "pending gate request missing")
+            })?;
+            // A pending gate that outlived its TTL must not keep the task in
+            // WaitingActor forever.
+            if request.status == GrantStatus::Pending && request.is_expired(chrono::Utc::now()) {
+                request.status = GrantStatus::Expired;
             }
             request.status
         };
 
         match status {
-            ApprovalStatus::Pending => return Ok(Some(StepOutcome::WaitExternal)),
-            ApprovalStatus::Denied
-            | ApprovalStatus::Expired
-            | ApprovalStatus::Consumed
-            | ApprovalStatus::Invalidated => {
+            GrantStatus::Pending => return Ok(Some(StepOutcome::WaitExternal)),
+            GrantStatus::Denied
+            | GrantStatus::Expired
+            | GrantStatus::Consumed
+            | GrantStatus::Invalidated => {
                 self.clear_task_pending(task_id);
                 self.fail_task(
                     task_id,
-                    format!("approval {} not usable: {status:?}", pending.approval_id),
+                    format!("gate {} not usable: {status:?}", pending.grant_id),
                 )?;
                 return Ok(Some(StepOutcome::Terminal));
             }
-            ApprovalStatus::Approved => {}
+            GrantStatus::Approved => {}
         }
 
-        if pending.risk.requires_user_takeover() {
-            if !pending.takeover_started {
-                return Ok(Some(StepOutcome::WaitExternal));
+        match pending.kind {
+            GateKind::AppAccess => {
+                // The decision was recorded at GUI time (allow_once / always_allow /
+                // deny); deny already failed the task via the gate status read.
+                *transition = Some(pending.transition.clone());
+                self.clear_task_gate(task_id);
+                Ok(None)
             }
-            self.clear_task_pending(task_id);
-            {
-                let mut rec = self.get_task(task_id)?;
-                rec.summary = Some(format!(
-                    "takeover_complete: user handled R4 action (approval {}); re-observe",
-                    pending.approval_id
-                ));
-                self.persist_task(&rec, None);
-            }
-            if let Ok(task) = self.get_task(task_id) {
-                if task.state == TaskState::WaitingApproval {
-                    let _ = self.apply_command(
-                        task_id,
-                        TaskCommand::Approve,
-                        "R4 takeover completed by user; resume without auto-exec",
-                    );
+            GateKind::Foreground => {
+                let _grant = self.consume_foreground_grant(&pending.grant_id)?;
+                if !self.foreground_is_active(task_id, &pending.target) {
+                    self.open_foreground_session(task_id, &pending.target)?;
                 }
+                *transition = Some(pending.transition.clone());
+                self.clear_task_gate(task_id);
+                Ok(None)
             }
-            thread::sleep(StdDuration::from_millis(250));
-            return Ok(Some(StepOutcome::Continue));
-        }
-
-        let grant = self.consume_approval_for_execution(
-            &pending.approval_id,
-            &pending.action,
-            &pending.observation,
-            task_id,
-        )?;
-
-        let fresh = match self.backend.observe(&pending.target) {
-            Ok(o) => o,
-            Err(e) => {
-                self.clear_task_pending(task_id);
-                self.fail_task(task_id, format!("post-approval re-observe failed: {e}"))?;
-                return Ok(Some(StepOutcome::Terminal));
+            GateKind::Consequence => {
+                // The grant stays Approved-unconsumed; the new proposal matches
+                // it in `consequence_step`. Only the pending marker is dropped.
+                *transition = Some(pending.transition.clone());
+                self.pending.lock().expect("pending lock").remove(&task_id.0);
+                Ok(None)
             }
-        };
-        if fresh.target.app_id != pending.target.app_id
-            || fresh.target.pid != pending.target.pid
-            || fresh.target.window_id != pending.target.window_id
-        {
-            self.clear_task_pending(task_id);
-            self.fail_task(
-                task_id,
-                "post-approval target changed; approval invalidated — re-submit if needed",
-            )?;
-            return Ok(Some(StepOutcome::Terminal));
-        }
-        if let Err(e) = validate_action(&fresh, &pending.action) {
-            self.clear_task_pending(task_id);
-            if is_recoverable_action_error(&e) {
-                *last_summary = Some(format!(
-                    "ACTION_REJECTED after approval: {e}; re-observe and choose a current element"
-                ));
-                self.record_step(task_id)?;
-                return Ok(Some(StepOutcome::Continue));
+            GateKind::Takeover => {
+                // Human completed the takeover; never auto-execute anything.
+                *transition = Some(pending.transition.clone());
+                self.clear_task_gate(task_id);
+                Ok(None)
             }
-            self.fail_task(
-                task_id,
-                format!("post-approval action no longer valid: {e}"),
-            )?;
-            return Ok(Some(StepOutcome::Terminal));
         }
-
-        let task = self.get_task(task_id)?;
-        // Risk-only re-evaluation: no approval is registered here. Registering
-        // one would leave a ghost approval (nobody consumes it) after the
-        // original grant was already consumed.
-        let reeval = self.reevaluate_action_for_task(
-            Some(task_id),
-            &fresh,
-            &pending.action,
-            pending.effect_claim.as_deref(),
-            RiskLevel::R4,
-            Some(&task.caller),
-        )?;
-        if reeval.requires_takeover || reeval.risk.requires_user_takeover() {
-            // R4 escalation: the fresh observation changed the picture after the
-            // user approved. Bind a brand-new pending approval so the GUI's
-            // begin/complete_takeover can find it — otherwise the escalated
-            // action would be silently dropped and the task stuck.
-            let approval_id = self.insert_approval(
-                Some(task_id),
-                &fresh,
-                pending.action.action_hash(),
-                format!("post-approval re-risk requires user takeover: {}", reeval.rationale),
-            );
-            self.store_pending(
-                task_id,
-                PendingAction {
-                    approval_id: approval_id.clone(),
-                    action: pending.action.clone(),
-                    observation: fresh,
-                    target: pending.target.clone(),
-                    risk: reeval.risk,
-                    effect_claim: pending.effect_claim.clone(),
-                    takeover_started: false,
-                },
-            );
-            let _ = self.apply_command(
-                task_id,
-                TaskCommand::RequireApproval,
-                format!(
-                    "post-approval re-risk requires user takeover: {}",
-                    reeval.rationale
-                ),
-            );
-            return Ok(Some(StepOutcome::WaitExternal));
-        }
-
-        if let Some(outcome) =
-            self.apply_control_gate(task_id, &pending.target, "post-approval")?
-        {
-            self.clear_task_pending(task_id);
-            return Ok(Some(outcome));
-        }
-        self.set_current_target(task_id, pending.target.clone());
-        let _agent = AgentSessionGuard::begin(self.backend.as_ref(), &pending.target)?;
-        let result = self.perform_gated_action(
-            task_id,
-            &pending.target,
-            &fresh,
-            &pending.action,
-            pending.effect_claim.as_deref(),
-            Some(&grant),
-        );
-        self.clear_task_pending(task_id);
-        if let Err(e) = result {
-            if is_recoverable_action_error(&e) {
-                *last_summary = Some(format!(
-                    "ACTION_REJECTED after approval: {e}; re-observe and choose a current element"
-                ));
-                self.record_step(task_id)?;
-                return Ok(Some(StepOutcome::Continue));
-            }
-            return Err(e);
-        }
-        thread::sleep(StdDuration::from_millis(250));
-        Ok(Some(StepOutcome::Continue))
     }
 
     /// Product control gate: only backend `taken_over` / `target_lost` stop work.
@@ -810,6 +1054,14 @@ impl Runtime {
         }
     }
 
+    fn uses_agent_actor(&self, task_actor: Option<&str>) -> bool {
+        match task_actor {
+            Some("agent") => true,
+            Some("vlm") | Some("qwen") => false,
+            Some(_) | None => self.default_actor == crate::DecisionActor::Agent,
+        }
+    }
+
     fn default_actor_arc(&self) -> Arc<dyn VisionActor> {
         match self.default_actor {
             crate::DecisionActor::Vlm => self.actor.clone(),
@@ -824,11 +1076,24 @@ impl Runtime {
         )
     }
 
-    fn store_pending(&self, task_id: &TaskId, pending: PendingAction) {
+    fn park_for_gate(
+        &self,
+        task_id: &TaskId,
+        pending: PendingGate,
+        message: impl Into<String>,
+    ) -> LcuResult<()> {
+        self.apply_command(task_id, TaskCommand::WaitActor, message)?;
         self.pending
             .lock()
             .expect("pending lock")
             .insert(task_id.0.clone(), pending);
+        Ok(())
+    }
+
+    /// Stable signed app identity for permissions/grants. Chrome binds the
+    /// connected extension instance + profile, not the bundle id alone (§3.2).
+    fn stable_app_key(&self, target: &AppTarget) -> LcuResult<String> {
+        self.backend.stable_app_identity(target)
     }
 
     /// Sole production entry for real OS side effects (crate-private; not IPC-exposed).
@@ -836,10 +1101,10 @@ impl Runtime {
         &self,
         task_id: &TaskId,
         target: &AppTarget,
-        observation: &lcu_core::observation::AppObservation,
+        observation: &AppObservation,
         action: &Action,
-        model_effect_claim: Option<&str>,
-        grant: Option<&ExecutionGrant>,
+        effect: Option<&EffectClaim>,
+        grant: Option<&ConsequenceGrant>,
     ) -> LcuResult<lcu_core::task::ActionReceipt> {
         let task = self.get_task(task_id)?;
         if task.state != TaskState::Running {
@@ -851,14 +1116,20 @@ impl Runtime {
 
         let judgement = self
             .effect_guard
-            .judge(&lcu_core::effect_guard::EffectContext {
+            .judge(&EffectContext {
                 observation,
                 action,
-                model_effect_claim,
+                effect,
                 task_authorized_max_risk: RiskLevel::R4,
             });
         let _ = task;
 
+        if judgement.unknown {
+            return Err(LcuError::coded(
+                ErrorCode::PermissionDenied,
+                "action has unknown consequence; Runtime will not perform it",
+            ));
+        }
         if judgement.risk.requires_user_takeover() {
             return Err(LcuError::coded(
                 ErrorCode::PermissionDenied,
@@ -874,15 +1145,18 @@ impl Runtime {
                 LcuError::coded(
                     ErrorCode::PermissionDenied,
                     format!(
-                        "R3 action requires consumed GUI ExecutionGrant ({})",
+                        "R3 action requires a consumed ConsequenceGrant ({})",
                         judgement.rationale
                     ),
                 )
             })?;
-            if grant.task_id != *task_id || grant.action_hash != action.action_hash() {
+            if grant.task_id != *task_id
+                || grant.app_key != self.stable_app_key(target)?
+                || grant.effect_kind != effect.map(|e| e.kind).unwrap_or(lcu_core::action::EffectKind::Unknown)
+            {
                 return Err(LcuError::coded(
                     ErrorCode::ApprovalInvalid,
-                    "execution grant does not match action/task",
+                    "consumed consequence grant does not match this action/task",
                 ));
             }
         }
@@ -912,9 +1186,14 @@ impl Runtime {
             }
         }
 
+        // Execution ladder: background semantic → provably isolated background
+        // targeted → foreground session (already activated via ForegroundGrant)
+        // → explicit failure. Native returns foreground_required only before
+        // any input occurred, so the worker's gate handling never repeats a
+        // side effect.
         let mut receipt = match action {
-            Action::Semantic(sem) => self.backend.perform_semantic_action(target, sem)?,
-            Action::Targeted(input) => self.backend.perform_targeted_input(target, input)?,
+            Action::Semantic(sem) => self.backend.perform_semantic_action(target, sem),
+            Action::Targeted(input) => self.backend.perform_targeted_input(target, input),
             other => {
                 return Err(LcuError::coded(
                     ErrorCode::PermissionDenied,
@@ -924,7 +1203,7 @@ impl Runtime {
                     ),
                 ));
             }
-        };
+        }?;
         receipt.risk_level = judgement.risk;
         receipt.action_hash = action.action_hash();
 
@@ -947,6 +1226,103 @@ impl Runtime {
     }
 }
 
+/// Same-candidate detection (§3.4.7): on the same screenshot, the same
+/// semantic element, or the same-kind input within the conservative hit range
+/// of the original coordinates, still is the original high-risk candidate —
+/// even if the actor changed coordinates or downgraded the effect kind.
+fn is_same_candidate(grant: &ConsequenceGrant, observation: &AppObservation, action: &Action) -> bool {
+    let Some(evidence) = grant.screenshot_evidence.as_ref() else {
+        return false;
+    };
+    if !present_hashes_match(&evidence.image_hash, &observation.image_hash) {
+        return false;
+    }
+    match (evidence.element_id.clone(), action) {
+        (Some(id), Action::Semantic(SemanticAction::Invoke { element_id })) => {
+            if id == *element_id {
+                return true;
+            }
+            let identity = consequence_identity_for(observation, action);
+            return grant.identity.operation == identity.operation
+                && grant.identity.object.is_some()
+                && grant.identity.object == identity.object;
+        }
+        _ => {}
+    }
+    let (kind, x, y) = match action {
+        Action::Targeted(TargetedInput::Click { x, y, .. }) => ("click", Some(*x), Some(*y)),
+        Action::Targeted(TargetedInput::TypeText { x, y, .. }) => ("type", *x, *y),
+        Action::Targeted(TargetedInput::KeyCombo { .. }) => ("keys", None, None),
+        _ => return false,
+    };
+    if evidence.input_kind.as_deref() != Some(kind) {
+        return false;
+    }
+    // Conservative hit range: 2% of the window around the original point.
+    const HIT_RANGE: f64 = 0.02;
+    match (evidence.x, evidence.y, x, y) {
+        (Some(ex), Some(ey), Some(nx), Some(ny)) => {
+            (nx - ex).abs() <= HIT_RANGE && (ny - ey).abs() <= HIT_RANGE
+        }
+        (None, None, None, None) => true,
+        _ => false,
+    }
+}
+
+fn proposal_matches_grant(
+    grant: &ConsequenceGrant,
+    observation: &AppObservation,
+    action: &Action,
+    effect: &EffectClaim,
+) -> bool {
+    // Targeted input has no stable semantic object identity. A generic
+    // "click" identity must never authorize a different coordinate.
+    if !matches!(action, Action::Targeted(_))
+        && grant.effect_kind == effect.kind
+        && grant.identity == consequence_identity_for(observation, action)
+    {
+        return true;
+    }
+    grant.screenshot_evidence.as_ref().is_some_and(|ev| {
+        grant.effect_kind == effect.kind
+            && present_hashes_match(&ev.image_hash, &observation.image_hash)
+            && ev.action_hash == action.action_hash()
+    })
+}
+
+fn present_hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
+    matches!((left.as_deref(), right.as_deref()), (Some(a), Some(b)) if !a.is_empty() && a == b)
+}
+
+fn same_decision_frame(
+    previous: &ModelObservation,
+    current: &ModelObservation,
+    action: &Action,
+) -> bool {
+    let same_target = previous.app_id == current.app_id
+        && previous.pid == current.pid
+        && previous.window_id == current.window_id
+        && previous.window_frame == current.window_frame;
+    same_target
+        && (!matches!(action, Action::Targeted(_))
+            || (previous.image_hash.is_some() && previous.image_hash == current.image_hash))
+}
+
+fn proposal_action_summary(
+    action: &Action,
+    receipt: &lcu_core::task::ActionReceipt,
+) -> String {
+    match action {
+        Action::Semantic(SemanticAction::SetValue { element_id, value }) => {
+            format!("SUCCESS set_value {element_id} value_len={}", value.len())
+        }
+        _ => receipt
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("acted step={}", receipt.executed_at.timestamp_millis())),
+    }
+}
+
 fn is_recoverable_action_error(error: &LcuError) -> bool {
     matches!(
         error.code(),
@@ -965,39 +1341,20 @@ fn is_recoverable_action_message(message: &str) -> bool {
         || message.trim_end().ends_with(": not found")
 }
 
-/// Infer AppSelector when the caller did not pass `--app`.
+/// Resolve the AppSelector for a task. An explicit `--app`/`--pid` selector is
+/// required: never guess an app from goal text, and never fall back to the
+/// largest or frontmost window.
 pub fn resolve_selector(goal: &str, explicit: Option<AppSelector>) -> LcuResult<AppSelector> {
+    let _ = goal;
     if let Some(s) = explicit {
         if s.app_id.is_some() || s.pid.is_some() || s.window_title_contains.is_some() {
             return Ok(s);
         }
     }
-    let g = goal.to_lowercase();
-    let app_id = if g.contains("chrome") || g.contains("浏览器") || g.contains("browser") {
-        Some("com.google.Chrome".into())
-    } else if g.contains("finder") || g.contains("访达") {
-        Some("com.apple.finder".into())
-    } else if g.contains("textedit") || g.contains("文本编辑") {
-        Some("com.apple.TextEdit".into())
-    } else if g.contains("safari") {
-        Some("com.apple.Safari".into())
-    } else if g.contains("terminal") || g.contains("终端") {
-        Some("com.apple.Terminal".into())
-    } else {
-        None
-    };
-
-    if app_id.is_none() {
-        return Err(LcuError::coded(
-            ErrorCode::InvalidRequest,
-            "no app selector: pass --app <bundle_id> or name the app in the goal (Chrome/Finder/TextEdit)",
-        ));
-    }
-    Ok(AppSelector {
-        app_id,
-        pid: None,
-        window_title_contains: None,
-    })
+    Err(LcuError::coded(
+        ErrorCode::InvalidRequest,
+        "no app selector: pass --app <bundle_id> (or --app pid:NNNN); explicit targeting is required",
+    ))
 }
 
 /// Default product actors: the agent decision actor is the DEFAULT decision
@@ -1087,609 +1444,190 @@ fn which_python3() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::RuntimePaths;
-    use crate::{InternalRequest, InternalResponse};
-    use lcu_core::task::TaskRecord;
-    use lcu_core::action::SemanticAction;
-    use lcu_core::observation::{
-        AppObservation, ElementNode, ModelSize, ObservationId, Rect, TransformId,
-    };
-    use lcu_core::task::ActionReceipt;
+    use crate::{AppAccessDecision, RuntimePaths};
+    use chrono::Duration;
+    use lcu_core::action::{EffectKind, MouseButton};
+    use lcu_core::observation::{ElementNode, ModelSize, ObservationId, Rect, TransformId};
     use lcu_core::types::{CallerIdentity, Frame};
-    use lcu_core::surface::ControlState;
-    use lcu_platform::{PermissionFlag, PermissionState, PlatformBackend};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::sync::Mutex;
+    use lcu_platform::NullBackend;
     use tempfile::tempdir;
 
-    struct MockBackend {
-        acts: AtomicU32,
-        resolves: AtomicU32,
-        stale_once: AtomicBool,
-        conflict: Mutex<ControlState>,
-    }
-
-    impl MockBackend {
-        fn new(conflict: ControlState) -> Self {
-            Self {
-                acts: AtomicU32::new(0),
-                resolves: AtomicU32::new(0),
-                stale_once: AtomicBool::new(false),
-                conflict: Mutex::new(conflict),
-            }
-        }
-
-        fn with_stale_action() -> Self {
-            let backend = Self::new(ControlState::None);
-            backend.stale_once.store(true, Ordering::SeqCst);
-            backend
-        }
-    }
-
-    impl PlatformBackend for MockBackend {
-        fn resolve_target(&self, selector: &AppSelector) -> LcuResult<AppTarget> {
-            self.resolves.fetch_add(1, Ordering::SeqCst);
-            Ok(AppTarget {
-                app_id: selector
-                    .app_id
-                    .clone()
-                    .unwrap_or_else(|| "com.apple.finder".into()),
-                pid: 42,
-                window_id: 7,
-                window_title: "Mock".into(),
-            })
-        }
-
-        fn observe(&self, target: &AppTarget) -> LcuResult<AppObservation> {
-            let n = self.acts.load(Ordering::SeqCst);
-            let elements = if n == 0 {
-                vec![ElementNode {
-                    id: "e1".into(),
-                    role: "button".into(),
-                    label: Some("Open".into()),
-                    value: None,
-                    frame: Rect {
-                        x: 0.1,
-                        y: 0.1,
-                        width: 0.2,
-                        height: 0.1,
-                    },
-                    actions: vec!["invoke".into()],
-                }]
-            } else {
-                vec![]
-            };
-            Ok(AppObservation {
-                observation_id: ObservationId(format!("obs_{n}")),
-                timestamp_ms: 0,
-                target: target.clone(),
-                window_frame: Frame {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-                model_size: ModelSize {
-                    width: 100,
-                    height: 100,
-                },
-                elements,
-                transform_id: TransformId("t".into()),
-                image_hash: None,
-                capture_backend: None,
-                image_png: None,
-            })
-        }
-
-        fn perform_semantic_action(
-            &self,
-            _target: &AppTarget,
-            action: &SemanticAction,
-        ) -> LcuResult<ActionReceipt> {
-            if self.stale_once.swap(false, Ordering::SeqCst) {
-                return Err(LcuError::coded(
-                    ErrorCode::TaskFailed,
-                    "not_found: element_id e1 is stale; re-observe before acting",
-                ));
-            }
-            self.acts.fetch_add(1, Ordering::SeqCst);
-            Ok(ActionReceipt {
-                action: Action::Semantic(action.clone()),
-                action_hash: Action::Semantic(action.clone()).action_hash(),
-                capability_used: lcu_core::capability::CapabilityLevel::Semantic,
-                risk_level: RiskLevel::R1,
-                success: true,
-                message: Some("mock ok".into()),
-                executed_at: chrono::Utc::now(),
-            })
-        }
-
-        fn perform_targeted_input(
-            &self,
-            _target: &AppTarget,
-            action: &lcu_core::action::TargetedInput,
-        ) -> LcuResult<ActionReceipt> {
-            self.acts.fetch_add(1, Ordering::SeqCst);
-            Ok(ActionReceipt {
-                action: Action::Targeted(action.clone()),
-                action_hash: Action::Targeted(action.clone()).action_hash(),
-                capability_used: lcu_core::capability::CapabilityLevel::Targeted,
-                risk_level: RiskLevel::R2,
-                success: true,
-                message: Some("mock targeted ok".into()),
-                executed_at: chrono::Utc::now(),
-            })
-        }
-
-        fn perform_exclusive_input(
-            &self,
-            _target: &AppTarget,
-            _action: &lcu_core::action::TargetedInput,
-        ) -> LcuResult<ActionReceipt> {
-            Err(LcuError::coded(ErrorCode::NotImplemented, "no exclusive"))
-        }
-
-        fn detect_user_conflict(&self, _target: &AppTarget) -> LcuResult<ControlState> {
-            Ok(*self.conflict.lock().expect("conflict"))
-        }
-
-        fn permission_state(&self) -> LcuResult<PermissionState> {
-            Ok(PermissionState {
-                screen_recording: PermissionFlag::Granted,
-                accessibility: PermissionFlag::Granted,
-                input_monitoring: PermissionFlag::Granted,
-            })
-        }
-    }
-
-    #[test]
-    fn product_loop_executes_semantic_action_via_runtime() {
-        let dir = tempdir().unwrap();
-        let paths = RuntimePaths::from_root(dir.path());
-        let backend = Arc::new(MockBackend::new(ControlState::None));
-        let rt = Arc::new(Runtime::new_for_test(paths, backend.clone()).unwrap());
-        let task = rt
-            .submit_task(
-                "click Open in Finder",
-                CallerIdentity::HumanCli,
-                Some(AppSelector {
-                    app_id: Some("com.apple.finder".into()),
-                    pid: None,
-                    window_title_contains: None,
-                }),
-            )
-            .unwrap();
-        rt.run_task_to_completion(&task.task_id).unwrap();
-        let done = rt.get_task(&task.task_id).unwrap();
-        assert!(
-            done.step_count >= 1 || done.state.is_terminal(),
-            "expected progress, got state={:?} steps={}",
-            done.state,
-            done.step_count
-        );
-        assert!(done.step_count >= 1, "gated action must record a step");
-        assert_eq!(backend.resolves.load(Ordering::SeqCst), 1);
-    }
-
-
-    #[test]
-    fn stale_element_action_reobserves_without_failing_task() {
-        let dir = tempdir().unwrap();
-        let paths = RuntimePaths::from_root(dir.path());
-        let rt = Runtime::new_for_test(paths, Arc::new(MockBackend::with_stale_action())).unwrap();
-        let task = rt
-            .submit_task("click Open in Finder", CallerIdentity::HumanCli, None)
-            .unwrap();
-        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
-            .unwrap();
-        let mut loop_guard = LoopGuard::new(LoopGuardConfig::default());
-        let mut summary = None;
-
-        let outcome = rt
-            .run_one_product_step(&task.task_id, &mut loop_guard, &mut summary)
-            .unwrap();
-
-        assert_eq!(outcome, StepOutcome::Continue);
-        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::Running);
-        assert!(summary.unwrap().contains("stale"));
-        assert!(!is_recoverable_action_error(&LcuError::coded(
-            ErrorCode::PermissionDenied,
-            "element e1 stale"
-        )));
-        assert!(!is_recoverable_action_error(&LcuError::coded(
-            ErrorCode::TaskFailed,
-            "target_lost: window gone"
-        )));
-    }
-
-
-    #[test]
-    fn post_approval_stale_element_reobserves_instead_of_failing() {
-        let dir = tempdir().unwrap();
-        let backend = Arc::new(MockBackend::new(ControlState::None));
-        let rt = Runtime::new_for_test(RuntimePaths::from_root(dir.path()), backend.clone()).unwrap();
-        let task = rt
-            .submit_task("submit form", CallerIdentity::HumanCli, None)
-            .unwrap();
-        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
-            .unwrap();
-        let target = backend
-            .resolve_target(&AppSelector {
-                app_id: None,
-                pid: None,
-                window_title_contains: None,
-            })
-            .unwrap();
-        let mut observation = backend.observe(&target).unwrap();
-        observation.elements[0].label = Some("发送".into());
-        let action = Action::Semantic(SemanticAction::Invoke {
-            element_id: "e1".into(),
-        });
-        let evaluated = rt
-            .evaluate_action_for_task(
-                Some(&task.task_id),
-                &observation,
-                &action,
-                None,
-                RiskLevel::R4,
-                Some(&task.caller),
-            )
-            .unwrap();
-        let approval_id = evaluated.approval_id.unwrap();
-        rt.store_pending(
-            &task.task_id,
-            PendingAction {
-                approval_id: approval_id.clone(),
-                action,
-                observation: observation.clone(),
-                target,
-                risk: evaluated.risk,
-                effect_claim: None,
-                takeover_started: false,
+    fn screenshot_observation(id: &str) -> AppObservation {
+        AppObservation {
+            observation_id: ObservationId(id.into()),
+            timestamp_ms: 0,
+            target: AppTarget {
+                app_id: "example.app".into(),
+                pid: 1,
+                window_id: 1,
+                window_title: "Example".into(),
             },
-        );
-        rt.apply_command(&task.task_id, TaskCommand::RequireApproval, "test approval")
-            .unwrap();
-        let binding = rt.approval_binding(&approval_id).unwrap();
-        rt.approve_in_gui(&approval_id, &binding).unwrap();
-        backend.acts.store(1, Ordering::SeqCst);
-        let mut summary = None;
-
-        let outcome = rt
-            .try_execute_pending(&task.task_id, &mut summary)
-            .unwrap();
-
-        assert_eq!(outcome, Some(StepOutcome::Continue));
-        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::Running);
-        assert!(summary.unwrap().contains("stale"));
-        assert!(rt.pending.lock().unwrap().is_empty());
-        assert!(rt.approvals.lock().unwrap().is_empty());
+            window_frame: Frame { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+            model_size: ModelSize { width: 100, height: 100 },
+            elements: vec![ElementNode {
+                id: "e1".into(),
+                role: "button".into(),
+                label: Some("Send".into()),
+                value: None,
+                frame: Rect { x: 0.1, y: 0.1, width: 0.2, height: 0.1 },
+                actions: vec!["invoke".into()],
+            }],
+            transform_id: TransformId("transform".into()),
+            surface_scope: None,
+            image_hash: Some("same-frame".into()),
+            capture_backend: None,
+            image_png: None,
+        }
     }
 
     #[test]
-    fn post_approval_takeover_discards_consumed_pending() {
+    fn pending_gate_is_visible_only_after_task_is_parked() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(MockBackend::new(ControlState::TakenOver));
-        let rt = Runtime::new_for_test(RuntimePaths::from_root(dir.path()), backend.clone()).unwrap();
-        let task = rt
-            .submit_task("submit form", CallerIdentity::HumanCli, None)
-            .unwrap();
-        rt.apply_command(&task.task_id, TaskCommand::Start, "test start")
-            .unwrap();
-        let target = backend
-            .resolve_target(&AppSelector {
-                app_id: None,
-                pid: None,
-                window_title_contains: None,
-            })
-            .unwrap();
-        let mut observation = backend.observe(&target).unwrap();
-        observation.elements[0].label = Some("发送".into());
-        let action = Action::Semantic(SemanticAction::Invoke {
-            element_id: "e1".into(),
-        });
-        let evaluated = rt
-            .evaluate_action_for_task(
-                Some(&task.task_id),
-                &observation,
-                &action,
-                None,
-                RiskLevel::R4,
-                Some(&task.caller),
-            )
-            .unwrap();
-        let approval_id = evaluated.approval_id.unwrap();
-        rt.store_pending(
-            &task.task_id,
-            PendingAction {
-                approval_id: approval_id.clone(),
-                action,
-                observation,
-                target,
-                risk: evaluated.risk,
-                effect_claim: None,
-                takeover_started: false,
-            },
-        );
-        rt.apply_command(&task.task_id, TaskCommand::RequireApproval, "test approval")
-            .unwrap();
-        let binding = rt.approval_binding(&approval_id).unwrap();
-        rt.approve_in_gui(&approval_id, &binding).unwrap();
-
-        let outcome = rt
-            .try_execute_pending(&task.task_id, &mut None)
-            .unwrap();
-
-        assert_eq!(outcome, Some(StepOutcome::WaitExternal));
-        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::PausedByUser);
-        assert!(rt.pending.lock().unwrap().is_empty());
-    }
-
-
-    #[test]
-    fn control_gate_pauses_on_same_window_user_active() {
-        let dir = tempdir().unwrap();
-        let paths = RuntimePaths::from_root(dir.path());
-        let rt = Arc::new(
-            Runtime::new_for_test(
-                paths,
-                Arc::new(MockBackend::new(ControlState::TakenOver)),
-            )
-            .unwrap(),
-        );
-        let task = rt
-            .submit_task(
-                "type in Finder",
-                CallerIdentity::HumanCli,
-                Some(AppSelector {
-                    app_id: Some("com.apple.finder".into()),
-                    pid: None,
-                    window_title_contains: None,
-                }),
-            )
-            .unwrap();
-        rt.run_task_to_completion(&task.task_id).unwrap();
-        let done = rt.get_task(&task.task_id).unwrap();
-        assert_eq!(
-            done.state,
-            TaskState::PausedByUser,
-            "TakenOver must pause automation"
-        );
-        assert!(rt.current_target_for(&task.task_id).is_none());
-    }
-
-    #[test]
-    fn control_gate_fails_on_target_lost() {
-        let dir = tempdir().unwrap();
-        let paths = RuntimePaths::from_root(dir.path());
-        let rt = Arc::new(
-            Runtime::new_for_test(
-                paths,
-                Arc::new(MockBackend::new(ControlState::TargetLost)),
-            )
-            .unwrap(),
-        );
-        let task = rt
-            .submit_task(
-                "click Open in Finder",
-                CallerIdentity::HumanCli,
-                Some(AppSelector {
-                    app_id: Some("com.apple.finder".into()),
-                    pid: None,
-                    window_title_contains: None,
-                }),
-            )
-            .unwrap();
-        rt.run_task_to_completion(&task.task_id).unwrap();
-        let done = rt.get_task(&task.task_id).unwrap();
-        assert_eq!(done.state, TaskState::Failed);
-    }
-
-    fn agent_test_runtime() -> (Arc<Runtime>, Arc<lcu_model::AgentActor>) {
-        let dir = tempdir().unwrap();
-        let paths = RuntimePaths::from_root(dir.path());
-        let mut rt = Runtime::new_for_test(paths, Arc::new(MockBackend::new(ControlState::None)))
-            .unwrap();
-        let agent = Arc::new(lcu_model::AgentActor::with_timeout(std::time::Duration::from_secs(30)));
-        rt.set_agent_actor(agent.clone());
-        (Arc::new(rt), agent)
-    }
-
-    fn agent_task(rt: &Runtime) -> TaskRecord {
-        rt.submit_task_with_limits(
-            "click Open in Finder",
-            CallerIdentity::HumanCli,
-            Some(AppSelector {
-                app_id: Some("com.apple.finder".into()),
-                pid: None,
-                window_title_contains: None,
-            }),
-            None,
-            Some("agent".into()),
+        let rt = Runtime::new_for_test(
+            RuntimePaths::from_root(dir.path()),
+            Arc::new(NullBackend),
         )
-        .unwrap()
-    }
+        .unwrap();
+        let task = rt
+            .submit_task("demo", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "start")
+            .unwrap();
+        let target = screenshot_observation("gate").target;
+        let grant_id = rt.insert_app_access_gate(&task.task_id, "example.app", &target);
+        assert!(rt.list_pending_gates().is_empty());
 
-    #[test]
-    fn agent_actor_full_loop_via_ipc() {
-        let (rt, _agent) = agent_test_runtime();
-        let task = agent_task(&rt);
-        let tid = task.task_id.clone();
-        let rt2 = rt.clone();
-        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
+        rt.park_for_gate(
+            &task.task_id,
+            PendingGate {
+                grant_id: grant_id.clone(),
+                kind: GateKind::AppAccess,
+                task_id: task.task_id.clone(),
+                app_key: "example.app".into(),
+                target,
+                consequence: None,
+                evidence: None,
+                transition: "allowed".into(),
+                takeover_started: false,
+            },
+            "gate",
+        )
+        .unwrap();
 
-        // Poll for the decision, then submit an invoke via IPC.
-        let mut submitted = false;
-        for _ in 0..300 {
-            match rt.handle_internal(InternalRequest::GetDecision {
-                task_id: task.task_id.0.clone(),
-            }) {
-                InternalResponse::Decision {
-                    observation, ..
-                } => {
-                    let resp = rt.handle_internal(InternalRequest::SubmitDecision {
-                        task_id: task.task_id.0.clone(),
-                        observation_id: observation.observation_id.clone(),
-                        action: serde_json::json!({
-                            "kind": "semantic",
-                            "type": "invoke",
-                            "element_id": "e1"
-                        }),
-                        effect_claim: None,
-                        expected_effect: None,
-                        confidence: None,
-                    });
-                    assert!(
-                        matches!(resp, InternalResponse::Submitted { .. }),
-                        "submit rejected: {resp:?}"
-                    );
-                    submitted = true;
-                    break;
-                }
-                // "no observation yet" is the normal early state while the
-                // worker is still resolving/observing; keep polling.
-                InternalResponse::Error {
-                    code: ErrorCode::InvalidRequest,
-                    ..
-                } => {}
-                other => {
-                    panic!("get_decision errored: {other:?}");
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(submitted, "never got a decision to submit");
-
-        // The worker consumes it and executes the action.
-        let mut stepped = false;
-        for _ in 0..300 {
-            if rt.get_task(&task.task_id).unwrap().step_count >= 1 {
-                stepped = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(stepped, "worker did not advance after submit");
-
-        // Stop the loop; cancel aborts the next parked propose.
-        let _ = rt.cancel_task(&task.task_id);
-        worker.join().unwrap();
+        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::WaitingActor);
+        assert!(rt.pending.lock().unwrap().contains_key(&task.task_id.0));
+        assert_eq!(rt.list_pending_gates().len(), 1);
+        rt.app_access_in_gui(&grant_id, AppAccessDecision::AllowOnce)
+            .unwrap();
+        assert_eq!(rt.get_task(&task.task_id).unwrap().state, TaskState::Running);
+        let mut transition = None;
+        assert_eq!(rt.advance_gate(&task.task_id, &mut transition).unwrap(), None);
         assert_eq!(
-            rt.get_task(&task.task_id).unwrap().state,
-            TaskState::Cancelled
+            rt.app_access_state(&task.task_id, "example.app"),
+            AppAccessOutcome::Allowed
         );
     }
 
     #[test]
-    fn agent_actor_cancel_interrupts_parked_propose() {
-        let (rt, _agent) = agent_test_runtime();
-        let task = agent_task(&rt);
-        let tid = task.task_id.clone();
-        let rt2 = rt.clone();
-        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
-
-        // Wait until the worker is parked on a decision.
-        let mut parked = false;
-        for _ in 0..300 {
-            if matches!(
-                rt.handle_internal(InternalRequest::GetDecision {
-                    task_id: task.task_id.0.clone(),
-                }),
-                InternalResponse::Decision { .. }
-            ) {
-                parked = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(parked, "worker never parked");
-
-        let _ = rt.cancel_task(&task.task_id);
-        // run_task_to_completion returns promptly (abort wakes the waiter).
-        worker.join().unwrap();
-        assert_eq!(
-            rt.get_task(&task.task_id).unwrap().state,
-            TaskState::Cancelled
-        );
-    }
-
-    #[test]
-    fn agent_actor_stale_observation_rejected() {
-        let (rt, _agent) = agent_test_runtime();
-        let task = agent_task(&rt);
-        // No observation yet: submit must be rejected, not silently parked.
-        let resp = rt.handle_internal(InternalRequest::SubmitDecision {
-            task_id: task.task_id.0.clone(),
-            observation_id: "obs_nonexistent".into(),
-            action: serde_json::json!({"kind":"wait","milliseconds":1}),
-            effect_claim: None,
-            expected_effect: None,
-            confidence: None,
+    fn screenshot_grant_accepts_fresh_id_but_not_a_different_coordinate() {
+        let original = screenshot_observation("old");
+        let fresh = screenshot_observation("fresh");
+        let effect = EffectClaim::new(EffectKind::ExternalCommunication, "send");
+        let action = Action::Targeted(TargetedInput::Click {
+            x: 0.2,
+            y: 0.3,
+            button: MouseButton::Left,
         });
-        assert!(
-            matches!(resp, InternalResponse::Error { code: ErrorCode::InvalidRequest, .. }),
-            "stale submit must error, got {resp:?}"
+        let grant = ConsequenceGrant::new(
+            TaskId::new(),
+            original.target.app_id.clone(),
+            &effect,
+            consequence_identity_for(&original, &action),
+            "send",
+            screenshot_evidence_for(&original, &action, &effect),
+            Duration::minutes(1),
         );
+
+        assert!(proposal_matches_grant(&grant, &fresh, &action, &effect));
+        let downgraded = EffectClaim::new(EffectKind::Navigate, "open");
+        assert!(!proposal_matches_grant(&grant, &fresh, &action, &downgraded));
+        let jittered = Action::Targeted(TargetedInput::Click {
+            x: 0.21,
+            y: 0.31,
+            button: MouseButton::Left,
+        });
+        assert!(is_same_candidate(&grant, &fresh, &jittered));
+        let moved = Action::Targeted(TargetedInput::Click {
+            x: 0.8,
+            y: 0.3,
+            button: MouseButton::Left,
+        });
+        assert!(!proposal_matches_grant(&grant, &fresh, &moved, &effect));
+
+        let mut no_hash = original.clone();
+        no_hash.image_hash = None;
+        let no_hash_grant = ConsequenceGrant::new(
+            TaskId::new(),
+            no_hash.target.app_id.clone(),
+            &effect,
+            consequence_identity_for(&no_hash, &action),
+            "send",
+            screenshot_evidence_for(&no_hash, &action, &effect),
+            Duration::minutes(1),
+        );
+        assert!(!proposal_matches_grant(&no_hash_grant, &no_hash, &action, &effect));
+
+        let semantic = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let semantic_grant = ConsequenceGrant::new(
+            TaskId::new(),
+            original.target.app_id.clone(),
+            &effect,
+            consequence_identity_for(&original, &semantic),
+            "send",
+            screenshot_evidence_for(&original, &semantic, &effect),
+            Duration::minutes(1),
+        );
+        let mut renumbered = fresh.clone();
+        renumbered.elements[0].id = "e2".into();
+        let renumbered_action = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e2".into(),
+        });
+        assert!(is_same_candidate(
+            &semantic_grant,
+            &renumbered,
+            &renumbered_action,
+        ));
     }
 
     #[test]
-    fn task_level_actor_mixing_vlm_and_agent() {
-        // Same runtime serves both decision makers: a default (VLM) task runs
-        // to completion, then an --actor agent task parks for lcu decide.
-        let (rt, _agent) = agent_test_runtime();
-        // rt.set_actor is FakeActor in new_for_test (VLM side).
-        let vlm_task = rt
-            .submit_task_with_limits(
-                "click Open in Finder",
-                CallerIdentity::HumanCli,
-                None,
-                None,
-                None, // default → VLM (FakeActor)
-            )
-            .unwrap();
-        let tid = vlm_task.task_id.clone();
-        let rt2 = rt.clone();
-        let worker = std::thread::spawn(move || rt2.run_task_to_completion(&tid));
-        // FakeActor emits wait/done quickly; task should terminate without
-        // any agent decision being involved.
-        worker.join().unwrap();
-        assert!(
-            rt.get_task(&vlm_task.task_id).unwrap().state.is_terminal(),
-            "vlm task must not park on the agent actor"
-        );
+    fn only_coordinate_actions_require_an_identical_screenshot() {
+        let previous_obs = screenshot_observation("previous");
+        let mut current_obs = previous_obs.clone();
+        current_obs.observation_id = ObservationId("current".into());
+        current_obs.image_hash = Some("pixel-drift".into());
+        let previous = ModelObservation::from(&previous_obs);
+        let current = ModelObservation::from(&current_obs);
 
-        // Now an agent task on the same runtime parks for a decision.
-        let agent_task = rt
-            .submit_task_with_limits(
-                "click Open in Finder",
-                CallerIdentity::HumanCli,
-                None,
-                None,
-                Some("agent".into()),
-            )
-            .unwrap();
-        let tid2 = agent_task.task_id.clone();
-        let rt3 = rt.clone();
-        let worker2 = std::thread::spawn(move || rt3.run_task_to_completion(&tid2));
-        let mut parked = false;
-        for _ in 0..300 {
-            if matches!(
-                rt.handle_internal(InternalRequest::GetDecision {
-                    task_id: agent_task.task_id.0.clone(),
-                }),
-                InternalResponse::Decision { .. }
-            ) {
-                parked = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(parked, "agent task must park for a decision");
-        rt.cancel_task(&agent_task.task_id).unwrap();
-        worker2.join().unwrap();
-        assert_eq!(
-            rt.get_task(&agent_task.task_id).unwrap().state,
-            TaskState::Cancelled
-        );
+        assert!(same_decision_frame(
+            &previous,
+            &current,
+            &Action::Fail { reason: "stop".into() }
+        ));
+        assert!(same_decision_frame(
+            &previous,
+            &current,
+            &Action::Semantic(SemanticAction::Invoke { element_id: "e1".into() })
+        ));
+        assert!(!same_decision_frame(
+            &previous,
+            &current,
+            &Action::Targeted(TargetedInput::Click {
+                x: 0.2,
+                y: 0.3,
+                button: MouseButton::Left,
+            })
+        ));
     }
 }

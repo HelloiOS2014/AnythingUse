@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import Security
 
 /// JSON-RPC method handlers for the macOS window control service.
 final class Service {
@@ -13,7 +14,8 @@ final class Service {
             return [
                 "service": "macos-window-service",
                 "version": 1,
-                "pid": Int(getpid())
+                "pid": Int(getpid()),
+                "session_epoch": UserInputMonitor.shared.sessionEpoch
             ]
         case "permissions":
             return encodePermissions(Permissions.probe())
@@ -21,12 +23,56 @@ final class Service {
             return WindowResolver.listOnScreenWindows().map { encodeTarget($0) }
         case "resolve":
             return try encodeTarget(resolveParams(params))
+        case "app_identity":
+            return try appIdentity(params)
+        case "set_takeover_watch":
+            let target = try resolveTargetRequired(params)
+            let active = (params?["active"] as? Bool) ?? false
+            if active {
+                try UserInputMonitor.shared.arm(pid: target.pid, windowID: target.windowID)
+            } else {
+                UserInputMonitor.shared.clear(pid: target.pid, windowID: target.windowID)
+            }
+            return ["ok": true, "active": active]
         case "observe":
             return try observe(params)
         case "semantic":
             return try semantic(params)
         case "targeted":
             return try targeted(params)
+        case "set_foreground_session":
+            let p = params ?? [:]
+            let active = (p["active"] as? Bool) ?? false
+            if active {
+                guard UserInputMonitor.shared.isRunning else {
+                    throw ServiceError.permission(
+                        "Input Monitoring is required for safe foreground control"
+                    )
+                }
+                ForegroundSession.shared.begin(
+                    pid: pid_t(intValue(p["pid"]) ?? 0),
+                    windowID: CGWindowID(uintValue(p["window_id"]) ?? 0)
+                )
+            } else {
+                let pid = pid_t(intValue(p["pid"]) ?? 0)
+                let windowID = CGWindowID(uintValue(p["window_id"]) ?? 0)
+                if pid == 0, windowID == 0 {
+                    ForegroundSession.shared.clear()
+                } else {
+                    ForegroundSession.shared.clear(pid: pid, windowID: windowID)
+                }
+            }
+            return ["ok": true, "active": active]
+        case "suspend_foreground_session":
+            let target = try resolveTargetRequired(params)
+            ForegroundSession.shared.suspend(pid: target.pid, windowID: target.windowID)
+            return ["ok": true]
+        case "resume_foreground_session":
+            let target = try resolveTargetRequired(params)
+            try ForegroundSession.shared.resume(pid: target.pid, windowID: target.windowID)
+            return ["ok": true]
+        case "foreground_activate":
+            return try foregroundActivate(params)
         case "detect_conflict", "detect_control_state", "session_health":
             // Single control-state RPC (aliases kept for older adapters).
             return try detectControlState(params)
@@ -47,6 +93,53 @@ final class Service {
             pid: intValue(p["pid"]).map { pid_t($0) },
             windowTitleContains: p["window_title_contains"] as? String
         )
+    }
+
+    private func appIdentity(_ params: [String: Any]?) throws -> [String: Any] {
+        let target = try resolveTargetRequired(params)
+        guard let app = NSRunningApplication(processIdentifier: target.pid) else {
+            throw ServiceError.targetLost("cannot resolve application identity for pid \(target.pid)")
+        }
+        let bundleID = app.bundleIdentifier ?? target.appId
+        let path = app.bundleURL?.resolvingSymlinksInPath().standardizedFileURL.path ?? ""
+        let attributes = [kSecGuestAttributePid as String: NSNumber(value: target.pid)] as CFDictionary
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var signingInfo: CFDictionary?
+        if SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+           let code,
+           SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+           let staticCode,
+           SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSCheckAllArchitectures), nil) == errSecSuccess,
+           SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &signingInfo) == errSecSuccess,
+           let info = signingInfo as? [String: Any],
+           let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String,
+           !teamID.isEmpty,
+           let codeHash = info[kSecCodeInfoUnique as String] as? Data,
+           !codeHash.isEmpty
+        {
+            let signingID = (info[kSecCodeInfoIdentifier as String] as? String) ?? bundleID
+            let codeHashHex = codeHash.map { String(format: "%02x", $0) }.joined()
+            return [
+                "stable_key": "mac:\(bundleID):team:\(teamID):signing:\(signingID):cdhash:\(codeHashHex)",
+                "bundle_id": bundleID,
+                "team_id": teamID,
+                "signing_id": signingID,
+                "code_hash": codeHashHex,
+                "signed": true
+            ]
+        }
+        guard let executableURL = app.executableURL else {
+            throw ServiceError.permission("unsigned app identity has no executable path")
+        }
+        let executableHash = try sha256File(executableURL)
+        return [
+            "stable_key": "mac:\(bundleID):unsigned:\(path):sha256:\(executableHash)",
+            "bundle_id": bundleID,
+            "path": path,
+            "executable_sha256": executableHash,
+            "signed": false
+        ]
     }
 
     private func observe(_ params: [String: Any]?) throws -> [String: Any] {
@@ -72,19 +165,21 @@ final class Service {
             semanticError = String(String(describing: error).prefix(4096))
         }
         if elements.isEmpty {
-            // Avoid touching the global compatibility preference for ordinary
-            // native apps. Retry only when the canonical AX walk produced no UI.
-            let fallback = AXBridge.enableAccessibility(pid: target.pid, allowFallback: true)
-            defer { fallback.disable() }
+            // Bounded settle retry: some renderer-backed apps accept AX
+            // enablement only after a short grace period. Retry only when the
+            // canonical AX walk produced no UI.
+            let settle = AXBridge.enableAccessibility(pid: target.pid, allowFallback: true)
+            defer { settle.disable() }
             do {
                 elements = try store.observeElements(target: target)
                 semanticError = nil
             } catch {
                 semanticError = String(String(describing: error).prefix(4096))
             }
-            fallback.disable()
+            settle.disable()
         }
         var captureBackend: String?
+        var captureError: String?
         var imageB64: String?
         var imageWidth = max(1, Int(target.bounds.width))
         var imageHeight = max(1, Int(target.bounds.height))
@@ -106,18 +201,32 @@ final class Service {
             // ScreenCaptureKit failures are often transient (window bounds
             // changing mid-capture, first-use). One immediate retry before
             // falling back to AX-only; a second failure is likely persistent.
-            if let retry = try? awaitMain({
-                try await WindowCapture.captureWindow(windowID: target.windowID)
-            }) {
+            do {
+                let retry = try awaitMain({
+                    try await WindowCapture.captureWindow(windowID: target.windowID)
+                })
                 imageB64 = retry.pngData.base64EncodedString()
                 imageWidth = retry.width
                 imageHeight = retry.height
                 captureBackend = retry.backend
                 imageHash = sha256Hex(retry.pngData)
-            } else {
-                // AX-only observation is still useful.
+            } catch let finalError {
+                // AX-only observation is still useful, but keep the final
+                // capture error so callers never mistake it for a healthy
+                // observation.
+                captureError = String(String(describing: finalError).prefix(4096))
                 captureBackend = nil
             }
+        }
+
+        // Both observation channels empty: never return a false healthy
+        // observation. ScreenCaptureKit errors are already typed permission
+        // failures, so surface that with the capture detail.
+        if elements.isEmpty && imageB64 == nil {
+            throw ServiceError.permission(
+                "no observation data: AX elements empty and screen capture failed"
+                    + (captureError.map { ": \($0)" } ?? "")
+            )
         }
 
         return [
@@ -134,10 +243,11 @@ final class Service {
             ],
             "elements": elements,
             "semantic_error": semanticError as Any,
+            "capture_error": captureError as Any,
             "image_png_b64": imageB64 as Any,
             "image_hash": imageHash as Any,
             "capture_backend": captureBackend as Any,
-            "control_state": Takeover.detect(pid: target.pid, windowID: target.windowID).rawValue
+            "control_state": try Takeover.detect(pid: target.pid, windowID: target.windowID).rawValue
         ]
     }
 
@@ -203,7 +313,7 @@ final class Service {
                 do {
                     try AXBridge.setValue(el, value)
                     let readback = AXBridge.getValue(el)
-                    if readback.contains(value) || readback == value {
+                    if readback == value || (!value.isEmpty && readback.contains(value)) {
                         return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
                     }
                 } catch {
@@ -228,19 +338,43 @@ final class Service {
                         normalizedY: metadata.frame.midY
                     )
                     try AXBridge.setValue(el, "")
-                    let typePath = value.isEmpty
-                        ? "empty"
-                        : try DirectedInput.typeUnicode(target: target, text: value)
+                    guard AXBridge.getValue(el).isEmpty else {
+                        throw ServiceError.actionFailed(
+                            "set_value clear effect unverified for \(elementId)"
+                        )
+                    }
+                    let typePath: String
+                    if value.isEmpty {
+                        typePath = "empty"
+                    } else {
+                        do {
+                            typePath = try DirectedInput.typeUnicode(
+                                target: target,
+                                expectedEditable: el,
+                                text: value
+                            )
+                        } catch let e as ServiceError where e.code == "foreground_required" {
+                            // The click and clear already happened: reporting
+                            // foreground_required would make Runtime retry and
+                            // repeat a side effect. Fail hard after input.
+                            throw ServiceError.actionFailed(
+                                "set_value click landed but keyboard delivery cannot be proven for \(elementId): \(e)"
+                            )
+                        }
+                    }
+                    guard value.isEmpty || AXBridge.getValue(el).contains(value) else {
+                        throw ServiceError.actionFailed(
+                            "set_value typing effect unverified for \(elementId)"
+                        )
+                    }
                     return okAction(
                         path: "\(click.path)+\(typePath)",
                         detail: "set_value \(elementId) len=\(value.count)"
                     )
                 }
 
-                _ = try DirectedInput.typeUnicode(target: target, text: value)
-                return okAction(
-                    path: "cgevent_post_to_pid_type",
-                    detail: "set_value/type \(elementId) len=\(value.count)"
+                throw ServiceError.unsupported(
+                    "set_value refused: \(elementId) is not a proven editable target"
                 )
 
             case "focus":
@@ -292,30 +426,91 @@ final class Service {
 
             case "type_text":
                 let text = try requireString(action, "text")
-                let typePath = try DirectedInput.typeUnicode(target: target, text: text)
+                guard let x = doubleValue(action["x"]), let y = doubleValue(action["y"]) else {
+                    throw ServiceError.unsupported(
+                        "screenshot-only type_text requires fresh normalized x/y coordinates"
+                    )
+                }
+                // Background targeted typing: click first (element-bound AX press
+                // when possible, which also makes the target window key
+                // in-process), then type under strict key-window proof. When the
+                // proof cannot be established no input has occurred and the
+                // foreground session fallback applies.
+                let click = try DirectedInput.click(
+                    target: target,
+                    normalizedX: x,
+                    normalizedY: y
+                )
+                try DirectedInput.typeIntoKeyWindow(target: target, text: text)
                 return okAction(
-                    path: typePath,
-                    detail: "typed \(text.count) chars → pid \(target.pid) window_id=\(target.windowID)"
+                    path: "\(click.path)+cgevent_post_to_key_window_type",
+                    detail: "background type_text len=\(text.count); effect pending fresh observation"
                 )
 
             case "key_combo":
-                guard let keys = action["keys"] as? [String], keys.count == 1 else {
-                    throw ServiceError.unsupported("only one directed key is supported")
-                }
-                let key = keys[0].uppercased()
-                guard key == "RETURN" || key == "ENTER" else {
-                    throw ServiceError.unsupported("directed key not supported: \(keys[0])")
-                }
-                let returnPath = try DirectedInput.pressReturn(target: target)
-                return okAction(
-                    path: returnPath,
-                    detail: "Return → pid \(target.pid) window_id=\(target.windowID)"
+                throw ServiceError.unsupported(
+                    "targeted key_combo has no element binding and could submit the wrong control"
                 )
 
             default:
                 throw ServiceError.unsupported("unknown targeted action type: \(type)")
             }
         }
+    }
+
+    // MARK: - approved foreground session
+
+    /// The only entry in this process that may call `NSRunningApplication.activate`.
+    /// Runs only for a session placed by `set_foreground_session` after a GUI
+    /// ForegroundGrant. The exact target is raised before activation and must
+    /// still exist afterwards. Every input inside the session separately
+    /// re-proves the exact key window (`ForegroundSession.allowsSessionInput`),
+    /// so a same-process sheet or popover cannot redirect input. Never restores
+    /// the previous app.
+    private func foregroundActivate(_ params: [String: Any]?) throws -> [String: Any] {
+        let p = params ?? [:]
+        guard let pid = intValue(p["pid"]), let wid = uintValue(p["window_id"]) else {
+            throw ServiceError.invalidRequest("foreground_activate requires pid and window_id")
+        }
+        guard ForegroundSession.shared.isActive(pid: pid_t(pid), windowID: CGWindowID(wid)) else {
+            throw ServiceError.foregroundRequired(
+                "foreground_activate refused: no approved session for pid=\(pid) window_id=\(wid)"
+            )
+        }
+        let target = try WindowResolver.resolve(pid: pid_t(pid), windowID: CGWindowID(wid))
+        let accessibility = AXBridge.enableAccessibility(pid: target.pid)
+        defer { accessibility.disable() }
+        let exactWindowPrepared = AXBridge.raiseExactWindow(target)
+            || FocusGuard.uniqueTopmostSamePIDWindow(pid: target.pid) == target.windowID
+        guard exactWindowPrepared else {
+            throw ServiceError.foregroundRequired(
+                "foreground_activate refused before activation: exact window cannot be raised or uniquely proven"
+            )
+        }
+        guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else {
+            throw ServiceError.targetLost(
+                "foreground_activate: process \(pid) is no longer running"
+            )
+        }
+        guard app.activate(options: []) else {
+            throw ServiceError.actionFailed(
+                "foreground_activate failed: activation request rejected for pid \(pid)"
+            )
+        }
+        // AppKit activation is asynchronous. A same-process sheet or popover
+        // may legitimately become key; the exact target remains the session
+        // scope and every input re-proves its destination separately.
+        for _ in 0..<20 {
+            if FocusGuard.isFrontmost(pid: pid_t(pid)),
+               WindowResolver.windowExists(pid: pid_t(pid), windowID: CGWindowID(wid))
+            {
+                return ["ok": true, "pid": Int(pid), "window_id": Int(wid)]
+            }
+            usleep(50_000)
+        }
+        throw ServiceError.actionFailed(
+            "foreground_activate failed: target app/window was not available after activation"
+        )
     }
 
     // MARK: - control state
@@ -325,7 +520,7 @@ final class Service {
         let target = try resolveTargetRequired(params)
         let alive = WindowResolver.processAlive(target.pid)
         let exists = WindowResolver.windowExists(pid: target.pid, windowID: target.windowID)
-        let state = Takeover.detect(pid: target.pid, windowID: target.windowID)
+        let state = try Takeover.detect(pid: target.pid, windowID: target.windowID)
         return [
             "control_state": state.rawValue,
             // Legacy ConflictState mapping for PlatformBackend adapters:
@@ -352,11 +547,11 @@ final class Service {
     }
 
     private func ensureNotBlocking(_ target: MacWindowTarget) throws {
-        let state = Takeover.detect(pid: target.pid, windowID: target.windowID)
+        let state = try Takeover.detect(pid: target.pid, windowID: target.windowID)
         switch state {
         case .takenOver:
             throw ServiceError.takenOver(
-                "user focused the same window (pid=\(target.pid) window_id=\(target.windowID))"
+                "real user input reached the target (pid=\(target.pid) window_id=\(target.windowID))"
             )
         case .targetLost:
             throw ServiceError.targetLost("target process/window lost")
@@ -394,7 +589,7 @@ final class Service {
         [
             "accessibility": p.accessibilityTrusted ? "granted" : "denied",
             "screen_recording": p.screenRecordingLikely ? "granted" : "denied",
-            "input_monitoring": "not_determined",
+            "input_monitoring": p.inputMonitoringTrusted ? "granted" : "denied",
             "notes": p.notes
         ]
     }
@@ -441,6 +636,21 @@ final class Service {
         data.withUnsafeBytes { buf in
             _ = CC_SHA256(buf.baseAddress, CC_LONG(data.count), &hash)
         }
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func sha256File(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var context = CC_SHA256_CTX()
+        CC_SHA256_Init(&context)
+        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+            data.withUnsafeBytes { bytes in
+                _ = CC_SHA256_Update(&context, bytes.baseAddress, CC_LONG(data.count))
+            }
+        }
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        CC_SHA256_Final(&hash, &context)
         return hash.map { String(format: "%02x", $0) }.joined()
     }
 }

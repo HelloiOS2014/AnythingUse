@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::action::Action;
 use crate::observation::{AppObservation, AppTarget};
 
 // ---------------------------------------------------------------------------
@@ -153,18 +152,4 @@ pub fn control_target_from_observation(obs: &AppObservation) -> ControlTarget {
 /// Map a resolved `AppTarget` to `MacWindow` / `ControlTarget`.
 pub fn control_target_from_app_target(target: &AppTarget) -> ControlTarget {
     ControlTarget::from_app_target(target)
-}
-
-/// Existing `Action` variants apply to both surfaces without new wire kinds.
-pub fn action_is_surface_applicable(action: &Action) -> bool {
-    match action {
-        Action::Observe
-        | Action::Semantic(_)
-        | Action::Targeted(_)
-        | Action::Wait { .. }
-        | Action::Done { .. }
-        | Action::Fail { .. }
-        | Action::RequestUser { .. } => true,
-        Action::Exclusive(_) => false,
-    }
 }

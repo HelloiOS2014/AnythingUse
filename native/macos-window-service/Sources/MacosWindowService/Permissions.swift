@@ -14,28 +14,27 @@ enum Permissions {
             _ = AXIsProcessTrustedWithOptions(opts)
         }
 
-        // Soft Screen Recording signal: foreign windows with readable bounds.
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        let foreignWithBounds = list.filter { info in
-            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t else { return false }
-            if ownerPID == getpid() { return false }
-            if let bounds = info[kCGWindowBounds as String] as? [String: Any],
-               let w = bounds["Width"] as? CGFloat, w > 1
-            {
-                return true
-            }
-            return false
-        }
-        let screenOK = foreignWithBounds.count >= 1
+        // Truthful Screen Recording check: native TCC preflight for this
+        // process. Never requests or opens Settings — doctor reports the truth.
+        let screenOK = CGPreflightScreenCaptureAccess()
         if !screenOK {
             notes.append(
-                "Screen Recording may be missing. Grant in System Settings → Privacy & Security → Screen & System Audio Recording for macos-window-service."
+                "Screen Recording not granted for this process. Grant in System Settings → Privacy & Security → Screen & System Audio Recording for macos-window-service."
+            )
+        }
+
+        let inputOK = CGPreflightListenEventAccess()
+        if !inputOK {
+            notes.append(
+                "Input Monitoring not granted. It is required to distinguish real user HID from tagged AnythingUse input."
+                    + " Restart macos-window-service after granting it."
             )
         }
 
         return PermissionStatus(
             accessibilityTrusted: ax,
             screenRecordingLikely: screenOK,
+            inputMonitoringTrusted: inputOK,
             notes: notes
         )
     }

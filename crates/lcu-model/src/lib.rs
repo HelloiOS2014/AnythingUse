@@ -12,7 +12,9 @@ pub mod validate;
 pub use agent_actor::AgentActor;
 pub use loop_guard::{LoopGuard, LoopGuardConfig};
 pub use subprocess_actor::SubprocessVisionActor;
-pub use validate::{compress_elements_for_model, ensure_observation_binding, validate_action};
+pub use validate::{
+    compress_elements_for_model, ensure_observation_binding, validate_action, validate_effect,
+};
 
 use lcu_core::action::{Action, ProposedAction};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
@@ -93,6 +95,12 @@ pub struct ModelTaskContext {
     pub step: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_action_summary: Option<String>,
+    /// Text of the last gate that just passed (app access / consequence
+    /// confirmation / foreground activation). Both actors receive the same
+    /// transition result after a fresh observation; the old proposal is never
+    /// replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_result: Option<String>,
 }
 
 /// Pluggable local VLM backend.
@@ -131,28 +139,6 @@ pub fn parse_action_json(text: &str) -> LcuResult<Action> {
         })
 }
 
-/// Placeholder actor used until mistral.rs / Qwen3-VL is wired in M1 spike-model.
-#[derive(Debug, Default)]
-pub struct NullVisionActor;
-
-impl VisionActor for NullVisionActor {
-    fn name(&self) -> &str {
-        "null"
-    }
-
-    fn propose_action(
-        &self,
-        observation: &ModelObservation,
-        context: &ModelTaskContext,
-    ) -> LcuResult<ProposedAction> {
-        let _ = (observation, context);
-        Err(LcuError::coded(
-            ErrorCode::NotImplemented,
-            "NullVisionActor: load Qwen3-VL-4B 4-bit via mistral.rs in spike-model",
-        ))
-    }
-}
-
 /// Tiny test-only actor: invoke first button-like element, else Done.
 ///
 /// Not used on the product path (product uses Qwen subprocess only).
@@ -169,7 +155,7 @@ impl VisionActor for FakeActor {
         observation: &ModelObservation,
         context: &ModelTaskContext,
     ) -> LcuResult<ProposedAction> {
-        use lcu_core::action::SemanticAction;
+        use lcu_core::action::{EffectClaim, EffectKind, SemanticAction};
         use lcu_core::observation::ObservationId;
 
         let button = observation.elements.iter().find(|e| {
@@ -180,25 +166,32 @@ impl VisionActor for FakeActor {
                 || label.contains("open")
                 || label.contains("ok")
         });
-        let action = if let Some(el) = button {
-            Action::Semantic(SemanticAction::Invoke {
-                element_id: el.id.clone(),
-            })
+        let (action, effect) = if let Some(el) = button {
+            (
+                Action::Semantic(SemanticAction::Invoke {
+                    element_id: el.id.clone(),
+                }),
+                EffectClaim::new(EffectKind::Navigate, "open"),
+            )
         } else if context.step == 0 && !observation.elements.is_empty() {
-            Action::Semantic(SemanticAction::Invoke {
-                element_id: observation.elements[0].id.clone(),
-            })
+            (
+                Action::Semantic(SemanticAction::Invoke {
+                    element_id: observation.elements[0].id.clone(),
+                }),
+                EffectClaim::new(EffectKind::Navigate, "open"),
+            )
         } else {
-            Action::Done {
-                summary: format!("fake done for: {}", context.goal),
-            }
+            (
+                Action::Done {
+                    summary: format!("fake done for: {}", context.goal),
+                },
+                EffectClaim::new(EffectKind::Observe, "done"),
+            )
         };
         Ok(ProposedAction {
             observation_id: ObservationId(observation.observation_id.clone()),
             action,
-            effect_claim: None,
-            expected_effect: None,
-            model_claimed_risk: None,
+            effect: Some(effect),
             confidence: 1.0,
         })
     }

@@ -5,8 +5,8 @@
 # The host script and the extension are COPIED under RUNTIME_ROOT so the
 # Chrome surface keeps working when the project directory moves or is
 # deleted. The extension ID is manifest-key-derived, so copying never
-# changes it. Re-running this script overwrites in place; Chrome
-# auto-reloads the unpacked extension on file changes.
+# changes it. Re-running this script overwrites in place; reload the unpacked
+# extension in chrome://extensions so Chrome uses the new service worker.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -112,4 +112,4 @@ echo "  2. Confirm extension ID is $EXT_ID (manifest key fixes this)."
 echo "  3. Control socket appears at: \$LCU_RUNTIME_ROOT/chrome-control.sock when extension connects."
 echo
 echo "Update: re-run this script — copied host and extension are overwritten"
-echo "in place; Chrome auto-reloads the unpacked extension on file changes."
+echo "in place; then click Reload for it in chrome://extensions."

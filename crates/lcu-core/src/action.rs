@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::observation::ObservationId;
-use crate::risk::RiskLevel;
 
 /// High-level action categories.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,11 +12,62 @@ pub enum ActionKind {
     Observe,
     Semantic,
     TargetedInput,
-    ExclusiveInput,
     Wait,
     Done,
     Fail,
     RequestUser,
+}
+
+/// Closed-set consequence classification shared by both decision actors
+/// (external Agent and local VLM use the same enum and parser).
+///
+/// The actor's `effect` is a structured safety classification, never an
+/// authorization: user goal, app access and consequence grants are the
+/// authorization. Runtime computes an independent risk floor that the actor
+/// declaration can never lower.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    /// Screenshot, wait.
+    Observe,
+    /// Open, search, select, scroll, switch page.
+    Navigate,
+    /// Local draft/document non-sensitive input.
+    LocalEdit,
+    /// Send message, email, publish content.
+    ExternalCommunication,
+    /// Submit form, create record, upload file.
+    ExternalSubmit,
+    /// Delete, overwrite, clear, revoke access.
+    Destructive,
+    /// Modify sharing, account, system permission.
+    PermissionChange,
+    /// Purchase, pay, transfer.
+    Financial,
+    /// Password, verification code, secret, security verification.
+    Credential,
+    /// Actor cannot determine the real consequence.
+    Unknown,
+}
+
+/// Actor-declared consequence claim for one executable proposal.
+///
+/// `summary` is for user explanation and audit only — it never participates in
+/// grant matching and must not contain credentials or full sensitive text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectClaim {
+    pub kind: EffectKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl EffectClaim {
+    pub fn new(kind: EffectKind, summary: impl Into<String>) -> Self {
+        Self {
+            kind,
+            summary: Some(summary.into()),
+        }
+    }
 }
 
 /// Semantic accessibility-style action.
@@ -85,6 +135,12 @@ pub enum TargetedInput {
     },
     TypeText {
         text: String,
+        /// Optional normalized target point. When present, click + type execute
+        /// atomically in one target-only input session.
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
     },
     KeyCombo {
         keys: Vec<String>,
@@ -107,7 +163,6 @@ pub enum Action {
     Observe,
     Semantic(SemanticAction),
     Targeted(TargetedInput),
-    Exclusive(TargetedInput),
     Wait { milliseconds: u64 },
     Done { summary: String },
     Fail { reason: String },
@@ -120,7 +175,6 @@ impl Action {
             Self::Observe => ActionKind::Observe,
             Self::Semantic(_) => ActionKind::Semantic,
             Self::Targeted(_) => ActionKind::TargetedInput,
-            Self::Exclusive(_) => ActionKind::ExclusiveInput,
             Self::Wait { .. } => ActionKind::Wait,
             Self::Done { .. } => ActionKind::Done,
             Self::Fail { .. } => ActionKind::Fail,
@@ -149,18 +203,16 @@ impl Action {
     }
 }
 
-/// Model proposal before EffectGuard and policy re-evaluation.
+/// Model proposal before effect guard and policy re-evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProposedAction {
     pub observation_id: ObservationId,
     pub action: Action,
-    /// Model-declared effect; never trusted as final risk.
+    /// Actor-declared closed-set consequence; never trusted as final risk.
+    /// Executable actions (semantic/targeted) must declare one; missing or
+    /// invalid values are rejected at the trust boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_claim: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_effect: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_claimed_risk: Option<RiskLevel>,
+    pub effect: Option<EffectClaim>,
     #[serde(default)]
     pub confidence: f32,
 }

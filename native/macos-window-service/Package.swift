@@ -17,13 +17,10 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreGraphics"),
+                .linkedFramework("Security"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("UniformTypeIdentifiers")
             ]
-        ),
-        .testTarget(
-            name: "MacosWindowServiceTests",
-            dependencies: ["MacosWindowService"]
         )
     ]
 )

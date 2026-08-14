@@ -2,16 +2,16 @@
 //! CLI (`lcu decide` / `lcu act`), with exactly the same data surface as the
 //! local VLM: compact element tree, scaled screenshot, goal/step context.
 //!
-//! The product worker is a serial FIFO, so at most one decision is pending at
-//! any time. `propose_action` parks the worker thread on a condvar until the
-//! agent submits a decision for the matching observation_id, or the decision
-//! times out / is aborted by task cancel/pause.
+//! Agent decisions are parked by observation so model think time does not hold
+//! the serial desktop execution slot. The synchronous `VisionActor` adapter
+//! remains for tests/embedding and waits on the same slots.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use lcu_core::action::{Action, ProposedAction};
+use lcu_core::action::{Action, EffectClaim, ProposedAction};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 use lcu_core::observation::ObservationId;
 
@@ -35,8 +35,8 @@ pub struct PendingDecision {
 #[derive(Debug, Clone)]
 pub struct SubmittedDecision {
     pub action: Action,
-    pub effect_claim: Option<String>,
-    pub expected_effect: Option<String>,
+    /// Closed-set consequence claim; parsed strictly at the trust boundary.
+    pub effect: Option<EffectClaim>,
     pub confidence: f32,
 }
 
@@ -50,7 +50,7 @@ pub struct PendingDecisionView {
 }
 
 pub struct AgentActor {
-    slot: Mutex<Option<PendingDecision>>,
+    slots: Mutex<HashMap<String, PendingDecision>>,
     cv: Condvar,
     timeout: Duration,
 }
@@ -70,19 +70,20 @@ impl AgentActor {
 
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
-            slot: Mutex::new(None),
+            slots: Mutex::new(HashMap::new()),
             cv: Condvar::new(),
             timeout,
         }
     }
 
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Snapshot of the pending decision for `observation_id`, if any.
     pub fn pending(&self, observation_id: &str) -> Option<PendingDecisionView> {
-        let guard = self.slot.lock().expect("agent slot lock");
-        let dec = guard.as_ref()?;
-        if dec.observation.observation_id != observation_id {
-            return None;
-        }
+        let guard = self.slots.lock().expect("agent slot lock");
+        let dec = guard.get(observation_id)?;
         Some(PendingDecisionView {
             observation: dec.observation.clone(),
             context: dec.context.clone(),
@@ -94,41 +95,47 @@ impl AgentActor {
         })
     }
 
-    /// Submit a decision for `observation_id`. Parses the action JSON early so
-    /// the agent gets a sharp error; semantic validation (elements/risk) is
-    /// done later by the worker loop exactly like VLM proposals.
+    /// Submit a decision for `observation_id`. Parses the action JSON and the
+    /// closed-set effect early so the agent gets a sharp error; semantic
+    /// validation (elements/risk) is done later by the worker loop exactly
+    /// like VLM proposals.
     pub fn submit(
         &self,
         observation_id: &str,
         action_json: &str,
-        effect_claim: Option<String>,
-        expected_effect: Option<String>,
+        effect: Option<serde_json::Value>,
         confidence: Option<f32>,
     ) -> LcuResult<Action> {
         let action = parse_action_json(action_json)?;
+        let effect: Option<EffectClaim> = match effect {
+            Some(value) => Some(serde_json::from_value(value).map_err(|e| {
+                LcuError::coded(
+                    ErrorCode::InvalidRequest,
+                    format!("effect is not a valid closed-set consequence: {e}"),
+                )
+            })?),
+            None => None,
+        };
         {
-            let mut guard = self.slot.lock().expect("agent slot lock");
-            match guard.as_mut() {
-                Some(dec) if dec.observation.observation_id == observation_id => {
+            let mut guard = self.slots.lock().expect("agent slot lock");
+            match guard.get_mut(observation_id) {
+                Some(dec) => {
+                    if Instant::now() >= dec.deadline {
+                        return Err(LcuError::coded(
+                            ErrorCode::TaskFailed,
+                            "agent decision expired; fetch a fresh observation after resume",
+                        ));
+                    }
                     dec.submitted = Some(SubmittedDecision {
                         action: action.clone(),
-                        effect_claim,
-                        expected_effect,
+                        effect,
                         confidence: confidence.unwrap_or(0.9),
                     });
-                }
-                Some(_) => {
-                    return Err(LcuError::coded(
-                        ErrorCode::InvalidRequest,
-                        format!(
-                            "observation_id {observation_id} is stale; fetch a fresh decision with lcu decide"
-                        ),
-                    ));
                 }
                 None => {
                     return Err(LcuError::coded(
                         ErrorCode::TaskNotFound,
-                        "no pending decision; the worker may not have reached the decision step yet (use lcu decide --wait)",
+                        "stale or no pending decision; use lcu decide --wait for a fresh observation",
                     ));
                 }
             }
@@ -140,14 +147,134 @@ impl AgentActor {
     /// Wake a parked worker immediately (task cancelled / paused / failed).
     pub fn abort_waiting(&self, observation_id: &str, reason: &str) {
         {
-            let mut guard = self.slot.lock().expect("agent slot lock");
-            if let Some(dec) = guard.as_mut() {
-                if dec.observation.observation_id == observation_id && dec.aborted.is_none() {
+            let mut guard = self.slots.lock().expect("agent slot lock");
+            if let Some(dec) = guard.get_mut(observation_id) {
+                if dec.aborted.is_none() {
                     dec.aborted = Some(reason.to_string());
                 }
             }
         }
         self.cv.notify_all();
+    }
+
+    /// Remove a parked decision immediately (task pause/cancel/terminal).
+    pub fn discard(&self, observation_id: &str) {
+        let removed = self
+            .slots
+            .lock()
+            .expect("agent slot lock")
+            .remove(observation_id);
+        if let Some(path) = removed.and_then(|decision| decision.image_path) {
+            let _ = std::fs::remove_file(path);
+        }
+        self.cv.notify_all();
+    }
+
+    /// Expire one still-unsubmitted decision. Returns true only when this call
+    /// removed the slot; a decision submitted before its deadline wins.
+    pub fn expire(&self, observation_id: &str) -> bool {
+        let mut guard = self.slots.lock().expect("agent slot lock");
+        let should_expire = guard.get(observation_id).is_some_and(|decision| {
+            decision.submitted.is_none() && Instant::now() >= decision.deadline
+        });
+        if !should_expire {
+            return false;
+        }
+        let removed = guard.remove(observation_id).expect("slot exists");
+        drop(guard);
+        if let Some(path) = removed.image_path {
+            let _ = std::fs::remove_file(path);
+        }
+        true
+    }
+
+    /// Publish one observation for an external Agent without blocking the
+    /// Runtime's serial execution worker.
+    pub fn begin_decision(
+        &self,
+        observation: &ModelObservation,
+        context: &ModelTaskContext,
+    ) -> LcuResult<()> {
+        let observation_id = observation.observation_id.clone();
+        let image_path = observation.image_png.as_ref().map(|png| {
+            let path = std::env::temp_dir().join(format!(
+                "lcu-agent-{}-{observation_id}.png",
+                std::process::id()
+            ));
+            let _ = write_private_temp_file(&path, png);
+            path
+        });
+        let mut observation = observation.clone();
+        observation.image_png = None;
+        let replaced = self.slots.lock().expect("agent slot lock").insert(
+            observation_id,
+            PendingDecision {
+                observation,
+                context: context.clone(),
+                image_path,
+                deadline: Instant::now() + self.timeout,
+                submitted: None,
+                aborted: None,
+            },
+        );
+        if let Some(old) = replaced.and_then(|old| old.image_path) {
+            let _ = std::fs::remove_file(old);
+        }
+        self.cv.notify_all();
+        Ok(())
+    }
+
+    /// Consume a submitted decision after the scheduler gives the task its
+    /// next FIFO turn. `None` means the Agent has not submitted yet.
+    pub fn take_submitted(
+        &self,
+        observation_id: &str,
+    ) -> LcuResult<Option<(ModelObservation, ModelTaskContext, ProposedAction)>> {
+        let mut guard = self.slots.lock().expect("agent slot lock");
+        let Some(dec) = guard.get(observation_id) else {
+            return Ok(None);
+        };
+        if Instant::now() >= dec.deadline {
+            let expired = guard.remove(observation_id).expect("slot exists");
+            drop(guard);
+            if let Some(path) = expired.image_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(LcuError::coded(
+                ErrorCode::TaskFailed,
+                format!("agent decision timed out after {}s", self.timeout.as_secs()),
+            ));
+        }
+        if let Some(reason) = dec.aborted.clone() {
+            let aborted = guard.remove(observation_id).expect("slot exists");
+            drop(guard);
+            if let Some(path) = aborted.image_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(LcuError::coded(
+                ErrorCode::WaitingUser,
+                format!("agent decision aborted: {reason}"),
+            ));
+        }
+        if dec.submitted.is_none() {
+            return Ok(None);
+        }
+        let mut ready = guard.remove(observation_id).expect("slot exists");
+        drop(guard);
+        if let Some(path) = ready.image_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        let submitted = ready.submitted.take().expect("submitted checked");
+        Ok(Some((
+            ready.observation,
+            ready.context,
+            ProposedAction {
+                observation_id: ObservationId(observation_id.to_string()),
+                action: submitted.action,
+                effect: submitted.effect,
+                confidence: submitted.confidence,
+            },
+        )))
     }
 }
 
@@ -168,95 +295,12 @@ impl VisionActor for AgentActor {
         context: &ModelTaskContext,
     ) -> LcuResult<ProposedAction> {
         let observation_id = observation.observation_id.clone();
-
-        // Screenshot hand-off via a 0600 temp file (same pattern as the VLM
-        // path); the agent must read it before submitting. Bytes never enter
-        // the IPC JSON.
-        let image_path = observation.image_png.as_ref().map(|png| {
-            let path = std::env::temp_dir().join(format!(
-                "lcu-agent-{}-{observation_id}.png",
-                std::process::id()
-            ));
-            let _ = write_private_temp_file(&path, png);
-            path
-        });
-
-        let mut observation = observation.clone();
-        observation.image_png = None;
-
-        let mut guard = self.slot.lock().expect("agent slot lock");
-        // Replace any stale pending decision (previous timeout/abort) and its
-        // image file. Startup also sweeps crash leftovers older than one hour.
-        if let Some(old) = guard.take() {
-            if let Some(p) = old.image_path {
-                let _ = std::fs::remove_file(p);
-            }
-        }
-        *guard = Some(PendingDecision {
-            observation,
-            context: context.clone(),
-            image_path,
-            deadline: Instant::now() + self.timeout,
-            submitted: None,
-            aborted: None,
-        });
-        drop(guard);
-
+        self.begin_decision(observation, context)?;
         loop {
-            let mut guard = self.slot.lock().expect("agent slot lock");
-            let dec = guard.as_mut().expect("slot held by this proposal");
-            if dec.observation.observation_id != observation_id {
-                // Replaced by a newer proposal (e.g. retry after timeout); the
-                // new waiter owns the slot. Leave it and its image alone.
-                return Err(LcuError::coded(
-                    ErrorCode::TaskFailed,
-                    "agent decision superseded by a newer observation; refetch with lcu decide",
-                ));
+            if let Some((_, _, proposal)) = self.take_submitted(&observation_id)? {
+                return Ok(proposal);
             }
-            if let Some(sub) = dec.submitted.take() {
-                let image = dec.image_path.take();
-                let _ = guard.take();
-                drop(guard);
-                if let Some(p) = image {
-                    let _ = std::fs::remove_file(p);
-                }
-                return Ok(ProposedAction {
-                    observation_id: ObservationId(observation_id),
-                    action: sub.action,
-                    effect_claim: sub.effect_claim,
-                    expected_effect: sub.expected_effect,
-                    model_claimed_risk: None,
-                    confidence: sub.confidence,
-                });
-            }
-            if let Some(reason) = dec.aborted.clone() {
-                let image = dec.image_path.take();
-                let _ = guard.take();
-                drop(guard);
-                if let Some(p) = image {
-                    let _ = std::fs::remove_file(p);
-                }
-                return Err(LcuError::coded(
-                    ErrorCode::WaitingUser,
-                    format!("agent decision aborted: {reason}"),
-                ));
-            }
-            if Instant::now() >= dec.deadline {
-                let image = dec.image_path.take();
-                let _ = guard.take();
-                drop(guard);
-                if let Some(p) = image {
-                    let _ = std::fs::remove_file(p);
-                }
-                return Err(LcuError::coded(
-                    ErrorCode::TaskFailed,
-                    format!(
-                        "agent decision timed out after {}s; fetch a fresh observation with lcu decide",
-                        self.timeout.as_secs()
-                    ),
-                ));
-            }
-            // 250ms slices: keeps abort/timeout responsive without busy-wait.
+            let guard = self.slots.lock().expect("agent slot lock");
             let _ = self.cv.wait_timeout(guard, Duration::from_millis(250));
         }
     }
@@ -292,6 +336,7 @@ mod tests {
             goal: "g".into(),
             step: 0,
             last_action_summary: None,
+            transition_result: None,
         }
     }
 
@@ -311,12 +356,17 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let action = actor
-            .submit("obs_1", r#"{"kind":"semantic","type":"invoke","element_id":"e1"}"#, None, None, None)
+            .submit("obs_1", r#"{"kind":"semantic","type":"invoke","element_id":"e1"}"#, None, None)
             .unwrap();
         assert!(matches!(action, Action::Semantic(_)));
         let proposal = h.join().unwrap().unwrap();
         assert_eq!(proposal.observation_id.0, "obs_1");
         assert!(matches!(proposal.action, Action::Semantic(_)));
+        assert_eq!(
+            proposal.effect.as_ref().map(|e| e.kind),
+            None,
+            "effect passes through as submitted"
+        );
         assert!(actor.pending("obs_1").is_none(), "slot cleared after consume");
     }
 
@@ -344,12 +394,12 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let err = actor
-            .submit("obs_wrong", r#"{"kind":"wait","milliseconds":1}"#, None, None, None)
+            .submit("obs_wrong", r#"{"kind":"wait","milliseconds":1}"#, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("stale"));
         // Waiter still alive and can be satisfied with the right id.
         actor
-            .submit("obs_a", r#"{"kind":"wait","milliseconds":1}"#, None, None, None)
+            .submit("obs_a", r#"{"kind":"wait","milliseconds":1}"#, None, None)
             .unwrap();
         assert!(h.join().unwrap().is_ok());
     }
@@ -375,43 +425,22 @@ mod tests {
     }
 
     #[test]
-    fn replacing_proposal_deletes_old_image() {
-        let actor = Arc::new(AgentActor::with_timeout(Duration::from_secs(60)));
+    fn independent_pending_decisions_do_not_block_or_replace_each_other() {
+        let actor = AgentActor::with_timeout(Duration::from_secs(60));
         let mut obs = sample_obs("obs_i1");
         obs.image_png = Some(b"fake png bytes".to_vec());
-
-        let h1 = {
-            let a = actor.clone();
-            let o = obs.clone();
-            thread::spawn(move || a.propose_action(&o, &ctx()))
-        };
-        let old_img = loop {
-            if let Some(v) = actor.pending("obs_i1") {
-                assert!(v.image_path.is_some(), "image path handed to agent");
-                break v.image_path.unwrap();
-            }
-            thread::sleep(Duration::from_millis(10));
-        };
-        // Second proposal replaces the slot and must delete the first image.
-        let h2 = {
-            let a = actor.clone();
-            let o = sample_obs("obs_i2");
-            thread::spawn(move || a.propose_action(&o, &ctx()))
-        };
-        for _ in 0..100 {
-            if actor.pending("obs_i2").is_some() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        let p1 = h1.join().unwrap().unwrap_err(); // superseded
-        assert!(p1.to_string().contains("superseded"));
-        // Old image file removed; new slot has no image.
-        assert!(!old_img.exists(), "old image deleted on replacement");
-        let v2 = actor.pending("obs_i2").unwrap();
-        assert!(v2.image_path.is_none());
+        actor.begin_decision(&obs, &ctx()).unwrap();
+        actor.begin_decision(&sample_obs("obs_i2"), &ctx()).unwrap();
+        let old_img = actor.pending("obs_i1").unwrap().image_path.unwrap();
+        assert!(actor.pending("obs_i2").is_some());
+        actor
+            .submit("obs_i1", r#"{"kind":"wait","milliseconds":1}"#, None, None)
+            .unwrap();
+        assert!(actor.take_submitted("obs_i1").unwrap().is_some());
+        assert!(!old_img.exists(), "consumed decision deletes its image");
+        assert!(actor.pending("obs_i2").is_some());
         actor.abort_waiting("obs_i2", "test end");
-        let _ = h2.join();
+        assert!(actor.take_submitted("obs_i2").is_err());
     }
 
     #[test]
@@ -432,9 +461,19 @@ mod tests {
         let view = actor.pending("obs_v").unwrap();
         assert!(view.observation.image_png.is_none());
         let err = actor
-            .submit("obs_v", "not json at all", None, None, None)
+            .submit("obs_v", "not json at all", None, None)
             .unwrap_err();
         assert!(err.to_string().contains("parse failed"));
+        // Invalid effect kind is rejected at the trust boundary, not defaulted.
+        let err = actor
+            .submit(
+                "obs_v",
+                r#"{"kind":"wait","milliseconds":1}"#,
+                Some(serde_json::json!({"kind": "harmless"})),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("closed-set consequence"));
         actor.abort_waiting("obs_v", "test end");
         let _ = h.join();
     }

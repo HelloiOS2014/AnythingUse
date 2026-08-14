@@ -239,12 +239,13 @@ fn map_service_error(code: &str, message: &str) -> LcuError {
         "permission_denied" => ErrorCode::PermissionDenied,
         "not_found" | "target_lost" | "action_failed" => ErrorCode::TaskFailed,
         "taken_over" => ErrorCode::WaitingUser,
+        "foreground_required" => ErrorCode::ForegroundRequired,
         "unsupported_capability" => ErrorCode::UnsupportedCapability,
         "invalid_request" => ErrorCode::InvalidRequest,
         "not_implemented" => ErrorCode::NotImplemented,
         _ => ErrorCode::InternalError,
     };
-    LcuError::coded(ec, format!("{code}: {message}"))
+    LcuError::coded(ec, message)
 }
 
 #[cfg(test)]
@@ -260,6 +261,16 @@ mod tests {
         );
         assert!(p.to_string_lossy().ends_with("macos-window.sock")
             || std::env::var("LCU_MACOS_WINDOW_SOCK").is_ok());
+    }
+
+    #[test]
+    fn preserves_foreground_required_from_native_service() {
+        let error = map_service_error("foreground_required", "background input unavailable");
+        assert_eq!(error.code(), ErrorCode::ForegroundRequired);
+        assert_eq!(
+            error.to_string(),
+            "foreground_required: background input unavailable"
+        );
     }
 
 }

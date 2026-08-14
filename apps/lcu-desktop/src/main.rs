@@ -130,6 +130,7 @@ struct TrayApp {
     list_tasks_id: muda::MenuId,
     approvals_id: muda::MenuId,
     decide_id: muda::MenuId,
+    revoke_access_id: muda::MenuId,
 }
 
 impl ApplicationHandler for TrayApp {
@@ -176,121 +177,160 @@ impl ApplicationHandler for TrayApp {
                     }
                 }
             } else if event.id == self.approvals_id {
-                let pending = self.runtime.list_pending_approvals();
+                let pending = self.runtime.list_pending_gates();
                 if pending.is_empty() {
-                    tracing::info!("no pending approvals");
+                    tracing::info!("no pending gates");
                 } else {
                     for p in &pending {
                         tracing::info!(
-                            approval_id = %p.approval_id,
+                            grant_id = %p.grant_id,
+                            kind = ?p.kind,
                             task_id = %p.task_id,
                             target_app = %p.target_app,
-                            action = %p.action_summary,
+                            summary = %p.summary,
                             impact = %p.impact,
                             message = %p.message,
-                            "pending approval (use tray Review & decide)"
+                            "pending gate (use tray Review & decide)"
                         );
                     }
                 }
+            } else if event.id == self.revoke_access_id {
+                let keys = self
+                    .runtime
+                    .list_app_permissions()
+                    .into_iter()
+                    .map(|permission| permission.app_key)
+                    .collect::<Vec<_>>();
+                if let Some(app_key) = revoke_app_access_dialog(&keys) {
+                    match self.runtime.revoke_app_permission(&app_key) {
+                        Ok(true) => tracing::info!(app_key, "GUI: app access revoked"),
+                        Ok(false) => tracing::info!(app_key, "GUI: app access was already absent"),
+                        Err(e) => tracing::warn!(error = %e, "GUI: app access revoke failed"),
+                    }
+                }
             } else if event.id == self.decide_id {
-                // R3: Approve/Deny. R4: Start takeover → (user acts) → Done/Cancel.
-                let pending = self.runtime.list_pending_approvals();
+                // AppAccess: Allow once / Always allow / Deny.
+                // Consequence/Foreground: Approve/Deny.
+                // Takeover (R4): Start takeover → (user acts) → Done/Cancel.
+                let pending = self.runtime.list_pending_gates();
                 match pending.first() {
                     Some(p) => {
-                        if p.requires_takeover {
-                            if !p.takeover_started {
-                                match takeover_start_dialog(p) {
-                                    Some(true) => {
-                                        match self.runtime.begin_takeover_in_gui(&p.approval_id) {
-                                            Ok(()) => tracing::info!(
-                                                approval_id = %p.approval_id,
-                                                "GUI: R4 takeover started (user must finish action)"
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "begin takeover failed")
-                                            }
-                                        }
-                                    }
-                                    Some(false) => {
-                                        match self.runtime.deny_pending_in_gui(&p.approval_id) {
-                                            Ok(()) => tracing::info!(
-                                                approval_id = %p.approval_id,
-                                                "GUI: R4 takeover cancelled"
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "GUI deny failed")
-                                            }
-                                        }
-                                    }
-                                    None => tracing::info!(
-                                        approval_id = %p.approval_id,
-                                        "GUI: R4 start dialog cancelled/failed"
-                                    ),
-                                }
-                            } else {
-                                match takeover_done_dialog(p) {
-                                    Some(true) => {
-                                        match self.runtime.complete_takeover_in_gui(&p.approval_id)
-                                        {
-                                            Ok(()) => tracing::info!(
-                                                approval_id = %p.approval_id,
-                                                "GUI: R4 takeover marked complete; re-observe"
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "complete takeover failed")
-                                            }
-                                        }
-                                    }
-                                    Some(false) => {
-                                        match self.runtime.deny_pending_in_gui(&p.approval_id) {
-                                            Ok(()) => tracing::info!(
-                                                approval_id = %p.approval_id,
-                                                "GUI: R4 takeover cancelled after start"
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "GUI deny failed")
-                                            }
-                                        }
-                                    }
-                                    None => tracing::info!(
-                                        approval_id = %p.approval_id,
-                                        "GUI: R4 done dialog cancelled/failed"
-                                    ),
-                                }
-                            }
-                        } else {
-                            let decision = confirm_pending_dialog(p);
-                            match decision {
-                                Some(true) => {
-                                    match self.runtime.approve_pending_in_gui(&p.approval_id) {
+                        use lcu_core::approval::GateKind;
+                        match p.kind {
+                            GateKind::AppAccess => match app_access_dialog(p) {
+                                Some(decision) => {
+                                    match self.runtime.app_access_in_gui(&p.grant_id, decision) {
                                         Ok(()) => tracing::info!(
-                                            approval_id = %p.approval_id,
-                                            "GUI decision: approved"
+                                            grant_id = %p.grant_id,
+                                            decision = ?decision,
+                                            "GUI: app access decided"
                                         ),
                                         Err(e) => {
-                                            tracing::warn!(error = %e, "GUI approve failed")
-                                        }
-                                    }
-                                }
-                                Some(false) => {
-                                    match self.runtime.deny_pending_in_gui(&p.approval_id) {
-                                        Ok(()) => tracing::info!(
-                                            approval_id = %p.approval_id,
-                                            "GUI decision: denied"
-                                        ),
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "GUI deny failed")
+                                            tracing::warn!(error = %e, "GUI app access failed")
                                         }
                                     }
                                 }
                                 None => tracing::info!(
-                                    approval_id = %p.approval_id,
-                                    "GUI decision: cancelled / dialog failed"
+                                    grant_id = %p.grant_id,
+                                    "GUI: app access dialog cancelled/failed"
                                 ),
+                            },
+                            GateKind::Takeover => {
+                                if !p.takeover_started {
+                                    match takeover_start_dialog(p) {
+                                        Some(true) => {
+                                            match self.runtime.begin_takeover_in_gui(&p.grant_id) {
+                                                Ok(()) => tracing::info!(
+                                                    grant_id = %p.grant_id,
+                                                    "GUI: R4 takeover started (user must finish action)"
+                                                ),
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "begin takeover failed")
+                                                }
+                                            }
+                                        }
+                                        Some(false) => {
+                                            match self.runtime.deny_pending_in_gui(&p.grant_id) {
+                                                Ok(()) => tracing::info!(
+                                                    grant_id = %p.grant_id,
+                                                    "GUI: R4 takeover cancelled"
+                                                ),
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "GUI deny failed")
+                                                }
+                                            }
+                                        }
+                                        None => tracing::info!(
+                                            grant_id = %p.grant_id,
+                                            "GUI: R4 start dialog cancelled/failed"
+                                        ),
+                                    }
+                                } else {
+                                    match takeover_done_dialog(p) {
+                                        Some(true) => {
+                                            match self.runtime.complete_takeover_in_gui(&p.grant_id)
+                                            {
+                                                Ok(()) => tracing::info!(
+                                                    grant_id = %p.grant_id,
+                                                    "GUI: R4 takeover marked complete; re-observe"
+                                                ),
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "complete takeover failed")
+                                                }
+                                            }
+                                        }
+                                        Some(false) => {
+                                            match self.runtime.deny_pending_in_gui(&p.grant_id) {
+                                                Ok(()) => tracing::info!(
+                                                    grant_id = %p.grant_id,
+                                                    "GUI: R4 takeover cancelled after start"
+                                                ),
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "GUI deny failed")
+                                                }
+                                            }
+                                        }
+                                        None => tracing::info!(
+                                            grant_id = %p.grant_id,
+                                            "GUI: R4 done dialog cancelled/failed"
+                                        ),
+                                    }
+                                }
+                            }
+                            GateKind::Consequence | GateKind::Foreground => {
+                                let decision = confirm_pending_dialog(p);
+                                match decision {
+                                    Some(true) => {
+                                        match self.runtime.approve_pending_in_gui(&p.grant_id) {
+                                            Ok(()) => tracing::info!(
+                                                grant_id = %p.grant_id,
+                                                "GUI decision: approved"
+                                            ),
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "GUI approve failed")
+                                            }
+                                        }
+                                    }
+                                    Some(false) => {
+                                        match self.runtime.deny_pending_in_gui(&p.grant_id) {
+                                            Ok(()) => tracing::info!(
+                                                grant_id = %p.grant_id,
+                                                "GUI decision: denied"
+                                            ),
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "GUI deny failed")
+                                            }
+                                        }
+                                    }
+                                    None => tracing::info!(
+                                        grant_id = %p.grant_id,
+                                        "GUI decision: cancelled / dialog failed"
+                                    ),
+                                }
                             }
                         }
                     }
-                    None => tracing::info!("no pending approval to decide"),
+                    None => tracing::info!("no pending gate to decide"),
                 }
             }
         }
@@ -308,11 +348,13 @@ fn run_tray(
     let list_tasks = MenuItem::new("List task queue", true, None);
     let approvals = MenuItem::new("List pending approvals", true, None);
     let decide = MenuItem::new("Review & decide pending…", true, None);
+    let revoke_access = MenuItem::new("Revoke app access…", true, None);
     let quit = MenuItem::new("Quit Local Computer Use", true, None);
     menu.append(&doctor)?;
     menu.append(&list_tasks)?;
     menu.append(&approvals)?;
     menu.append(&decide)?;
+    menu.append(&revoke_access)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
@@ -334,6 +376,7 @@ fn run_tray(
         list_tasks_id: list_tasks.id().clone(),
         approvals_id: approvals.id().clone(),
         decide_id: decide.id().clone(),
+        revoke_access_id: revoke_access.id().clone(),
     };
 
     let event_loop = EventLoop::new().context("create event loop")?;
@@ -383,16 +426,16 @@ fn default_icon() -> Icon {
     Icon::from_rgba(rgba, size, size).expect("icon")
 }
 
-/// Local confirmation dialog: shows task, app, action, impact; Approve / Deny.
-/// Returns Some(true)=Approve, Some(false)=Deny, None=cancelled/failed.
-fn confirm_pending_dialog(p: &lcu_runtime::ApprovalUiLaunch) -> Option<bool> {
+/// Local confirmation dialog: shows task, app, consequence summary, impact;
+/// Approve / Deny. Returns Some(true)=Approve, Some(false)=Deny, None=cancelled/failed.
+fn confirm_pending_dialog(p: &lcu_runtime::GateUiLaunch) -> Option<bool> {
     let body = format!(
-        "Task: {}\nApp: {}\nAction: {}\nImpact: {}\n\n{}",
-        p.task_id, p.target_app, p.action_summary, p.impact, p.message
+        "Task: {}\nApp: {}\nConsequence: {}\nImpact: {}\n\n{}",
+        p.task_id, p.target_app, p.summary, p.impact, p.message
     );
     run_osascript_choice(
         &body,
-        "Local Computer Use — Confirm action",
+        "Local Computer Use — Confirm consequence",
         "Deny",
         "Approve",
         "approve",
@@ -400,11 +443,76 @@ fn confirm_pending_dialog(p: &lcu_runtime::ApprovalUiLaunch) -> Option<bool> {
     )
 }
 
-/// R4 step 1: begin human takeover (does not complete the action).
-fn takeover_start_dialog(p: &lcu_runtime::ApprovalUiLaunch) -> Option<bool> {
+/// App access dialog: Allow once / Always allow / Deny (3-button choice).
+fn app_access_dialog(p: &lcu_runtime::GateUiLaunch) -> Option<lcu_core::approval::AppAccessDecision> {
     let body = format!(
-        "R4 human takeover required.\n\nTask: {}\nApp: {}\nAction: {}\nImpact: {}\n\n{}\n\nYou must perform this action yourself. Click Start takeover, do the work, then return here and mark Done.",
-        p.task_id, p.target_app, p.action_summary, p.impact, p.message
+        "First control of this app needs your decision.\n\nTask: {}\nApp: {}\n\n{}",
+        p.task_id, p.target_app, p.message
+    );
+    let script = format!(
+        r#"try
+  set r to display dialog "{escaped}" with title "Local Computer Use — App access" buttons {{"Deny", "Always allow", "Allow once"}} default button "Allow once" cancel button "Deny" with icon caution
+  if button returned of r is "Allow once" then
+    return "allow_once"
+  else if button returned of r is "Always allow" then
+    return "always_allow"
+  else
+    return "deny"
+  end if
+on error number -128
+  return "deny"
+end try"#,
+        escaped = body
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(lcu_core::approval::AppAccessDecision::Deny);
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    if text.contains("allow_once") {
+        Some(lcu_core::approval::AppAccessDecision::AllowOnce)
+    } else if text.contains("always_allow") {
+        Some(lcu_core::approval::AppAccessDecision::AlwaysAllow)
+    } else {
+        Some(lcu_core::approval::AppAccessDecision::Deny)
+    }
+}
+
+fn revoke_app_access_dialog(keys: &[String]) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let script = r#"on run argv
+set picked to choose from list argv with title "AnythingUse — Revoke app access" with prompt "Choose an application identity to revoke:" without multiple selections allowed and empty selection allowed
+if picked is false then return ""
+return item 1 of picked
+end run"#;
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .arg("--")
+        .args(keys)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let selected = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    keys.iter().find(|key| **key == selected).cloned()
+}
+
+/// R4 step 1: begin human takeover (does not complete the action).
+fn takeover_start_dialog(p: &lcu_runtime::GateUiLaunch) -> Option<bool> {
+    let body = format!(
+        "R4 human takeover required.\n\nTask: {}\nApp: {}\nConsequence: {}\nImpact: {}\n\n{}\n\nYou must perform this action yourself. Click Start takeover, do the work, then return here and mark Done.",
+        p.task_id, p.target_app, p.summary, p.impact, p.message
     );
     run_osascript_choice(
         &body,
@@ -417,10 +525,10 @@ fn takeover_start_dialog(p: &lcu_runtime::ApprovalUiLaunch) -> Option<bool> {
 }
 
 /// R4 step 2: human finished (or cancelled) after start.
-fn takeover_done_dialog(p: &lcu_runtime::ApprovalUiLaunch) -> Option<bool> {
+fn takeover_done_dialog(p: &lcu_runtime::GateUiLaunch) -> Option<bool> {
     let body = format!(
-        "R4 takeover in progress.\n\nTask: {}\nApp: {}\nAction: {}\n\nClick Done only after you finished the action yourself. The agent will re-observe and will not auto-execute this action.",
-        p.task_id, p.target_app, p.action_summary
+        "R4 takeover in progress.\n\nTask: {}\nApp: {}\nConsequence: {}\n\nClick Done only after you finished the action yourself. The agent will re-observe and will not auto-execute this action.",
+        p.task_id, p.target_app, p.summary
     );
     run_osascript_choice(
         &body,

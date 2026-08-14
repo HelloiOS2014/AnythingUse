@@ -140,7 +140,7 @@ def load_model() -> None:
 
 ACTION_SCHEMA = """
 Return ONLY one JSON object (no markdown) with this shape:
-{"action": <Action>, "effect_claim": string|null, "expected_effect": string|null, "confidence": number}
+{"action": <Action>, "effect": {"kind": string, "summary": string|null}, "confidence": number}
 
 Action must be one of:
 {"kind":"wait","milliseconds":500}
@@ -149,31 +149,37 @@ Action must be one of:
 {"kind":"request_user","reason":"..."}
 
 Rules:
-- effect_claim is required for targeted click/key actions and must be exactly one of:
-  focus, open, search, select, navigate, scroll, edit, send, submit, upload,
-  delete, publish, confirm, auth, credential, security, finance, pay, purchase.
-- expected_effect briefly names the visible evidence expected after the action.
+- effect is REQUIRED for every executable action and its kind must be exactly one
+  closed value: observe, navigate, local_edit, external_communication,
+  external_submit, destructive, permission_change, financial, credential, unknown.
+  Classify the REAL consequence of the action, not the input primitive:
+  a normal click to open/search/select/scroll is navigate; typing non-sensitive
+  text into a local draft is local_edit; sending, submitting, uploading,
+  deleting, paying or entering credentials are their own kinds.
+- effect.summary is a short human-readable explanation shown to the user;
+  never put passwords, verification codes, secrets or full sensitive text in it.
+- When you cannot determine the real consequence, use {"kind":"unknown",...} —
+  Runtime will stop and ask the user.
 - Never invent element ids.
-- Avoid destructive actions (delete/trash/pay/send) unless goal requires.
 - One action only.
 - Do NOT emit observe. Each request already includes the latest screenshot and elements.
 - When the goal is already satisfied or verifiable from the screenshot/title/elements, emit {"kind":"done","summary":"..."}.
 - If an element value already contains the text the goal asks for, emit done immediately — do not set_value again.
 - Emit done only when the fresh observation proves every part of the entire Goal is complete and no work remains. Last action is history: one successful set_value or one field never proves the whole Goal. Never repeat a satisfied action; take the next unfinished action, or request_user/fail if blocked.
 - Do not repeat the same action with the same arguments. Pick done/fail/wait or a different element.
+- The target app and window are fixed by the task (--app); never propose actions
+  for a different app or window, and never infer an app from the goal text.
 """
 
 TARGETED_ACTIONS = """
 When Elements is empty, these screenshot-targeted actions are also allowed:
 {"kind":"targeted","type":"click","x":0.5,"y":0.5,"button":"left"}
-{"kind":"targeted","type":"type_text","text":"..."}
-{"kind":"targeted","type":"key_combo","keys":["RETURN"]}
+{"kind":"targeted","type":"type_text","x":0.5,"y":0.5,"text":"..."}
+{"kind":"targeted","type":"key_combo","keys":["command","a"]}
 Coordinates are normalized to the current window screenshot: x=0 left, x=1 right,
-y=0 top, y=1 bottom. Coordinate click+type is not available on macOS because
-it cannot be isolated from the user's keyboard focus. Use plain type_text only
-after an approved click and a fresh screenshot proves the intended field is focused.
-On macOS, the only supported key_combo is exactly ["RETURN"] or ["ENTER"].
-Use RETURN after filling a search/filter field when results require submission.
+y=0 top, y=1 bottom. Screenshot-only type_text must include the editable control's
+fresh x/y so native can click and type atomically. Coordinates, keys and clicks
+are just action expression: declare the REAL consequence in effect.
 """
 
 
@@ -217,6 +223,7 @@ def build_prompt(
     *,
     step: int | None = None,
     last_action_summary: str | None = None,
+    transition_result: str | None = None,
 ) -> str:
     elements = observation.get("elements") or []
     compact = []
@@ -233,26 +240,19 @@ def build_prompt(
             }
         )
     element_ids = [str(e["id"]) for e in compact if e.get("id")]
-    is_chrome = "chrome" in str(observation.get("app_id") or "").lower()
+    # Navigation is a shared semantic action; the surface operator decides
+    # whether it is supported for the resolved target. No app/bundle specials.
     navigation_action = (
-        '\nChrome navigation is allowed with an explicit HTTP(S) URL:\n'
+        '\nNavigation with an explicit HTTP(S) URL:\n'
         '{"kind":"semantic","type":"navigate","url":"https://example.com"}'
-        if is_chrome
-        else ""
     )
     if element_ids:
         example_id = json.dumps(element_ids[0], ensure_ascii=False)
-        focus_action = (
-            f'{{"kind":"semantic","type":"focus","element_id":{example_id}}}\n'
-            if is_chrome
-            else ""
-        )
         semantic_actions = (
             "Semantic actions are also allowed; element_id must be copied from "
             f"Valid element_ids={json.dumps(element_ids, ensure_ascii=False)}:\n"
             f'{{"kind":"semantic","type":"invoke","element_id":{example_id}}}\n'
             f'{{"kind":"semantic","type":"set_value","element_id":{example_id},"value":"..."}}\n'
-            f"{focus_action}"
             '{"kind":"semantic","type":"scroll","element_id":null,"delta_x":0,"delta_y":-0.3}\n'
             "Elements contains usable AX controls, so targeted click/type_text is "
             "forbidden for this observation. Use semantic actions. After setting "
@@ -263,7 +263,7 @@ def build_prompt(
     else:
         semantic_actions = (
             "Elements is empty. Element-bound semantic actions are forbidden because no valid "
-            "element_id exists. Use targeted click/type_text from the screenshot, "
+            "element_id exists. Only a targeted action may be attempted from the screenshot; "
             "or fail/request_user if safe progress is impossible.\n"
             f"{TARGETED_ACTIONS}{navigation_action}"
         )
@@ -273,6 +273,13 @@ def build_prompt(
         if last_action_summary
         else "Last action: (none — first step)\n"
     )
+    transition_line = (
+        f"Transition: {transition_result}\n"
+        "The screen may have changed because of that transition; decide from the "
+        "fresh observation below, do not repeat the previously confirmed action.\n"
+        if transition_result
+        else ""
+    )
     # Schema first so early tokens are valid JSON even if generation is cut short.
     return (
         f"{ACTION_SCHEMA}\n"
@@ -280,6 +287,7 @@ def build_prompt(
         f"Goal: {goal}\n"
         f"{step_line}"
         f"{last_line}"
+        f"{transition_line}"
         f"Current observation is fresh (screenshot + elements below).\n"
         f"App: {observation.get('app_id')} title={observation.get('window_title')}\n"
         f"Elements:\n{json.dumps(compact, ensure_ascii=False)}\n"
@@ -440,11 +448,15 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
     last_action_summary = req.get("last_action_summary")
     if last_action_summary is not None:
         last_action_summary = str(last_action_summary)[:240]
+    transition_result = req.get("transition_result")
+    if transition_result is not None:
+        transition_result = str(transition_result)[:240]
     prompt = build_prompt(
         goal,
         observation,
         step=step,
         last_action_summary=last_action_summary,
+        transition_result=transition_result,
     )
     # Single total wall budget for one propose (attempt + optional JSON retry).
     # Retry must consume remaining time only — never re-grant a full 180s.
@@ -558,8 +570,7 @@ def propose(req: dict[str, Any]) -> dict[str, Any]:
             "ok": True,
             "raw_text": text,
             "action": action,
-            "effect_claim": parsed.get("effect_claim"),
-            "expected_effect": parsed.get("expected_effect"),
+            "effect": parsed.get("effect"),
             "confidence": parsed.get("confidence", 0.5),
             "latency_ms": latency_ms,
             "load_ms": _load_ms,
@@ -622,20 +633,33 @@ def handle(req: dict[str, Any]) -> dict[str, Any]:
 def main() -> None:
     if "--self-check" in sys.argv:
         parsed = extract_json(
-            '{"action":"semantic","type":"navigate","url":"https://example.com/path"}'
+            '{"action":{"kind":"semantic","type":"navigate","url":"https://example.com/path"},'
+            '"effect":{"kind":"navigate","summary":"open page"}}'
         )
         assert parsed["action"] == {
             "kind": "semantic",
             "type": "navigate",
             "url": "https://example.com/path",
         }
+        assert parsed["effect"] == {"kind": "navigate", "summary": "open page"}
+        # No bundle-id special-casing in the prompt: navigation hint is shared.
         sample = {"elements": [{"id": "e1", "role": "AXTextField"}]}
         mac_prompt = build_prompt("fill field", {**sample, "app_id": "com.apple.TextEdit"})
         chrome_prompt = build_prompt("fill field", {**sample, "app_id": "com.google.Chrome"})
-        assert '"type":"focus"' not in mac_prompt
-        assert '"type":"focus"' in chrome_prompt
+        assert "navigate" in mac_prompt and "navigate" in chrome_prompt
+        assert '"kind":"exclusive"' not in mac_prompt
+        assert '"kind":"exclusive"' not in chrome_prompt
+        # Transition result is rendered and warns against repeating the old action.
+        transition_prompt = build_prompt(
+            "fill field",
+            {"app_id": "com.apple.TextEdit", "elements": []},
+            transition_result="consequence confirmed; re-observe",
+        )
+        assert "Transition:" in transition_prompt
+        assert "do not repeat the previously confirmed action" in transition_prompt
+        # Screenshot-only key_combo is now allowed as an input primitive.
         mac_empty_prompt = build_prompt("fill field", {"app_id": "com.apple.TextEdit", "elements": []})
-        assert 'only supported key_combo is exactly ["RETURN"] or ["ENTER"]' in mac_empty_prompt
+        assert '"type":"key_combo"' in mac_empty_prompt
         print("parser/prompt self-check ok")
         return
     log(f"qwen3_vl_worker starting model_dir={MODEL_DIR}")

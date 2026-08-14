@@ -1,8 +1,40 @@
 //! Strict action validation against the current observation (M4).
+//!
+//! Trust boundary (realignment §3.3): every executable proposal must declare a
+//! closed-set `effect`; missing or invalid values are rejected here, never
+//! mapped to a hidden default business policy.
 
-use lcu_core::action::{is_http_navigation_url, Action, SemanticAction, TargetedInput};
+use lcu_core::action::{is_http_navigation_url, Action, EffectClaim, SemanticAction, TargetedInput};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 use lcu_core::observation::{AppObservation, ObservationId};
+
+/// Validate the closed-set effect declaration of an executable proposal.
+///
+/// `EffectKind::Unknown` is a legal declaration (it leads to stop-and-ask, not
+/// auto-execution); a missing effect for an executable action is not.
+pub fn validate_effect(action: &Action, effect: Option<&EffectClaim>) -> LcuResult<()> {
+    let executable = matches!(action, Action::Semantic(_) | Action::Targeted(_));
+    let Some(effect) = effect else {
+        if executable {
+            return Err(LcuError::coded(
+                ErrorCode::InvalidRequest,
+                "executable action requires a closed-set effect declaration",
+            ));
+        }
+        return Ok(());
+    };
+    // `EffectKind` is a closed enum; serde rejects unknown strings at parse time.
+    let _ = effect.kind;
+    if let Some(summary) = &effect.summary {
+        if summary.len() > 200 {
+            return Err(LcuError::coded(
+                ErrorCode::InvalidRequest,
+                "effect summary too long (max 200 chars)",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Validate a proposed action before Runtime execution.
 pub fn validate_action(obs: &AppObservation, action: &Action) -> LcuResult<()> {
@@ -43,7 +75,7 @@ pub fn validate_action(obs: &AppObservation, action: &Action) -> LcuResult<()> {
             let _ = sem;
             Ok(())
         }
-        Action::Targeted(t) | Action::Exclusive(t) => validate_targeted(t),
+        Action::Targeted(t) => validate_targeted(t),
     }
 }
 
@@ -69,7 +101,7 @@ fn validate_targeted(t: &TargetedInput) -> LcuResult<()> {
             }
             Ok(())
         }
-        TargetedInput::TypeText { text } => {
+        TargetedInput::TypeText { text, x, y } => {
             if text.is_empty() {
                 return Err(LcuError::coded(
                     ErrorCode::InvalidRequest,
@@ -81,6 +113,20 @@ fn validate_targeted(t: &TargetedInput) -> LcuResult<()> {
                     ErrorCode::InvalidRequest,
                     "type_text too long",
                 ));
+            }
+            if x.is_some() != y.is_some() {
+                return Err(LcuError::coded(
+                    ErrorCode::InvalidRequest,
+                    "type_text requires both x and y or neither",
+                ));
+            }
+            if let (Some(x), Some(y)) = (x, y) {
+                if !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) {
+                    return Err(LcuError::coded(
+                        ErrorCode::InvalidRequest,
+                        format!("type_text coordinates out of bounds: ({x},{y})"),
+                    ));
+                }
             }
             Ok(())
         }
@@ -183,6 +229,7 @@ mod tests {
                 actions: vec!["press".into()],
             }],
             transform_id: TransformId("t".into()),
+            surface_scope: None,
             image_hash: None,
             capture_backend: None,
             image_png: None,

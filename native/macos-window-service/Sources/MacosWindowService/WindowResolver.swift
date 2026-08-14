@@ -135,6 +135,27 @@ enum WindowResolver {
         (try? resolve(pid: pid, windowID: windowID)) != nil
     }
 
+    static func windowAtScreenPoint(_ point: CGPoint) -> (pid_t, CGWindowID)? {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for info in raw {
+            guard (info[kCGWindowLayer as String] as? Int ?? 0) == 0,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let windowID = info[kCGWindowNumber as String] as? UInt32,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = bounds["X"] as? CGFloat,
+                  let y = bounds["Y"] as? CGFloat,
+                  let width = bounds["Width"] as? CGFloat,
+                  let height = bounds["Height"] as? CGFloat,
+                  CGRect(x: x, y: y, width: width, height: height).contains(point)
+            else { continue }
+            return (pid, CGWindowID(windowID))
+        }
+        return nil
+    }
+
     /// CGWindowList is front-to-back. Restricting that order to one process lets
     /// application-scoped AX hit-testing prove which same-process window owns a point,
     /// even when the app omits AXWindowNumber and usable AX window parents.

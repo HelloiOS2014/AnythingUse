@@ -10,15 +10,15 @@ scenario.
 
 Execution surfaces:
 
-- **macOS apps** — strict window-targeted control via `macos-window-service`. The Runtime does not activate the target window; user takeover of the same window pauses the task.
+- **macOS apps** — strict window-targeted control via `macos-window-service`. Choose `--control-mode auto|background_only|foreground`; `auto` prefers background and may request a task-scoped foreground grant. The agent never switches back to the previous app. Agent think time suspends native ownership; no-activation resume requires the same untouched foreground window, and real user input pauses automatically. Consequences use separate one-time confirmation or takeover gates.
 - **Chrome** — real Chrome Extension + Native Messaging + debugger/CDP on an inactive background task tab (not Playwright, not a second browser). User tabs are not reactivated when a task ends.
 
-Tasks enter one serial FIFO queue. `waiting_user` and user-paused tasks release the execution slot. An action receipt is not completion: `succeeded` requires an explicit model `Done` followed by a successful re-observation of the target.
+Tasks enter one serial FIFO queue. `waiting_actor` and paused tasks release the global execution slot; an Agent continuation keeps only its strict target reservation. An action receipt is not completion: `succeeded` requires explicit `Done` followed by successful target re-observation.
 
 ## Requirements
 
 - macOS on Apple Silicon recommended
-- Screen Recording + Accessibility for the **macos-window-service** / `lcu-desktop` host
+- Screen Recording + Accessibility + Input Monitoring for the **macos-window-service** / `lcu-desktop` host (Input Monitoring distinguishes real user HID from tagged AnythingUse input)
 - Optional Chrome surface: install native host + load unpacked extension (see below)
 - Optional: local Qwen3-VL weights under `models/Qwen3-VL-4B-Instruct` for VLM mode
 
@@ -80,25 +80,28 @@ default above). Do not load the repository source directory into Chrome.
 
 ## First run
 
-1. Grant Screen Recording and Accessibility when prompted (for the window service binary / host app).
+1. Grant Screen Recording, Accessibility, and Input Monitoring when prompted (for the window service binary / host app), then restart AnythingUse after changing TCC permissions.
 2. `lcu doctor --json` — check permissions (`screen_recording`/`accessibility`/`input_monitoring`) and surface connectivity in `notes` (`mac_window` / `chrome_tab`).
 3. Choose one explicit decision path:
    - Local model installed: `lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json`.
    - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`.
-4. If approval is required, use the menu-bar / desktop confirmation UI (not the CLI).
+4. If a gate is required, use the menu-bar / desktop UI (not the CLI). App access, foreground activation, and consequence confirmation/takeover are separate. Foreground approval may bring the exact window forward; the old proposal is discarded and the same Actor receives a fresh observation.
 
-Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `lcu watch`, or `lcu result` to follow it. `waiting_user` requires human action; resume a user-paused task only after the user is ready.
+Persistent app access can be removed from the menu-bar item **Revoke app access…**.
+
+Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `lcu watch`, or `lcu result` to follow it. `waiting_actor` may be waiting for a human gate or Agent continuation; resume a paused task only after the user is ready.
 
 ## Decision maker
 
 The decision maker is pluggable; both receive the same data surface (compact elements + scaled screenshot) and their proposals flow through the same safety pipeline.
 
-- **Agent-driven (product default when `LCU_VISION_ACTOR` is unset/`auto`)**: submit with `--actor agent`, then drive the loop with `lcu decide <task-id> --wait --json` (fetch observation) and `lcu act <task-id> --observation-id <obs> --action '<json>'` (submit a decision). Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
+- **Agent-driven (product default when `LCU_VISION_ACTOR` is unset/`auto`)**: submit with `--actor agent`, then drive the loop with `lcu decide <task-id> --wait --json` and `lcu act <task-id> --observation-id <obs> --action '<json>' --effect '<json>'`. Executable actions require the shared closed-set effect claim. Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
 - **Local VLM (optional)**: submit with `--actor vlm`; `lcu-desktop` runs the Qwen3-VL subprocess automatically. Requires the weights under `models/Qwen3-VL-4B-Instruct` (see above).
 
 For Chrome, put the destination in the high-level goal. An external Agent may
 submit `{"kind":"semantic","type":"navigate","url":"https://example.com/"}`
-through `lcu act` from a current observation; navigation accepts only explicit
+with `--effect '{"kind":"navigate","summary":"Open example.com"}'` through
+`lcu act` from a current observation; navigation accepts only explicit
 `http://` or `https://` URLs with a host and is not a macOS-window action.
 
 Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).

@@ -31,6 +31,12 @@ pub enum PermissionFlag {
 
 /// Unified platform capability surface used by Runtime only.
 pub trait PlatformBackend: Send + Sync {
+    /// Optional product-surface capacity key reserved before target resolution.
+    /// Backends returning the same key are serialized while unrelated surfaces run.
+    fn serial_surface_key(&self, _selector: &AppSelector) -> Option<String> {
+        None
+    }
+
     fn resolve_target(&self, selector: &AppSelector) -> LcuResult<AppTarget>;
 
     fn observe(&self, target: &AppTarget) -> LcuResult<AppObservation>;
@@ -47,21 +53,45 @@ pub trait PlatformBackend: Send + Sync {
         action: &TargetedInput,
     ) -> LcuResult<ActionReceipt>;
 
-    fn perform_exclusive_input(
-        &self,
-        target: &AppTarget,
-        action: &TargetedInput,
-    ) -> LcuResult<ActionReceipt>;
-
     /// Report backend control state for `target` (`None` / `TakenOver` / `TargetLost`).
     fn detect_user_conflict(&self, target: &AppTarget) -> LcuResult<ControlState>;
 
     fn permission_state(&self) -> LcuResult<PermissionState>;
 
+    /// Stable identity used by persistent app-access decisions.
+    fn stable_app_identity(&self, target: &AppTarget) -> LcuResult<String> {
+        Ok(target.app_id.clone())
+    }
+
+    /// Arm/disarm real-user HID takeover detection for this exact target.
+    fn set_takeover_watch(&self, _target: &AppTarget, _active: bool) -> LcuResult<()> {
+        Ok(())
+    }
+
+    /// Monotonic local-login/session generation. Zero means unsupported.
+    fn control_epoch(&self) -> LcuResult<u64> {
+        Ok(0)
+    }
+
     /// Mark that the product worker currently owns control of `target`.
     fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
         let _ = (target, active);
         Ok(())
+    }
+
+    /// Temporarily release native foreground ownership while preserving the
+    /// task's resumable session state.
+    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+        self.set_agent_session(target, false)
+    }
+
+    /// Resume only if the exact window is still foreground and untouched.
+    /// Implementations must never activate an app here.
+    fn resume_agent_session(&self, _target: &AppTarget) -> LcuResult<()> {
+        Err(LcuError::coded(
+            ErrorCode::ForegroundRequired,
+            "foreground session cannot resume without a new approval",
+        ))
     }
 
     /// Bind product-loop goal/task context so surface adapters can claim Chrome tabs.
@@ -73,6 +103,7 @@ pub trait PlatformBackend: Send + Sync {
     /// Release backend ownership of `target` (complete / cancel / fail / takeover).
     fn release(&self, target: &AppTarget) -> LcuResult<()> {
         let _ = self.set_agent_session(target, false);
+        let _ = self.set_takeover_watch(target, false);
         Ok(())
     }
 
@@ -130,17 +161,6 @@ impl PlatformBackend for NullBackend {
         Err(LcuError::coded(
             ErrorCode::NotImplemented,
             "NullBackend blocks targeted input",
-        ))
-    }
-
-    fn perform_exclusive_input(
-        &self,
-        _target: &AppTarget,
-        _action: &TargetedInput,
-    ) -> LcuResult<ActionReceipt> {
-        Err(LcuError::coded(
-            ErrorCode::NotImplemented,
-            "NullBackend blocks exclusive input",
         ))
     }
 

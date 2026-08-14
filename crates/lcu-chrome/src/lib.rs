@@ -25,9 +25,7 @@ use lcu_core::observation::{
     AppObservation, AppTarget, ElementNode, ModelSize, ObservationId, Rect, TransformId,
 };
 use lcu_core::risk::RiskLevel;
-use lcu_core::surface::{
-    action_is_surface_applicable, ChromeTab, ControlState, ControlTarget,
-};
+use lcu_core::surface::{ChromeTab, ControlState, ControlTarget};
 use lcu_core::task::{ActionReceipt, TaskId};
 use lcu_core::types::Frame;
 use serde::{Deserialize, Serialize};
@@ -265,18 +263,6 @@ impl ChromeTabSurface {
         self.last_observation.as_ref()
     }
 
-    /// Whether this surface should handle a goal/app selector for Chrome.
-    pub fn is_chrome_selector(app_id: Option<&str>, goal: &str) -> bool {
-        let g = goal.to_lowercase();
-        if let Some(id) = app_id {
-            let idl = id.to_lowercase();
-            if idl.contains("chrome") || idl.contains("com.google.chrome") {
-                return true;
-            }
-        }
-        g.contains("chrome") || g.contains("浏览器") || g.contains("browser")
-    }
-
     /// Claim a background task tab (extension holds debugger/tab lease).
     pub fn claim(
         &mut self,
@@ -329,13 +315,6 @@ impl ChromeTabSurface {
 
     /// Perform a P3 Action on the leased tab.
     pub fn act(&mut self, action: &Action) -> LcuResult<ActionReceipt> {
-        if !action_is_surface_applicable(action) {
-            return Err(LcuError::coded(
-                ErrorCode::UnsupportedCapability,
-                "action not applicable on ChromeTab surface (e.g. exclusive input)",
-            ));
-        }
-
         // Local control-session terminal actions do not require extension auto-control
         // beyond release semantics.
         match action {
@@ -352,12 +331,6 @@ impl ChromeTabSurface {
             Action::Observe => {
                 let _ = self.observe()?;
                 return Ok(receipt(action, true, Some("observed")));
-            }
-            Action::Exclusive(_) => {
-                return Err(LcuError::coded(
-                    ErrorCode::UnsupportedCapability,
-                    "exclusive input is not applicable on ChromeTab surface",
-                ));
             }
             _ => {}
         }
@@ -516,7 +489,7 @@ fn chrome_tab_from_claim(result: &Value) -> LcuResult<ChromeTab> {
         let profile = ct
             .get("profile")
             .and_then(|v| v.as_str())
-            .unwrap_or("Default")
+            .ok_or_else(|| LcuError::coded(ErrorCode::TaskFailed, "claim missing profile key"))?
             .to_string();
         let tab_id = ct
             .get("tab_id")
@@ -538,7 +511,7 @@ fn chrome_tab_from_claim(result: &Value) -> LcuResult<ChromeTab> {
         let profile = lease
             .get("profile")
             .and_then(|v| v.as_str())
-            .unwrap_or("Default")
+            .ok_or_else(|| LcuError::coded(ErrorCode::TaskFailed, "lease missing profile key"))?
             .to_string();
         return Ok(ChromeTab::new(profile, tab_id));
     }
@@ -577,6 +550,14 @@ fn map_observe_result(result: &Value) -> LcuResult<AppObservation> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let profile = chrome
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LcuError::coded(ErrorCode::TaskFailed, "observe missing profile key"))?;
+    let page_url = obs
+        .get("page_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LcuError::coded(ErrorCode::TaskFailed, "observe missing page_url"))?;
 
     let frame = obs.get("window_frame").cloned().unwrap_or(json!({}));
     let model = obs.get("model_size").cloned().unwrap_or(json!({}));
@@ -628,6 +609,22 @@ fn map_observe_result(result: &Value) -> LcuResult<AppObservation> {
         })
         .unwrap_or_default();
 
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let image_png = obs
+        .get("image_png_b64")
+        .and_then(|v| v.as_str())
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .filter(|bytes| !bytes.is_empty())
+        .ok_or_else(|| {
+            LcuError::coded(
+                ErrorCode::TaskFailed,
+                "chrome observation missing real screenshot (image_png_b64 empty/absent); \
+                 reload the unpacked LCU Chrome extension (version mismatch or CDP capture failed)",
+            )
+        })?;
+    let image_hash = hex::encode(Sha256::digest(&image_png));
+
     Ok(AppObservation {
         observation_id: ObservationId::new(),
         timestamp_ms: Utc::now().timestamp_millis(),
@@ -651,7 +648,8 @@ fn map_observe_result(result: &Value) -> LcuResult<AppObservation> {
         },
         elements,
         transform_id: TransformId::new(),
-        image_hash: None,
+        surface_scope: Some(format!("chrome:profile:{profile}:tab:{tab_id}:url:{page_url}")),
+        image_hash: Some(image_hash),
         capture_backend: Some(
             obs.get("capture_backend")
                 .and_then(|v| v.as_str())
@@ -662,24 +660,7 @@ fn map_observe_result(result: &Value) -> LcuResult<AppObservation> {
         // Never fabricate a placeholder PNG — that masks stale extension builds
         // and broken observation paths as valid VLM input. Fail closed so the
         // operator reloads the unpacked extension instead of burning step budget.
-        image_png: {
-            use base64::Engine as _;
-            let decoded = obs
-                .get("image_png_b64")
-                .and_then(|v| v.as_str())
-                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-                .filter(|b| !b.is_empty());
-            match decoded {
-                Some(png) => Some(png),
-                None => {
-                    return Err(LcuError::coded(
-                        ErrorCode::TaskFailed,
-                        "chrome observation missing real screenshot (image_png_b64 empty/absent); \
-                         reload the unpacked LCU Chrome extension (version mismatch or CDP capture failed)",
-                    ));
-                }
-            }
-        },
+        image_png: Some(image_png),
     })
 }
 
@@ -706,7 +687,6 @@ fn receipt(action: &Action, success: bool, message: Option<&str>) -> ActionRecei
     let capability_used = match action {
         Action::Semantic(_) => CapabilityLevel::Semantic,
         Action::Targeted(_) => CapabilityLevel::Targeted,
-        Action::Exclusive(_) => CapabilityLevel::Exclusive,
         _ => CapabilityLevel::Semantic,
     };
     ActionReceipt {
@@ -738,28 +718,6 @@ pub fn control_target_for_tab(tab: &ChromeTab) -> ControlTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chrome_selector_detection() {
-        assert!(ChromeTabSurface::is_chrome_selector(
-            Some("com.google.Chrome"),
-            "open settings"
-        ));
-        assert!(ChromeTabSurface::is_chrome_selector(
-            None,
-            "use Chrome to search"
-        ));
-        assert!(!ChromeTabSurface::is_chrome_selector(
-            Some("com.apple.finder"),
-            "open downloads folder"
-        ));
-    }
-
-    #[test]
-    fn exclusive_not_applicable() {
-        let a = Action::Exclusive(TargetedInput::TypeText { text: "x".into() });
-        assert!(!action_is_surface_applicable(&a));
-    }
 
     #[test]
     fn navigate_uses_existing_rpc() {

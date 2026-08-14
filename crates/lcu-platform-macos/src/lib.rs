@@ -5,8 +5,7 @@
 //! - Observation: window screenshot, AX state, stable `MacWindow(pid, window_id)`
 //! - Actions: AX semantic + PID/window directed input (no real mouse move)
 //! - Same-window user takeover → `ControlState::TakenOver`
-//! - Removed: frontmost-app conflict model, TextEdit AppleScript specials, global HID
-//!   non-exclusive fallbacks
+//! - Removed: frontmost-app conflict model, TextEdit AppleScript specials, global HID fallbacks
 
 pub mod client;
 
@@ -34,7 +33,7 @@ pub struct MacosBackend {
     /// When true, refuse real OS effects (unit tests / dry-run).
     pub skeleton_only: bool,
     client: NativeClient,
-    /// Last resolved window frame for exclusive/targeted mapping fallbacks.
+    /// Last resolved window frame for targeted coordinate mapping.
     last_frame: Mutex<Option<Frame>>,
 }
 
@@ -205,6 +204,14 @@ impl PlatformBackend for MacosBackend {
                 "macOS semantic observation unavailable; using screenshot-only observation"
             );
         }
+        if let Some(error) = v.get("capture_error").and_then(|x| x.as_str()) {
+            tracing::warn!(
+                pid = target.pid,
+                window_id = target.window_id,
+                error,
+                "macOS screen capture failed; screenshot unavailable"
+            );
+        }
 
         // Surface backend control state immediately on observe (no multi-layer session).
         if let Some(cs) = v.get("control_state").and_then(|c| c.as_str()) {
@@ -272,6 +279,7 @@ impl PlatformBackend for MacosBackend {
             model_size,
             elements,
             transform_id: TransformId::new(),
+            surface_scope: None,
             image_hash,
             capture_backend,
             image_png,
@@ -342,20 +350,6 @@ impl PlatformBackend for MacosBackend {
         ))
     }
 
-    fn perform_exclusive_input(
-        &self,
-        _target: &AppTarget,
-        _action: &TargetedInput,
-    ) -> LcuResult<ActionReceipt> {
-        self.ensure_live()?;
-        // D2: exclusive global HID is not part of the window surface path.
-        // Surfaces refuse Exclusive by contract (`action_is_surface_applicable`).
-        Err(LcuError::coded(
-            ErrorCode::UnsupportedCapability,
-            "exclusive global HID input removed from macOS window surface; use semantic/targeted directed input",
-        ))
-    }
-
     fn detect_user_conflict(&self, target: &AppTarget) -> LcuResult<ControlState> {
         self.ensure_live()?;
         // Same-window takeover only (not frontmost-app).
@@ -401,8 +395,121 @@ impl PlatformBackend for MacosBackend {
         }
     }
 
-    fn set_agent_session(&self, _target: &AppTarget, _active: bool) -> LcuResult<()> {
-        // D2: no frontmost-app agent lease. Same-window takeover is detected by the service.
+    fn stable_app_identity(&self, target: &AppTarget) -> LcuResult<String> {
+        if self.skeleton_only {
+            return Ok(target.app_id.clone());
+        }
+        let value = self.client.call(
+            "app_identity",
+            Some(json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+            })),
+        )?;
+        value
+            .get("stable_key")
+            .and_then(|key| key.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                LcuError::coded(ErrorCode::TaskFailed, "native app identity missing stable_key")
+            })
+    }
+
+    fn set_takeover_watch(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
+        if self.skeleton_only {
+            return Ok(());
+        }
+        self.client.call(
+            "set_takeover_watch",
+            Some(json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+                "active": active,
+            })),
+        )?;
+        Ok(())
+    }
+
+    fn control_epoch(&self) -> LcuResult<u64> {
+        if self.skeleton_only {
+            return Ok(0);
+        }
+        self.client
+            .call("ping", None)?
+            .get("session_epoch")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                LcuError::coded(ErrorCode::TaskFailed, "native service missing session_epoch")
+            })
+    }
+
+    fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
+        if self.skeleton_only {
+            return Ok(());
+        }
+        // Single-slot foreground session in the Swift service. Activating the
+        // session is the only path that may call NSRunningApplication.activate
+        // (Swift `foreground_activate`), and it runs only after a GUI grant
+        // placed the approved session here.
+        self.client.call(
+            "set_foreground_session",
+            Some(json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+                "active": active,
+            })),
+        )?;
+        if active {
+            if let Err(activate_err) = self.client.call(
+                "foreground_activate",
+                Some(json!({
+                    "pid": target.pid,
+                    "window_id": target.window_id,
+                })),
+            ) {
+                // Roll back the session slot we just opened: a failed
+                // activation would otherwise leave the native session active
+                // with no Runtime slot to close it. Best-effort; the original
+                // activation error is the one we report.
+                let _ = self.client.call(
+                    "set_foreground_session",
+                    Some(json!({
+                        "pid": target.pid,
+                        "window_id": target.window_id,
+                        "active": false,
+                    })),
+                );
+                return Err(activate_err);
+            }
+        }
+        Ok(())
+    }
+
+    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+        if self.skeleton_only {
+            return Ok(());
+        }
+        self.client.call(
+            "suspend_foreground_session",
+            Some(json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+            })),
+        )?;
+        Ok(())
+    }
+
+    fn resume_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+        if self.skeleton_only {
+            return Ok(());
+        }
+        self.client.call(
+            "resume_foreground_session",
+            Some(json!({
+                "pid": target.pid,
+                "window_id": target.window_id,
+            })),
+        )?;
         Ok(())
     }
 
@@ -600,9 +707,11 @@ fn targeted_to_json(action: &TargetedInput) -> LcuResult<Value> {
                 "button": button,
             })
         }
-        TargetedInput::TypeText { text } => json!({
+        TargetedInput::TypeText { text, x, y } => json!({
             "type": "type_text",
             "text": text,
+            "x": x,
+            "y": y,
         }),
         TargetedInput::KeyCombo { keys } => json!({
             "type": "key_combo",
@@ -663,26 +772,6 @@ mod tests {
 
 
 
-
-    #[test]
-    fn exclusive_refused_when_live_path_would_run() {
-        // skeleton refuses earlier; check error code via skeleton.
-        let backend = MacosBackend::skeleton();
-        let err = backend
-            .perform_exclusive_input(
-                &AppTarget {
-                    app_id: "x".into(),
-                    pid: 1,
-                    window_id: 1,
-                    window_title: "".into(),
-                },
-                &TargetedInput::TypeText {
-                    text: "no".into(),
-                },
-            )
-            .unwrap_err();
-        assert_eq!(err.code(), ErrorCode::NotImplemented);
-    }
 
     #[test]
     fn navigate_is_explicitly_unsupported() {

@@ -33,6 +33,8 @@ pub enum ErrorCode {
     ApprovalInvalid,
     #[error("unsupported_capability")]
     UnsupportedCapability,
+    #[error("foreground_required")]
+    ForegroundRequired,
     #[error("internal_error")]
     InternalError,
     #[error("not_implemented")]
@@ -48,6 +50,7 @@ impl ErrorCode {
             | Self::TaskNotFound
             | Self::ApprovalInvalid
             | Self::UnsupportedCapability
+            | Self::ForegroundRequired
             | Self::NotImplemented => ExitCode::TaskFailed,
             Self::InvalidRequest | Self::UsageError => ExitCode::UsageError,
             Self::RuntimeUnavailable | Self::ProtocolMismatch => ExitCode::RuntimeUnavailable,
@@ -92,4 +95,3 @@ impl LcuError {
 }
 
 pub type LcuResult<T> = Result<T, LcuError>;
-

@@ -78,11 +78,13 @@ struct BoundsDTO: Codable {
 struct PermissionStatus: Codable {
     var accessibilityTrusted: Bool
     var screenRecordingLikely: Bool
+    var inputMonitoringTrusted: Bool
     var notes: [String]
 
     enum CodingKeys: String, CodingKey {
         case accessibilityTrusted = "accessibility"
         case screenRecordingLikely = "screen_recording"
+        case inputMonitoringTrusted = "input_monitoring"
         case notes
     }
 }
@@ -98,6 +100,7 @@ enum ServiceError: Error, CustomStringConvertible {
     case permission(String)
     case notFound(String)
     case actionFailed(String)
+    case foregroundRequired(String)
     case unsupported(String)
     case invalidRequest(String)
     case targetLost(String)
@@ -108,6 +111,7 @@ enum ServiceError: Error, CustomStringConvertible {
         case .permission: return "permission_denied"
         case .notFound: return "not_found"
         case .actionFailed: return "action_failed"
+        case .foregroundRequired: return "foreground_required"
         case .unsupported: return "unsupported_capability"
         case .invalidRequest: return "invalid_request"
         case .targetLost: return "target_lost"
@@ -120,6 +124,7 @@ enum ServiceError: Error, CustomStringConvertible {
         case .permission(let m): return m
         case .notFound(let m): return m
         case .actionFailed(let m): return m
+        case .foregroundRequired(let m): return m
         case .unsupported(let m): return m
         case .invalidRequest(let m): return m
         case .targetLost(let m): return m
