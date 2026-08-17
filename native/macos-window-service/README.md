@@ -10,9 +10,8 @@ AnythingUse **macOS window** control surface: **per-user private Unix socket + J
 - Window screenshot (ScreenCaptureKit / CG fallback) + AX element tree
 - AX semantic actions + PID-directed input (`CGEvent.postToPid`)
 - Real user click/key/scroll on the reserved window → `taken_over`; focus changes alone do not; process/window gone → `target_lost`
-- Does **not** move the real mouse; does **not** activate the target app except
-  inside a GUI-approved foreground session (`foreground_activate` is the only
-  `NSRunningApplication.activate` entry)
+- Does **not** move the real mouse; `foreground_activate` is the only AppKit
+  activation entry and accepts only an exact target
 - No TextEdit AppleScript special cases; no frontmost-app conflict model
 
 ## Build / run
@@ -35,20 +34,13 @@ Override: `--socket PATH` or `LCU_MACOS_WINDOW_SOCK`.
 
 Socket mode `0600`, parent directory `0700`. No TCP.
 
-## Foreground session (GUI-approved)
+## Foreground fallback
 
-When background semantic/targeted delivery is unavailable, Runtime may place a
-**single-slot foreground session** (one serial FIFO):
-
-- `set_foreground_session` `{pid, window_id, active}` — Runtime records the
-  GUI-approved session; `active=false` clears only the matching slot (pid 0
-  clears crash leftovers).
-- `foreground_activate` `{pid, window_id}` — the only `NSRunningApplication.activate`
-  entry. Requires the matching approved session, raises or uniquely proves the
-  exact window before activation, then re-proves it after activation and before input. Never restores the previous app.
-- `suspend_foreground_session` / `resume_foreground_session` — release native
-  ownership while the Actor thinks; resume never activates and succeeds only
-  for the same untouched exact foreground window.
+When background delivery is unavailable, Runtime may call
+`foreground_activate` for the exact app-access-permitted target in `auto` mode.
+The service raises or uniquely proves that window, activates the app, and
+re-proves the exact window. Runtime discards the rejected action and observes
+again before any later input. The previous app is never restored.
 
 The listen-only HID monitor ignores tagged AnythingUse events. A real user
 click, key, or scroll on the target is `taken_over`, including while suspended.
@@ -62,7 +54,7 @@ Newline-delimited JSON:
 {"id":"1","ok":true,"result":{...}}
 ```
 
-Methods: `ping`, `permissions`, `list`, `resolve`, `observe`, `semantic`, `targeted`, `set_takeover_watch`, `set_foreground_session`, `suspend_foreground_session`, `resume_foreground_session`, `foreground_activate`, `detect_conflict` (aliases: `detect_control_state`, `session_health`).
+Methods: `ping`, `permissions`, `list`, `resolve`, `observe`, `semantic`, `targeted`, `set_takeover_watch`, `foreground_activate`, `detect_conflict` (aliases: `detect_control_state`, `session_health`).
 
 ## Permissions
 

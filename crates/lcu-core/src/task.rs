@@ -29,16 +29,16 @@ impl Default for TaskId {
 /// Lifecycle states for a single task.
 ///
 /// Wire names match product language: `waiting_actor` is the unified park for
-/// app access, consequence confirmation and foreground activation (realignment
-/// §3.4) — the old proposal is never retained for replay. Deserialize aliases
+/// Agent decisions, app access, and consequence confirmation — the old
+/// proposal is never retained for replay. Deserialize aliases
 /// keep previously persisted `waiting_user` / `waiting_approval` rows readable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     Queued,
     Running,
-    /// Waiting for a human gate decision (app access / consequence / foreground)
-    /// and then the actor's continuation on a fresh observation.
+    /// Waiting for an Agent decision or a human app/consequence gate, followed
+    /// by continuation on a fresh observation.
     #[serde(alias = "waiting_user", alias = "waiting_approval")]
     WaitingActor,
     /// User paused / same-app takeover (JSON: `paused`).
@@ -59,8 +59,7 @@ impl TaskState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCommand {
     Start,
-    /// Park the task in `waiting_actor` for any human gate (app access /
-    /// consequence / foreground / takeover).
+    /// Park the task in `waiting_actor` for an Agent decision or human gate.
     WaitActor,
     /// A gate was decided in the GUI; resume toward the actor continuation.
     Approve,
@@ -78,14 +77,19 @@ pub enum TaskCommand {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlMode {
-    /// Background first; when the operator reports `foreground_required`,
-    /// request one task-scoped ForegroundGrant.
+    /// Background first, then disclosed foreground fallback when required.
     #[default]
     Auto,
     /// Never activate; `foreground_required` is an explicit error.
     BackgroundOnly,
-    /// Request one task-scoped ForegroundGrant when the task starts.
-    Foreground,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    AgentDecision,
+    AppAccess,
+    Consequence,
 }
 
 /// Durable task metadata (no screenshots).
@@ -94,6 +98,8 @@ pub struct TaskRecord {
     pub task_id: TaskId,
     pub goal: String,
     pub state: TaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<WaitReason>,
     pub caller: CallerIdentity,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -103,7 +109,7 @@ pub struct TaskRecord {
     /// (external agent via lcu decide/act). None = follow the Runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
-    /// Task control mode (auto / background_only / foreground).
+    /// Task control mode (auto / background_only).
     #[serde(default)]
     pub control_mode: ControlMode,
     pub step_count: u32,
@@ -128,6 +134,7 @@ impl TaskRecord {
             task_id: TaskId::new(),
             goal: goal.into(),
             state: TaskState::Queued,
+            wait_reason: None,
             caller,
             created_at: now,
             updated_at: now,

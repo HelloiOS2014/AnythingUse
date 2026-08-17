@@ -57,11 +57,11 @@ do {
         let invalidationObservers = invalidationNames.map { name in
             workspaceCenter.addObserver(forName: name, object: nil, queue: nil) { _ in
                 UserInputMonitor.shared.invalidateAll()
-                ForegroundSession.shared.clear()
             }
         }
         let service = Service()
-        let server = SocketServer(socketPath: path, service: service)
+        let parentPID = flagValue("--parent-pid", in: args).flatMap(Int32.init)
+        let server = SocketServer(socketPath: path, service: service, parentPID: parentPID)
         // Write pid file next to socket for doctor/adapter.
         let pidPath = (path as NSString).deletingPathExtension + ".pid"
         try? "\(getpid())".write(toFile: pidPath, atomically: true, encoding: .utf8)
@@ -71,7 +71,6 @@ do {
             server.stop()
         }
         try server.start()
-        exit(0)
 
     case "socket-path":
         print(resolveSocketPath(args: args))
@@ -97,11 +96,12 @@ func printHelp() {
         macos-window-service — D2 product native macOS window control
 
         Commands:
-          serve [--socket <path>]   Listen on per-user private Unix socket (JSON lines)
+          serve [--socket <path>] [--parent-pid <pid>]
+                                    Listen on per-user private Unix socket (JSON lines)
           permissions               Print TCC probe JSON
           list                      List on-screen windows (pid + window_id)
           socket-path               Print default socket path
-          self-check                Run the foreground-session gate regression check
+          self-check                Run the user-input monitor regression check
           help
 
         Socket protocol (newline-delimited JSON):
@@ -114,10 +114,7 @@ func printHelp() {
           {"id":"5","method":"semantic","params":{"pid":1,"window_id":2,"action":{"type":"invoke","element_id":"e1"}}}
           {"id":"6","method":"targeted","params":{"pid":1,"window_id":2,"action":{"type":"type_text","text":"hi"}}}
           {"id":"7","method":"detect_conflict","params":{"pid":1,"window_id":2}}
-          {"id":"8","method":"set_foreground_session","params":{"pid":1,"window_id":2,"active":true}}
-          {"id":"9","method":"foreground_activate","params":{"pid":1,"window_id":2}}
-          {"id":"10","method":"suspend_foreground_session","params":{"pid":1,"window_id":2}}
-          {"id":"11","method":"resume_foreground_session","params":{"pid":1,"window_id":2}}
+          {"id":"8","method":"foreground_activate","params":{"pid":1,"window_id":2}}
 
         Default socket:
           ~/Library/Application Support/AnythingUse/macos-window.sock
@@ -142,33 +139,11 @@ func resolveSocketPath(args: [String]) -> String {
         .path
 }
 
-/// Smallest regression check for the shared session-mode gate (human and Agent
-/// actors share the Runtime contract; this gate is the native enforcement
-/// point). Runs without a live app or window: an approved session + foreground
-/// app must allow input with no AX window proof, and everything else must not.
 func runSelfCheck() throws {
-    let session = ForegroundSession.shared
-    session.clear()
-    func must(_ condition: Bool, _ label: String) throws {
-        guard condition else {
-            throw ServiceError.actionFailed("self-check failed: \(label)")
-        }
+    guard UserInputMonitor.shared.selfCheck() else {
+        throw ServiceError.actionFailed("self-check failed: HID baseline")
     }
-    session.begin(pid: 4242, windowID: 9)
-    try must(session.isActive(pid: 4242, windowID: 9), "begin must activate exact slot")
-    try must(
-        !session.allowsSessionInput(pid: 4242, windowID: 9, appIsFrontmost: true),
-        "frontmost pid alone must not authorize input"
-    )
-    try must(UserInputMonitor.shared.selfCheck(), "HID baseline must detect later input")
-    session.suspend(pid: 4242, windowID: 9)
-    try must(!session.isActive(pid: 4242, windowID: 9), "suspend must deactivate slot")
-    session.clear()
-    try must(
-        !session.allowsSessionInput(pid: 4242, windowID: 9, appIsFrontmost: true),
-        "clear must close the session"
-    )
-    fputs("self-check ok: foreground session gate\n", stderr)
+    fputs("self-check ok: user input monitor\n", stderr)
 }
 
 func printJSON(_ value: Any) {

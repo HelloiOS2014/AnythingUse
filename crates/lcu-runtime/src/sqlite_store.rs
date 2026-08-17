@@ -49,7 +49,8 @@ impl SqliteTaskStore {
                   last_observation_id TEXT,
                   last_action_hash TEXT,
                   summary TEXT,
-                  error TEXT
+                  error TEXT,
+                  wait_reason TEXT
                 );
                 CREATE TABLE IF NOT EXISTS events (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +84,12 @@ impl SqliteTaskStore {
             )
         {
             tracing::debug!(error = %e, "tasks.control_mode column already present");
+        }
+        if let Err(e) = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT", [])
+        {
+            tracing::debug!(error = %e, "tasks.wait_reason column already present");
         }
         Ok(())
     }
@@ -119,8 +126,8 @@ impl SqliteTaskStore {
                 INSERT INTO tasks (
                   task_id, goal, state, caller_json, created_at, updated_at,
                   app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
-                  summary, error
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                  summary, error, wait_reason
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                 ON CONFLICT(task_id) DO UPDATE SET
                   goal=excluded.goal,
                   state=excluded.state,
@@ -133,7 +140,8 @@ impl SqliteTaskStore {
                   last_observation_id=excluded.last_observation_id,
                   last_action_hash=excluded.last_action_hash,
                   summary=excluded.summary,
-                  error=excluded.error
+                  error=excluded.error,
+                  wait_reason=excluded.wait_reason
                 "#,
                 params![
                     record.task_id.0,
@@ -153,6 +161,7 @@ impl SqliteTaskStore {
                     record.last_action_hash.clone(),
                     record.summary.clone(),
                     record.error.clone(),
+                    record.wait_reason.map(|reason| serde_json::to_string(&reason).unwrap()),
                 ],
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("upsert: {e}")))?;
@@ -165,7 +174,7 @@ impl SqliteTaskStore {
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
                           app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
-                          summary, error FROM tasks WHERE task_id=?1"#,
+                          summary, error, wait_reason FROM tasks WHERE task_id=?1"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
         let mut rows = stmt
@@ -187,7 +196,7 @@ impl SqliteTaskStore {
             .prepare(
                 r#"SELECT task_id, goal, state, caller_json, created_at, updated_at,
                           app_selector_json, actor, control_mode, step_count, last_observation_id, last_action_hash,
-                          summary, error FROM tasks ORDER BY created_at ASC"#,
+                          summary, error, wait_reason FROM tasks ORDER BY created_at ASC"#,
             )
             .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("prepare: {e}")))?;
         let rows = stmt
@@ -274,11 +283,12 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
     let last_hash: Option<String> = row.get(11).map_err(sql_err)?;
     let summary: Option<String> = row.get(12).map_err(sql_err)?;
     let error: Option<String> = row.get(13).map_err(sql_err)?;
+    let wait_reason_s: Option<String> = row.get(14).map_err(sql_err)?;
 
     let control_mode: ControlMode = serde_json::from_str(&control_mode_s).or_else(|_| match control_mode_s.as_str() {
         "auto" => Ok(ControlMode::Auto),
         "background_only" => Ok(ControlMode::BackgroundOnly),
-        "foreground" => Ok(ControlMode::Foreground),
+        "foreground" | "\"foreground\"" => Ok(ControlMode::Auto),
         _ => Err(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unknown legacy control_mode",
@@ -299,6 +309,10 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> LcuResult<TaskRecord> {
         task_id: TaskId(task_id),
         goal,
         state,
+        wait_reason: wait_reason_s
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|e| LcuError::coded(ErrorCode::InternalError, format!("wait_reason json: {e}")))?,
         caller,
         created_at: DateTime::parse_from_rfc3339(&created)
             .map(|d| d.with_timezone(&Utc))

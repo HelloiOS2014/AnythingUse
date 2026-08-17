@@ -1,13 +1,10 @@
 //! Authorization grants (realignment contract §3.2–§3.4).
 //!
 //! The old single `ApprovalBinding` (observation_id + action_hash, replayed
-//! after approval) is split into three task-scoped grants:
+//! after approval) is split into application permission and consequence grants:
 //!
 //! - `AppPermission`: first-control gate for a stable app identity
 //!   (`allow_once` / `always_allow` / `deny`; always_allow persists locally);
-//! - `ForegroundGrant`: one-time, task-scoped permission to bring the exact
-//!   target window to the front; never persists, never authorizes business
-//!   consequences;
 //! - `ConsequenceGrant`: one-time confirmation of a real consequence
 //!   (send/submit/delete/…), bound to the Runtime-extracted consequence
 //!   identity or exact screenshot evidence. Runtime never stores a replayable
@@ -58,7 +55,6 @@ pub enum GrantStatus {
 #[serde(rename_all = "snake_case")]
 pub enum GateKind {
     AppAccess,
-    Foreground,
     Consequence,
     Takeover,
 }
@@ -91,35 +87,6 @@ impl AppPermission {
             decision,
             created_at: Utc::now(),
         }
-    }
-}
-
-/// One-time task-scoped foreground grant: activates the exact target window
-/// once. Never persists; never authorizes any business consequence.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ForegroundGrant {
-    pub grant_id: GrantId,
-    pub task_id: TaskId,
-    pub app_key: String,
-    pub expires_at: DateTime<Utc>,
-    pub nonce: String,
-    pub status: GrantStatus,
-}
-
-impl ForegroundGrant {
-    pub fn new(task_id: TaskId, app_key: impl Into<String>, ttl: Duration) -> Self {
-        Self {
-            grant_id: GrantId::new(),
-            task_id,
-            app_key: app_key.into(),
-            expires_at: Utc::now() + ttl,
-            nonce: Uuid::new_v4().to_string(),
-            status: GrantStatus::Pending,
-        }
-    }
-
-    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
-        now >= self.expires_at
     }
 }
 

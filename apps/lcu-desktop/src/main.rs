@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -21,7 +22,7 @@ use tracing_subscriber::EnvFilter;
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
 #[derive(Debug, Parser)]
@@ -36,6 +37,9 @@ struct Args {
     /// Headless: no tray UI (still owns Runtime socket).
     #[arg(long, default_value_t = false)]
     headless: bool,
+    /// Exit after this many idle seconds. Omit for a persistent desktop host.
+    #[arg(long)]
+    idle_exit_secs: Option<u64>,
 }
 
 fn main() -> Result<()> {
@@ -54,7 +58,7 @@ fn main() -> Result<()> {
         .context("acquire single-instance lock (is another lcu-desktop running?)")?;
 
     // Product backend (mac window service + Chrome control) — PlatformBackend only.
-    let backend = build_product_backend();
+    let backend = build_product_backend(&paths);
     let runtime = Arc::new(Runtime::new(paths.clone(), backend).context("start runtime")?);
     // Product worker: observe → VLM → EffectGuard → act.
     runtime.start_scheduler();
@@ -116,7 +120,7 @@ fn main() -> Result<()> {
     }
 
     // Menubar tray on the main thread (macOS needs an event loop).
-    run_tray(paths, ready, runtime)?;
+    run_tray(paths, ready, runtime, args.idle_exit_secs)?;
     Ok(())
 }
 
@@ -131,6 +135,8 @@ struct TrayApp {
     approvals_id: muda::MenuId,
     decide_id: muda::MenuId,
     revoke_access_id: muda::MenuId,
+    idle_exit_after: Option<Duration>,
+    idle_since: Option<Instant>,
 }
 
 impl ApplicationHandler for TrayApp {
@@ -151,7 +157,7 @@ impl ApplicationHandler for TrayApp {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.quit_id {
                 tracing::info!("quit requested from tray");
-                let _ = std::fs::remove_file(&self.ready_path);
+                self.cleanup();
                 event_loop.exit();
             } else if event.id == self.doctor_id {
                 let report = self.runtime.doctor_report();
@@ -210,7 +216,7 @@ impl ApplicationHandler for TrayApp {
                 }
             } else if event.id == self.decide_id {
                 // AppAccess: Allow once / Always allow / Deny.
-                // Consequence/Foreground: Approve/Deny.
+                // Consequence: Approve/Deny.
                 // Takeover (R4): Start takeover → (user acts) → Done/Cancel.
                 let pending = self.runtime.list_pending_gates();
                 match pending.first() {
@@ -297,7 +303,7 @@ impl ApplicationHandler for TrayApp {
                                     }
                                 }
                             }
-                            GateKind::Consequence | GateKind::Foreground => {
+                            GateKind::Consequence => {
                                 let decision = confirm_pending_dialog(p);
                                 match decision {
                                     Some(true) => {
@@ -334,13 +340,58 @@ impl ApplicationHandler for TrayApp {
                 }
             }
         }
+
+        let Some(idle_exit_after) = self.idle_exit_after else {
+            return;
+        };
+        let now = Instant::now();
+        if runtime_busy(&self.runtime) {
+            self.idle_since = None;
+        } else {
+            let idle_since = self.idle_since.get_or_insert(now);
+            if now.duration_since(*idle_since) >= idle_exit_after {
+                tracing::info!("auto-started runtime idle; exiting");
+                self.idle_exit_after = None;
+                self.cleanup();
+                event_loop.exit();
+                return;
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_secs(1)));
     }
+}
+
+impl TrayApp {
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.ready_path);
+        let _ = std::fs::remove_file(&self.paths.socket);
+        let mac_socket = std::env::var_os("LCU_MACOS_WINDOW_SOCK")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.paths.root.join("macos-window.sock"));
+        let mut mac_pid = mac_socket.clone();
+        mac_pid.set_extension("pid");
+        let _ = std::fs::remove_file(mac_socket);
+        let _ = std::fs::remove_file(mac_pid);
+    }
+}
+
+fn runtime_busy(runtime: &Runtime) -> bool {
+    runtime
+        .list_tasks()
+        .into_iter()
+        .any(|task| task_keeps_runtime_alive(task.state))
+        || !runtime.list_pending_gates().is_empty()
+}
+
+fn task_keeps_runtime_alive(state: lcu_core::task::TaskState) -> bool {
+    !state.is_terminal() && state != lcu_core::task::TaskState::PausedByUser
 }
 
 fn run_tray(
     paths: RuntimePaths,
     ready_path: std::path::PathBuf,
     runtime: Arc<Runtime>,
+    idle_exit_secs: Option<u64>,
 ) -> Result<()> {
     let icon = default_icon();
     let menu = Menu::new();
@@ -377,6 +428,10 @@ fn run_tray(
         approvals_id: approvals.id().clone(),
         decide_id: decide.id().clone(),
         revoke_access_id: revoke_access.id().clone(),
+        idle_exit_after: idle_exit_secs
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs),
+        idle_since: None,
     };
 
     let event_loop = EventLoop::new().context("create event loop")?;
@@ -386,25 +441,48 @@ fn run_tray(
     Ok(())
 }
 
-/// Same backend factory as CLI embedded path: MacosBackend + optional Chrome ProductBackend.
-fn build_product_backend() -> Arc<dyn lcu_platform::PlatformBackend> {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lcu_core::task::TaskState;
+
+    #[test]
+    fn auto_host_waits_only_for_live_work() {
+        assert!(task_keeps_runtime_alive(TaskState::Queued));
+        assert!(task_keeps_runtime_alive(TaskState::WaitingActor));
+        assert!(!task_keeps_runtime_alive(TaskState::PausedByUser));
+        assert!(!task_keeps_runtime_alive(TaskState::Succeeded));
+    }
+}
+
+/// MacosBackend + optional Chrome ProductBackend.
+fn build_product_backend(paths: &RuntimePaths) -> Arc<dyn lcu_platform::PlatformBackend> {
     if !cfg!(target_os = "macos") {
         return Arc::new(NullBackend);
     }
 
-    let mac = MacosBackend::new();
+    let mac_socket = std::env::var_os("LCU_MACOS_WINDOW_SOCK")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths.root.join("macos-window.sock"));
+    let mac = MacosBackend::with_socket(mac_socket.clone(), true);
     if let Err(e) = mac.ensure_service() {
         tracing::warn!(error = %e, "macos-window-service not ready at desktop start");
     }
 
     match ProductBackend::with_defaults(Arc::new(mac)) {
-        Ok(p) => Arc::new(p) as Arc<dyn lcu_platform::PlatformBackend>,
+        Ok(p) => {
+            if let Err(e) = p.cleanup_stale_lease() {
+                tracing::warn!(error = %e, "stale Chrome lease cleanup failed");
+            }
+            Arc::new(p) as Arc<dyn lcu_platform::PlatformBackend>
+        }
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "ProductBackend chrome path failed; falling back to MacosBackend only"
             );
-            Arc::new(MacosBackend::new()) as Arc<dyn lcu_platform::PlatformBackend>
+            Arc::new(MacosBackend::with_socket(mac_socket, true))
+                as Arc<dyn lcu_platform::PlatformBackend>
         }
     }
 }

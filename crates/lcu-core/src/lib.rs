@@ -21,8 +21,8 @@ pub use action::{
     Action, ActionKind, EffectClaim, EffectKind, ProposedAction, SemanticAction, TargetedInput,
 };
 pub use approval::{
-    AppAccessDecision, AppPermission, ConsequenceGrant, ConsequenceIdentity, ForegroundGrant,
-    GateKind, GateRequest, GrantId, GrantStatus, ScreenshotEvidence,
+    AppAccessDecision, AppPermission, ConsequenceGrant, ConsequenceIdentity, GateKind, GateRequest,
+    GrantId, GrantStatus, ScreenshotEvidence,
 };
 pub use capability::CapabilityLevel;
 pub use effect_guard::{EffectContext, EffectGuard, EffectJudgement, StaticEffectGuard};

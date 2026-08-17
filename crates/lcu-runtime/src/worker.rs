@@ -2,10 +2,10 @@
 //!
 //! Real OS actions may only execute through [`Runtime::perform_gated_action`].
 //!
-//! Realignment contract §4.4: app access, consequence confirmation and
-//! foreground activation all park the task in `waiting_actor`; after the gate
-//! the worker makes a fresh observation and hands `transition_result` to the
-//! same actor kind. The old proposal is never retained and never replayed.
+//! App access and consequence confirmation park the task in `waiting_actor`;
+//! after the gate the worker makes a fresh observation and hands
+//! `transition_result` to the same actor kind. Foreground fallback also
+//! discards the old proposal before re-observing.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -306,58 +306,6 @@ impl Runtime {
             }
         }
 
-        // A foreground grant authorizes the task, not every Agent turn. Resume
-        // without activation only when the exact window stayed foreground and
-        // no real user input touched it while the Actor was thinking.
-        if !self.foreground_is_active(task_id, &target)
-            && self.foreground_is_authorized(task_id, &target)
-        {
-            match self.resume_foreground_session(task_id, &target) {
-                Ok(()) => {}
-                Err(e) if e.code() == ErrorCode::WaitingUser => {
-                    let _ = self.apply_command(
-                        task_id,
-                        TaskCommand::PauseByUser,
-                        format!("paused: user took over foreground target ({e})"),
-                    );
-                    return Ok(StepOutcome::WaitExternal);
-                }
-                Err(e) if e.code() == ErrorCode::ForegroundRequired => {
-                    self.close_foreground_session_for(task_id);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // `foreground` control mode: request the one task-scoped ForegroundGrant
-        // before any observation or action.
-        if task.control_mode == ControlMode::Foreground
-            && !self.foreground_is_active(task_id, &target)
-        {
-            let grant_id = self.insert_foreground_gate(
-                task_id,
-                &app_key,
-                &target,
-                "task control mode is foreground; one-time activation required".into(),
-            );
-            self.park_for_gate(
-                task_id,
-                PendingGate {
-                    grant_id: grant_id.clone(),
-                    kind: GateKind::Foreground,
-                    task_id: task_id.clone(),
-                    app_key: app_key.clone(),
-                    target: target.clone(),
-                    consequence: None,
-                    evidence: None,
-                    transition: "foreground activation complete; re-observe".into(),
-                    takeover_started: false,
-                },
-                format!("foreground activation required ({grant_id})"),
-            )?;
-            return Ok(StepOutcome::WaitExternal);
-        }
-
         // Backend control state only (taken_over / target_lost).
         if let Some(outcome) = self.apply_control_gate(task_id, &target, "pre-observe")? {
             return Ok(outcome);
@@ -419,7 +367,7 @@ impl Runtime {
         let (proposal, actor_name) = if uses_agent {
             match resumed_agent {
                 Some((previous, previous_ctx, mut proposal)) => {
-                    if !same_decision_frame(&previous, &model_obs, &proposal.action) {
+                    if !same_decision_surface(&previous, &model_obs) {
                         self.agent_actor.begin_decision(&model_obs, &previous_ctx)?;
                         self.scheduler.schedule_agent_timeout(
                             task_id.clone(),
@@ -431,6 +379,7 @@ impl Runtime {
                             TaskCommand::WaitActor,
                             "Agent proposal became stale; waiting on fresh observation",
                         )?;
+                        self.set_wait_reason(task_id, lcu_core::task::WaitReason::AgentDecision)?;
                         return Ok(StepOutcome::WaitExternal);
                     }
                     proposal.observation_id = observation.observation_id.clone();
@@ -448,6 +397,7 @@ impl Runtime {
                         TaskCommand::WaitActor,
                         "waiting for external Agent decision",
                     )?;
+                    self.set_wait_reason(task_id, lcu_core::task::WaitReason::AgentDecision)?;
                     return Ok(StepOutcome::WaitExternal);
                 }
             }
@@ -858,10 +808,9 @@ impl Runtime {
                 return Ok(Some(StepOutcome::WaitExternal));
             }
             Err(e) if e.code() == ErrorCode::ForegroundRequired => {
-                // Background path unavailable. Control mode decides: auto /
-                // foreground request the one task-scoped ForegroundGrant;
-                // background_only fails with a clear error. The original action
-                // is never retried after activation — the actor re-proposes.
+                // Background path unavailable. App access already disclosed the
+                // foreground fallback. Activation invalidates this proposal;
+                // the next loop re-observes before the Actor proposes again.
                 let task = self.get_task(task_id)?;
                 if task.control_mode == ControlMode::BackgroundOnly {
                     self.fail_task(
@@ -872,29 +821,12 @@ impl Runtime {
                     )?;
                     return Ok(Some(StepOutcome::Terminal));
                 }
-                self.close_foreground_session_for(task_id);
-                let grant_id = self.insert_foreground_gate(
-                    task_id,
-                    app_key,
-                    target,
-                    format!("background input unavailable; foreground activation may bring the target window to the front: {e}"),
+                self.backend.activate_target(target)?;
+                *last_summary = Some(
+                    "target activated; discarded pre-activation proposal and re-observing".into(),
                 );
-                self.park_for_gate(
-                    task_id,
-                    PendingGate {
-                        grant_id: grant_id.clone(),
-                        kind: GateKind::Foreground,
-                        task_id: task_id.clone(),
-                        app_key: app_key.to_string(),
-                        target: target.clone(),
-                        consequence: None,
-                        evidence: None,
-                        transition: "foreground activation complete; re-observe".into(),
-                        takeover_started: false,
-                    },
-                    format!("foreground activation required ({grant_id}): {e}"),
-                )?;
-                return Ok(Some(StepOutcome::WaitExternal));
+                self.record_step(task_id)?;
+                return Ok(Some(StepOutcome::Continue));
             }
             Err(e) if is_recoverable_action_error(&e) => {
                 *last_summary = Some(format!(
@@ -963,15 +895,6 @@ impl Runtime {
             GateKind::AppAccess => {
                 // The decision was recorded at GUI time (allow_once / always_allow /
                 // deny); deny already failed the task via the gate status read.
-                *transition = Some(pending.transition.clone());
-                self.clear_task_gate(task_id);
-                Ok(None)
-            }
-            GateKind::Foreground => {
-                let _grant = self.consume_foreground_grant(&pending.grant_id)?;
-                if !self.foreground_is_active(task_id, &pending.target) {
-                    self.open_foreground_session(task_id, &pending.target)?;
-                }
                 *transition = Some(pending.transition.clone());
                 self.clear_task_gate(task_id);
                 Ok(None)
@@ -1082,7 +1005,14 @@ impl Runtime {
         pending: PendingGate,
         message: impl Into<String>,
     ) -> LcuResult<()> {
+        let reason = match pending.kind {
+            GateKind::AppAccess => lcu_core::task::WaitReason::AppAccess,
+            GateKind::Consequence | GateKind::Takeover => {
+                lcu_core::task::WaitReason::Consequence
+            }
+        };
         self.apply_command(task_id, TaskCommand::WaitActor, message)?;
+        self.set_wait_reason(task_id, reason)?;
         self.pending
             .lock()
             .expect("pending lock")
@@ -1187,8 +1117,8 @@ impl Runtime {
         }
 
         // Execution ladder: background semantic → provably isolated background
-        // targeted → foreground session (already activated via ForegroundGrant)
-        // → explicit failure. Native returns foreground_required only before
+        // targeted → disclosed exact-target foreground fallback → explicit
+        // failure. Native returns foreground_required only before
         // any input occurred, so the worker's gate handling never repeats a
         // side effect.
         let mut receipt = match action {
@@ -1294,18 +1224,11 @@ fn present_hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
     matches!((left.as_deref(), right.as_deref()), (Some(a), Some(b)) if !a.is_empty() && a == b)
 }
 
-fn same_decision_frame(
-    previous: &ModelObservation,
-    current: &ModelObservation,
-    action: &Action,
-) -> bool {
-    let same_target = previous.app_id == current.app_id
+fn same_decision_surface(previous: &ModelObservation, current: &ModelObservation) -> bool {
+    previous.app_id == current.app_id
         && previous.pid == current.pid
         && previous.window_id == current.window_id
-        && previous.window_frame == current.window_frame;
-    same_target
-        && (!matches!(action, Action::Targeted(_))
-            || (previous.image_hash.is_some() && previous.image_hash == current.image_hash))
+        && previous.window_frame == current.window_frame
 }
 
 fn proposal_action_summary(
@@ -1602,32 +1525,17 @@ mod tests {
     }
 
     #[test]
-    fn only_coordinate_actions_require_an_identical_screenshot() {
+    fn agent_proposal_survives_pixel_drift_on_the_same_surface() {
         let previous_obs = screenshot_observation("previous");
         let mut current_obs = previous_obs.clone();
         current_obs.observation_id = ObservationId("current".into());
         current_obs.image_hash = Some("pixel-drift".into());
         let previous = ModelObservation::from(&previous_obs);
-        let current = ModelObservation::from(&current_obs);
+        let mut current = ModelObservation::from(&current_obs);
 
-        assert!(same_decision_frame(
-            &previous,
-            &current,
-            &Action::Fail { reason: "stop".into() }
-        ));
-        assert!(same_decision_frame(
-            &previous,
-            &current,
-            &Action::Semantic(SemanticAction::Invoke { element_id: "e1".into() })
-        ));
-        assert!(!same_decision_frame(
-            &previous,
-            &current,
-            &Action::Targeted(TargetedInput::Click {
-                x: 0.2,
-                y: 0.3,
-                button: MouseButton::Left,
-            })
-        ));
+        assert!(same_decision_surface(&previous, &current));
+
+        current.window_id += 1;
+        assert!(!same_decision_surface(&previous, &current));
     }
 }

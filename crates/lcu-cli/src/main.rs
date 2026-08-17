@@ -1,26 +1,21 @@
 //! `lcu` — sole external entry for humans and agents.
 //!
 //! Agents never talk to Runtime IPC directly; they only invoke this CLI.
-//! Production path: CLI → private Unix socket → desktop-owned Runtime.
-//! Dev fallback: `LCU_EMBEDDED_RUNTIME=1` embeds Runtime in-process for tests.
+//! CLI → private Unix socket → desktop-owned Runtime.
 
-use std::path::PathBuf;
-use std::process::ExitCode as StdExitCode;
-use std::sync::Arc;
+use std::process::{Command, ExitCode as StdExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use lcu_core::error::ErrorCode;
+use lcu_core::error::{ErrorCode, LcuError, LcuResult};
 use lcu_core::protocol::{
     DoctorReport, ExitCode, JsonEnvelope, PermissionCheck, PrivateEntryStatus,
     PROTOCOL_SCHEMA_VERSION,
 };
 use lcu_core::schema::SchemaDocument;
-use lcu_chrome::{default_chrome_control_sock, ProductBackend};
-use lcu_platform::NullBackend;
-use lcu_platform_macos::MacosBackend;
 use lcu_runtime::ipc::call_runtime_blocking;
 use lcu_runtime::paths::RuntimePaths;
-use lcu_runtime::{InternalRequest, InternalResponse, Runtime};
+use lcu_runtime::{InternalRequest, InternalResponse};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -60,9 +55,8 @@ enum Commands {
         /// `LCU_VISION_ACTOR` (unset/auto defaults to agent).
         #[arg(long)]
         actor: Option<String>,
-        /// Control mode: `auto` (default; background first, one foreground
-        /// grant when needed), `background_only` (never activate), `foreground`
-        /// (one task-scoped foreground grant at task start).
+        /// Control mode: `auto` (default; disclosed foreground fallback when
+        /// needed) or `background_only` (never activate).
         #[arg(long)]
         control_mode: Option<String>,
     },
@@ -305,9 +299,9 @@ fn doctor(json: bool) -> Result<ExitCode, ExitCode> {
         Err(ExitCode::RuntimeUnavailable) => {
             // Offline doctor: report unreachable runtime + surface socket presence (best effort).
             let paths = resolve_paths();
-            let mac_sock = lcu_platform_macos::client::default_socket_path();
-            let chrome_sock = default_chrome_control_sock().ok();
-            let mac_present = mac_sock.exists();
+            let mac_sock = paths.as_ref().map(|p| p.root.join("macos-window.sock"));
+            let chrome_sock = paths.as_ref().map(|p| p.root.join("chrome-control.sock"));
+            let mac_present = mac_sock.as_ref().map(|p| p.exists()).unwrap_or(false);
             let chrome_present = chrome_sock.as_ref().map(|p| p.exists()).unwrap_or(false);
             let report = DoctorReport {
                 schema_version: PROTOCOL_SCHEMA_VERSION.to_string(),
@@ -356,10 +350,13 @@ fn doctor(json: bool) -> Result<ExitCode, ExitCode> {
                     "lcu-desktop runtime not reachable; start apps/lcu-desktop".into(),
                 ],
                 notes: vec![
-                    "CLI talks only to desktop-owned private socket (or LCU_EMBEDDED_RUNTIME=1 for debug)".into(),
+                    "CLI talks only to the desktop-owned private socket".into(),
                     format!(
                         "mac_window sock={} present={}",
-                        mac_sock.display(),
+                        mac_sock
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(unresolved)".into()),
                         mac_present
                     ),
                     format!(
@@ -472,21 +469,20 @@ fn wait_for_task(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCod
                         _ => Err(ExitCode::InternalError),
                     };
                 }
-                // Park states: still "running" from user POV but need interaction.
-                if matches!(
-                    task.state,
-                    lcu_core::task::TaskState::WaitingActor
-                        | lcu_core::task::TaskState::PausedByUser
-                ) {
+                if let Some(exit) = parked_exit_code(&task) {
                     if json {
-                        print_json(&JsonEnvelope::ok(&task));
+                        if exit == ExitCode::WaitingUser {
+                            print_json(&JsonEnvelope::waiting(&task));
+                        } else {
+                            print_json(&JsonEnvelope::ok(&task));
+                        }
                     } else {
                         println!(
                             "task {} parked state={:?} (decide/resume/cancel as needed)",
                             task.task_id.0, task.state
                         );
                     }
-                    return Ok(ExitCode::WaitingUser);
+                    return Ok(exit);
                 }
             }
             other => return map_error_response(other, json),
@@ -500,6 +496,16 @@ fn wait_for_task(resp: InternalResponse, json: bool) -> Result<ExitCode, ExitCod
         format!("wait timed out after {timeout}s for task {task_id}"),
     );
     Err(ExitCode::InternalError)
+}
+
+fn parked_exit_code(task: &lcu_core::task::TaskRecord) -> Option<ExitCode> {
+    use lcu_core::task::{TaskState, WaitReason};
+
+    match (task.state, task.wait_reason) {
+        (TaskState::WaitingActor, Some(WaitReason::AgentDecision)) => Some(ExitCode::Success),
+        (TaskState::WaitingActor | TaskState::PausedByUser, _) => Some(ExitCode::WaitingUser),
+        _ => None,
+    }
 }
 
 /// Agent decision mode: fetch the observation the worker is waiting on.
@@ -701,57 +707,65 @@ fn map_error_response(resp: InternalResponse, json: bool) -> Result<ExitCode, Ex
 }
 
 fn call(request: InternalRequest) -> Result<InternalResponse, ExitCode> {
-    if embedded_enabled() {
-        return embedded_call(request);
-    }
     let paths = resolve_paths().ok_or(ExitCode::RuntimeUnavailable)?;
-    call_runtime_blocking(&paths.socket, request).map_err(|err| {
+    call_with_autostart(&paths, request).map_err(|err| {
         emit_error(true, err.code(), err.to_string());
         err.code().exit_code()
     })
 }
 
-fn embedded_enabled() -> bool {
-    // Sealed in release builds: product CLI must talk to desktop-owned Runtime only.
-    if cfg!(not(debug_assertions)) {
-        return false;
+fn call_with_autostart(
+    paths: &RuntimePaths,
+    request: InternalRequest,
+) -> LcuResult<InternalResponse> {
+    match call_runtime_blocking(&paths.socket, request.clone()) {
+        Ok(response) => return Ok(response),
+        Err(error) if error.code() == ErrorCode::RuntimeUnavailable => {}
+        Err(error) => return Err(error),
     }
-    matches!(
-        std::env::var("LCU_EMBEDDED_RUNTIME").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
+
+    start_runtime(paths).map_err(|error| {
+        LcuError::coded(
+            ErrorCode::RuntimeUnavailable,
+            format!("start lcu-desktop: {error}"),
+        )
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match call_runtime_blocking(&paths.socket, request.clone()) {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if error.code() == ErrorCode::RuntimeUnavailable && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
-fn embedded_call(request: InternalRequest) -> Result<InternalResponse, ExitCode> {
-    // Process-local Runtime for unit/dev only — not the production architecture.
-    use std::sync::OnceLock;
-    static RT: OnceLock<Arc<Runtime>> = OnceLock::new();
-    let runtime = RT.get_or_init(|| {
-        let root = std::env::var_os("LCU_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("lcu-embedded-{}", std::process::id()))
-            });
-        let paths = RuntimePaths::from_root(root);
-        let backend = build_product_backend();
-        let rt = Arc::new(Runtime::new(paths, backend).expect("embedded runtime"));
-        rt.start_scheduler();
-        rt
-    });
-    Ok(runtime.handle_internal(request))
-}
-
-/// Same backend factory as `lcu-desktop` (mac window service + Chrome product backend).
-fn build_product_backend() -> Arc<dyn lcu_platform::PlatformBackend> {
-    if !cfg!(target_os = "macos") {
-        return Arc::new(NullBackend);
+fn start_runtime(paths: &RuntimePaths) -> std::io::Result<()> {
+    let binary = std::env::current_exe()?.with_file_name(format!(
+        "lcu-desktop{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if !binary.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is missing", binary.display()),
+        ));
     }
-    let mac = MacosBackend::new();
-    let _ = mac.ensure_service();
-    match ProductBackend::with_defaults(Arc::new(mac)) {
-        Ok(p) => Arc::new(p),
-        Err(_) => Arc::new(MacosBackend::new()),
-    }
+    Command::new(binary)
+        .arg("--runtime-dir")
+        .arg(&paths.root)
+        .arg("--idle-exit-secs")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
 }
 
 fn resolve_paths() -> Option<RuntimePaths> {
@@ -782,5 +796,23 @@ fn emit_error(json: bool, code: ErrorCode, message: impl Into<String>) {
         );
     } else {
         eprintln!("error[{code}]: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lcu_core::task::{TaskRecord, TaskState, WaitReason};
+    use lcu_core::types::CallerIdentity;
+
+    #[test]
+    fn agent_wait_is_not_reported_as_human_wait() {
+        let mut task = TaskRecord::new("demo", CallerIdentity::HumanCli, None);
+        task.state = TaskState::WaitingActor;
+        task.wait_reason = Some(WaitReason::AgentDecision);
+        assert_eq!(parked_exit_code(&task), Some(ExitCode::Success));
+
+        task.wait_reason = Some(WaitReason::AppAccess);
+        assert_eq!(parked_exit_code(&task), Some(ExitCode::WaitingUser));
     }
 }

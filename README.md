@@ -14,7 +14,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 
 - **Shared interface:** humans and Agents use the same `lcu` command.
 - **Local-first:** task state, screenshots, model inference, and approvals stay on the machine by default.
-- **Coexists with the user:** background work targets a strict window or inactive Chrome task tab. Per task, choose `auto`, `background_only`, or `foreground`; a GUI-approved foreground session may bring the exact window forward, never switches back, and real user input on that target pauses automatically.
+- **Coexists with the user:** background work targets a strict window or inactive Chrome task tab. `auto` may bring the exact window forward when background delivery is unavailable; `background_only` never does. The app-access dialog discloses this fallback, the agent never switches back, and real user input on that target pauses automatically.
 - **Honest completion:** an action receipt is not success; a task succeeds only after explicit completion and target re-observation.
 - **Endpoint-oriented:** the Runtime routes goals to a platform backend, so future endpoints do not need a new public Agent protocol.
 
@@ -22,11 +22,11 @@ Computer-use systems often take over the foreground desktop, move the real point
 
 | Area | Current capability |
 |---|---|
-| macOS applications | Window capture and AX/targeted actions on a strict PID + window target; background first, task-scoped foreground grant when selected/required, explicit failure otherwise |
+| macOS applications | Window capture and AX/targeted actions on a strict PID + window target; background first, disclosed exact-target foreground fallback in `auto`, explicit failure in `background_only` |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
 | Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
-| Safety | Shared closed-set effect, independent Runtime risk floor, separate app/foreground/consequence gates, takeover detection |
+| Safety | Shared closed-set effect, independent Runtime risk floor, separate app-access and consequence gates, takeover detection |
 | Persistence | Local SQLite task and event state |
 
 These are implemented source-level contracts, not a broad real-app
@@ -59,8 +59,7 @@ The loop is `observe → decide → guard → act → observe`. `decide` is the 
 cargo build -p lcu-cli -p lcu-desktop --release
 (cd native/macos-window-service && swift build -c release)
 
-# start the Runtime and diagnose
-./target/release/lcu-desktop &
+# lcu starts the menu-bar Runtime on demand
 ./target/release/lcu doctor --json
 
 # external Agent path: the Skill continues with lcu decide / lcu act
@@ -71,6 +70,10 @@ cargo build -p lcu-cli -p lcu-desktop --release
 ./target/release/lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor vlm --wait --json
 ```
+
+An on-demand Runtime exits after 60 idle seconds once no task or approval is
+active. Launch `lcu-desktop` yourself only when you want the menu-bar Runtime
+to remain resident.
 
 Agents use the bundled Skill; `--source` is display-only metadata.
 
@@ -101,24 +104,24 @@ Skill updates ride the repo; the `lcu` binaries stay a separate build.
 
 Coexistence is not "pause whenever the target app is frontmost":
 
-- A macOS task is bound to a specific PID and window; background semantic/targeted input is preferred, and activation is used only inside one GUI-approved foreground session (never as an unapproved fallback).
-- App access, foreground activation, and consequence confirmation/takeover are separate grants. Approval discards the old proposal and returns a fresh observation to the same Actor.
-- The foreground dialog discloses that the exact target may come forward; the agent never switches back. While the Actor thinks, native ownership is suspended; it resumes without another activation only if the exact window stayed foreground and untouched. Real user input on that target pauses automatically (Input Monitoring permission is required for macOS control).
+- A macOS task is bound to a specific PID and window; background semantic/targeted input is preferred. App access discloses that `auto` may activate that exact target when background delivery is unavailable; `background_only` fails instead.
+- App access and consequence confirmation/takeover are separate decisions. Activation or approval discards the old proposal and returns a fresh observation to the same Actor.
+- The agent never switches back. While the Actor thinks, the generic target reservation is released; continuation re-resolves and re-observes the target. Real user input on that target pauses automatically (Input Monitoring permission is required for macOS control).
 - Chrome work runs in an inactive task tab and never reactivates the user's tabs.
 - If strict target identity cannot be maintained, the operation fails rather than guessing another window.
 - Consequences (send/delete/pay/…) use one-time confirmation or takeover even inside an approved session.
 
 Apps that expose no usable Accessibility controls are observation-only unless
-an existing PID-directed action can prove safe delivery, or the user approved
-the one-time foreground session. AnythingUse does not defocus the user's app to
-make a background target accept input.
+an existing PID-directed action can prove safe delivery, or `auto` activates
+the exact permitted target and re-observes it. AnythingUse never activates a
+different window or switches back afterwards.
 
 This is a product invariant. Switching to the target and switching back without
 approval is not non-interference.
 
 ## Queue and completion
 
-One serial FIFO queue per macOS login user; `waiting_actor` and paused tasks release the global execution slot while an Agent continuation keeps only its strict target reservation. A task reaches `succeeded` only when the Actor emits explicit `Done` **and** the target can be observed again.
+One serial FIFO queue per macOS login user; `waiting_actor` and paused tasks release the global execution slot and generic target reservation. A task reaches `succeeded` only when the Actor emits explicit `Done` **and** the target can be observed again.
 
 ## Roadmap
 
@@ -147,5 +150,5 @@ scripts/                      Model download and helper scripts
 
 ## Documentation
 
-- [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
+- [Execution contract](docs/execution-contract.md) · [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS window service](native/macos-window-service/README.md) · [Chrome control](native/chrome-control/README.md)

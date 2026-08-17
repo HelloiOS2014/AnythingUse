@@ -13,10 +13,6 @@ path = "src/main.rs"
 [dependencies]
 lcu-core = { workspace = true }
 lcu-runtime = { workspace = true }
-lcu-platform = { workspace = true }
-lcu-platform-macos = { workspace = true }
-lcu-chrome = { workspace = true }
-lcu-model = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

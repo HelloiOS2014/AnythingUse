@@ -5,13 +5,12 @@ import Foundation
 
 /// Prevent agent actions from stealing system frontmost / key window.
 ///
-/// Product rule: outside a GUI-approved foreground session the agent must never
-/// change system `frontmost app`, key window, user-active tab, real mouse, or
-/// keyboard ownership.
+/// Product rule: background actions must never change system `frontmost app`,
+/// key window, user-active tab, real mouse, or keyboard ownership.
 ///
 /// Hard rules:
-/// - `NSRunningApplication.activate()` is allowed only inside an approved
-///   foreground session (`Service.foregroundActivate`); never post-hoc restore.
+/// - App activation is allowed only through the disclosed exact-target fallback
+///   (`Service.foregroundActivate`); never post-hoc restore.
 /// - Detecting a steal after the fact is fail-closed only — damage may already
 ///   be visible; the fix is to refuse paths that can steal, not to "undo" them.
 /// - Same-app window A vs window B must be distinguished by `pid + windowID`.
@@ -45,47 +44,47 @@ enum FocusGuard {
 
     /// Exact-window proof after a foreground activation (realignment §4.5).
     /// Preferred: the app's AX key-window number equals the target window.
-    /// Without an AX identity: the target CGWindowID must equal the unique
-    /// topmost same-PID on-screen window — multiple candidates or unprovable
-    /// fails. PID-frontmost alone is never sufficient for input.
+    /// Without an AX identity: a layer-0 hit-test at the target window's center
+    /// must return the same PID + CGWindowID. PID-frontmost alone is insufficient.
     static func provesExactWindow(pid: pid_t, windowID: CGWindowID) -> Bool {
-        if let key = focusedWindowNumber(pid: pid) {
-            return key == windowID
+        if focusedWindowNumber(pid: pid) == windowID {
+            return true
         }
-        guard let top = uniqueTopmostSamePIDWindow(pid: pid) else {
+        guard let target = try? WindowResolver.resolve(pid: pid, windowID: windowID),
+              let hit = WindowResolver.windowAtScreenPoint(
+                  CGPoint(x: target.bounds.midX, y: target.bounds.midY)
+              )
+        else {
             return false
         }
-        return top == windowID
+        return hit.0 == pid && hit.1 == windowID
     }
 
     static func currentExactWindowNumber(pid: pid_t) -> CGWindowID? {
-        focusedWindowNumber(pid: pid) ?? uniqueTopmostSamePIDWindow(pid: pid)
+        focusedWindowNumber(pid: pid) ?? topmostSamePIDWindow(pid: pid)
     }
 
-    /// The unique topmost on-screen CGWindow for `pid`, or nil when there are
-    /// zero or multiple candidates. CGWindowListCopyWindowInfo returns windows
-    /// front-to-back; the first same-PID entry is the topmost.
-    static func uniqueTopmostSamePIDWindow(pid: pid_t) -> CGWindowID? {
+    /// The topmost on-screen CGWindow for `pid`. The API returns windows
+    /// front-to-back, so the first same-PID entry is authoritative.
+    static func topmostSamePIDWindow(pid: pid_t) -> CGWindowID? {
         guard let list = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
             return nil
         }
-        var candidates: [CGWindowID] = []
         for info in list {
-            guard let owner = info[kCGWindowOwnerPID as String] as? Int, owner == pid else {
+            guard let owner = info[kCGWindowOwnerPID as String] as? Int,
+                  owner == pid,
+                  (info[kCGWindowLayer as String] as? Int ?? 0) == 0
+            else {
                 continue
             }
             if let number = info[kCGWindowNumber as String] as? Int {
-                candidates.append(CGWindowID(number))
+                return CGWindowID(number)
             }
         }
-        // Screen-recording permission may hide window info; empty means unprovable.
-        guard candidates.count == 1 else {
-            return nil
-        }
-        return candidates[0]
+        return nil
     }
 
     /// CGWindowNumber of the app's focused/main AX window when available.
@@ -136,10 +135,9 @@ enum FocusGuard {
         target: MacWindowTarget,
         _ body: () throws -> T
     ) throws -> T {
-        // An approved foreground session legitimately promotes the target; the
-        // promotion is the grant's disclosed effect, not a steal. All other
-        // paths keep the strict post-hoc check.
-        if ForegroundSession.shared.isActive(pid: target.pid, windowID: target.windowID) {
+        if isFrontmost(pid: target.pid),
+           provesExactWindow(pid: target.pid, windowID: target.windowID)
+        {
             return try body()
         }
         let before = snapshot(target: target)

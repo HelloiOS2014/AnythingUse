@@ -27,10 +27,7 @@ operating real macOS applications and Chrome through one command surface.
 ## Quick reference
 
 ```bash
-# runtime must be running first
-./target/release/lcu-desktop &
-
-# health
+# lcu starts the Runtime on demand; it exits after 60 idle seconds
 ./target/release/lcu doctor --json
 
 # external Agent: submit, then use the returned task id in the decision loop
@@ -53,5 +50,7 @@ Hard rules (never break):
 4. Do not request screenshots or full semantic trees on stdout outside the
    agent decision mode data surface (`lcu decide`).
 
-Full contract: `docs/command-contract.md` · `docs/architecture.md` ·
-`docs/privacy.md` · `docs/troubleshooting.md`.
+Normative execution contract: `docs/execution-contract.md` (source-aligned;
+concentrated live acceptance passed 2026-08-17).
+Current implemented surface: `docs/command-contract.md` ·
+`docs/architecture.md` · `docs/privacy.md` · `docs/troubleshooting.md`.

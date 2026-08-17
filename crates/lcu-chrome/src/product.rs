@@ -60,6 +60,16 @@ impl ProductBackend {
         self.window.as_ref()
     }
 
+    /// The desktop single-instance lock is already held when this runs, so any
+    /// extension lease predating this Runtime is orphaned crash state.
+    pub fn cleanup_stale_lease(&self) -> LcuResult<()> {
+        if self.chrome_client.socket_present() {
+            self.chrome_client
+                .call("cleanup", serde_json::json!({ "reason": "runtime_startup" }))?;
+        }
+        Ok(())
+    }
+
     /// Exact explicit Chrome app identities (surface routing only — never a
     /// substring or goal-keyword match, and never an execution-policy special).
     fn is_chrome_app(app_id: &str) -> bool {
@@ -268,26 +278,11 @@ impl PlatformBackend for ProductBackend {
         self.window.control_epoch()
     }
 
-    fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
+    fn activate_target(&self, target: &AppTarget) -> LcuResult<()> {
         if !Self::is_chrome_app(&target.app_id) {
-            return self.window.set_agent_session(target, active);
+            return self.window.activate_target(target);
         }
-        // Chrome tab lease is released only via clear_task_context (task terminal).
-        let _ = active;
         Ok(())
-    }
-    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
-        if Self::is_chrome_app(&target.app_id) {
-            return Ok(());
-        }
-        self.window.suspend_agent_session(target)
-    }
-
-    fn resume_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
-        if Self::is_chrome_app(&target.app_id) {
-            return Ok(());
-        }
-        self.window.resume_agent_session(target)
     }
 
     fn bind_task_context(&self, goal: &str, task_id: Option<&str>) {

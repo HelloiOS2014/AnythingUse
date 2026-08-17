@@ -8,6 +8,10 @@ Product: **AnythingUse** (binary remains `lcu`)
 This is the implemented CLI/interface contract, not a blanket assertion of
 stable runtime behavior across all target applications.
 
+The target execution semantics are frozen in the
+[Execution Contract](execution-contract.md). Until [Delivery status](status.md)
+records migration completion, this file describes the current wire surface.
+
 ## Principles
 
 1. Humans and Agents share the same `lcu` binary and flags.
@@ -63,11 +67,11 @@ Surface permissions (online `doctor`, i.e. Runtime reachable):
 
 When the Runtime is unreachable, offline `doctor` reports `mac_window_service` / `chrome_control_host` socket presence instead.
 
-### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--actor vlm|agent] [--control-mode auto|background_only|foreground] [--json]`
+### `lcu run "<goal>" [--app <bundle_id>] [--wait] [--max-steps N] [--source human|agent] [--source-name <name>] [--actor vlm|agent] [--control-mode auto|background_only] [--json]`
 
 Submit a high-level natural-language task.
 
-`source` and `source-name` are display metadata, not authentication. `--actor vlm|agent` selects the decision maker for this task (default: the Runtime process setting, `LCU_VISION_ACTOR`; unset/`auto` selects Agent). `--control-mode` selects background-first automatic fallback, background-only, or a task-scoped foreground session. Tasks of either Actor kind share one serial FIFO queue; `waiting_actor` and user-paused tasks release the global execution slot.
+`source` and `source-name` are display metadata, not authentication. `--actor vlm|agent` selects the decision maker for this task (default: the Runtime process setting, `LCU_VISION_ACTOR`; unset/`auto` selects Agent). `--control-mode` selects disclosed background-first automatic fallback or background-only. Tasks of either Actor kind share one serial FIFO queue; `waiting_actor` and user-paused tasks release the global execution slot and generic target reservation.
 
 Task wire states include `queued`, `running`, `waiting_actor` (older persisted aliases: `waiting_user` / `waiting_approval`), `paused` (alias `paused_by_user`), `succeeded`, `failed`, `cancelled`. A gate decision discards the old proposal, re-observes the target, and returns the task to the same Actor through `waiting_actor` continuation.
 
@@ -102,7 +106,6 @@ Cancel and release target resources.
 Opens the local GUI for one of three distinct gates:
 
 - app access: stable signed application identity;
-- foreground activation: task + strict target + expiry + one-time nonce;
 - consequence confirmation/takeover: task + stable app identity + effect kind + Runtime-derived consequence identity + expiry + one-time nonce.
 
 Screenshot-only consequence requests additionally retain the original
@@ -152,23 +155,17 @@ host method directly.
 4. Use only fresh observation-bound actions; never approve high-risk actions.
 5. Judge success only from `lcu` result/status fields.
 
-## Foreground session
+## Foreground fallback
 
-Background execution is preferred, not promised. When a macOS target cannot be
-driven in the background, Runtime parks **one task-scoped foreground grant**
-that discloses the target window may come to the front once. After the GUI
-grant the exact pid + window may be activated;
-activation verifies both the foreground app and the exact key window, and never
-restores the previous app. The session is single-slot, task-scoped, and
-cleared on terminal / pause / target change / release / runtime recovery.
-It is suspended while an external Agent decides and resumes without activation
-only if that exact window stayed foreground and no real user HID touched it.
-Inside an approved session, ordinary actions do not repeat capability approval;
-consequences (send/delete/pay/…) still use separate one-time confirmation or
-takeover gates. Real user HID on the target automatically ends the session and
-pauses the task; `pause` / `cancel` remain explicit controls.
+Background execution is preferred, not promised. App access discloses that
+`auto` may activate the exact target when the backend reports
+`foreground_required`; `background_only` fails instead. Activation verifies
+the exact PID and window, discards the old proposal, and never restores the
+previous app. Continuation starts from a fresh observation. Consequences
+(send/delete/pay/…) still use separate one-time confirmation or takeover gates.
+Real user HID on the target pauses the task; `pause` / `cancel` remain explicit.
 
 ## Source-level non-interference contract
 
-- macOS tasks prefer background semantic/targeted input and never guess another window when identity fails. Activation happens only inside one GUI-approved foreground session (see above). Only real user HID on the reserved target is takeover; focus/frontmost changes alone are not. A lost target fails the task.
+- macOS tasks prefer background semantic/targeted input and never guess another window when identity fails. Only the exact app-access-permitted target may be activated by `auto`. Real user HID on the controlled target is takeover; focus/frontmost changes alone are not. A lost target fails the task.
 - Chrome tasks use an inactive task tab. User takeover detaches the debugger and the Runtime does not reactivate a previous or task tab.

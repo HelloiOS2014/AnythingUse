@@ -12,7 +12,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 
 - **统一接口：** 人类与 Agent 使用同一条 `lcu` 命令。
 - **本地优先：** 任务状态、截图、模型推理、审批默认都留在本机。
-- **与用户共存：** 后台工作只瞄准严格窗口或非激活 Chrome 任务标签页。每个任务可选 `auto`、`background_only` 或 `foreground`；经 GUI 批准的前台会话可能把精确窗口带到前台，绝不自动切回；只有用户在该目标上的真实 HID 输入会自动暂停任务，焦点变化本身不算接管。
+- **与用户共存：** 后台工作只瞄准严格窗口或非激活 Chrome 任务标签页。`auto` 在后台投递不可用时可能把精确窗口带到前台，`background_only` 则绝不激活；应用访问对话框会披露该兜底，之后绝不自动切回。只有用户在该目标上的真实 HID 输入会自动暂停任务，焦点变化本身不算接管。
 - **诚实的完成：** 动作回执不是成功；任务只有在显式完成并经目标重观察后才成功。
 - **面向端点：** Runtime 把目标路由到平台后端，未来新增端点不需要新的公开 Agent 协议。
 
@@ -55,8 +55,7 @@ flowchart LR
 cargo build -p lcu-cli -p lcu-desktop --release
 (cd native/macos-window-service && swift build -c release)
 
-# 启动 Runtime 并诊断
-./target/release/lcu-desktop &
+# lcu 会按需启动菜单栏 Runtime
 ./target/release/lcu doctor --json
 
 # 外部 Agent 路径：Skill 随后执行 lcu decide / lcu act
@@ -67,6 +66,9 @@ cargo build -p lcu-cli -p lcu-desktop --release
 ./target/release/lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor vlm --wait --json
 ```
+
+按需启动的 Runtime 在没有运行中任务或审批后空闲 60 秒会自动退出。只有希望菜单栏
+Runtime 常驻时，才需要手动运行 `lcu-desktop`。
 
 可选：Chrome 表面：运行 `./native/chrome-control/scripts/install-native-host.sh`，然后在 `chrome://extensions` 开启开发者模式，并仅从脚本打印的 `extension:` 路径 **Load unpacked**（默认是 `~/Library/Application Support/AnythingUse/chrome-extension`）。本地 VLM：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`，再 `./scripts/download_qwen3_vl.sh`。
 
@@ -95,22 +97,22 @@ claude plugin update anythinguse    # 或：grok plugin update
 
 共存不是"目标应用在前台就暂停"：
 
-- macOS 任务绑定到特定 PID 和窗口；后台语义/定向输入优先，只有经过一次 GUI 批准的 foreground session 才允许激活（未经批准绝不作为兜底）。
-- 应用访问、前台激活、后果确认/接管是三类独立授权；批准后丢弃旧动作，由同一 Actor 基于新观察重新决策。
-- 前台对话框会披露精确目标可能被带到前台；之后绝不自动切回。Actor 思考时挂起原生前台所有权；只有精确窗口仍在前台且未被用户触碰时才无激活恢复。用户真实输入会自动暂停任务（macOS 控制需要“输入监控”权限）。
+- macOS 任务绑定到特定 PID 和窗口；后台语义/定向输入优先。应用访问会披露 `auto` 在后台投递不可用时可能激活该精确目标；`background_only` 直接失败。
+- 应用访问与后果确认/接管相互独立；激活或批准后丢弃旧动作，由同一 Actor 基于新观察重新决策。
+- 之后绝不自动切回。Actor 思考时释放通用目标占用，继续时重新解析并观察目标。用户真实输入会自动暂停任务（macOS 控制需要“输入监控”权限）。
 - Chrome 工作在非激活任务标签页进行，从不重新激活用户的标签页。
 - 无法维持严格目标身份时，操作失败，而不是猜测另一个窗口。
 - 后果类动作（发送/删除/支付/…）即使在会话内，仍使用一次性后果确认或人工接管。
 
 对于没有可用 Accessibility 控件的应用，当前只能观察；除非既有的 PID
-定向动作能够证明安全投递，或用户批准了一次性 foreground session。
-AnythingUse 不会通过让用户当前应用失焦来迫使后台目标接收输入。
+定向动作能够证明安全投递，或 `auto` 激活精确且已获访问许可的目标并重新观察。
+AnythingUse 不会激活其他窗口，也不会在完成后自动切回。
 
 这是产品不变量。未经批准切到目标再切回去不算非干扰。
 
 ## 队列与完成
 
-每个 macOS 登录用户一条串行 FIFO 队列；`waiting_actor` 与暂停任务释放全局执行槽，等待外部 Agent 的任务只保留严格目标 reservation。任务只有在 Actor 显式发出 `Done` **且**目标可被再次观察时才达到 `succeeded`。
+每个 macOS 登录用户一条串行 FIFO 队列；`waiting_actor` 与暂停任务释放全局执行槽和通用目标占用。任务只有在 Actor 显式发出 `Done` **且**目标可被再次观察时才达到 `succeeded`。
 
 ## 路线图
 

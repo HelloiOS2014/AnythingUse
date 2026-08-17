@@ -32,15 +32,15 @@ AnythingUse v$VERSION — local-first control plane for macOS apps and Chrome.
 
 Components:
   bin/lcu                public CLI
-  bin/lcu-desktop        Runtime host (start this first)
+  bin/lcu-desktop        Runtime host (started on demand by lcu)
   bin/macos-window-service  Swift window service (auto-spawned by desktop)
   extension/             Chrome extension source (install via scripts/install-native-host.sh)
   skills/                agent skill (install via Claude/Grok plugin marketplace)
   AGENTS.md              agent notes
 
 Quick start:
-  ./bin/lcu-desktop &
   ./bin/lcu doctor --json
+  # Run ./bin/lcu-desktop yourself only for a persistent menu-bar host.
 
 External Agent (default decision path):
   ./bin/lcu run "Open Downloads in Finder" --app com.apple.finder --actor agent --json

@@ -10,10 +10,10 @@ scenario.
 
 Execution surfaces:
 
-- **macOS apps** — strict window-targeted control via `macos-window-service`. Choose `--control-mode auto|background_only|foreground`; `auto` prefers background and may request a task-scoped foreground grant. The agent never switches back to the previous app. Agent think time suspends native ownership; no-activation resume requires the same untouched foreground window, and real user input pauses automatically. Consequences use separate one-time confirmation or takeover gates.
+- **macOS apps** — strict window-targeted control via `macos-window-service`. Choose `--control-mode auto|background_only`; `auto` prefers background and may activate the exact permitted target when required, while `background_only` fails instead. The agent never switches back. Agent waits release generic ownership and resume from a fresh target observation; real user input on that target pauses automatically. Consequences use separate one-time confirmation or takeover gates.
 - **Chrome** — real Chrome Extension + Native Messaging + debugger/CDP on an inactive background task tab (not Playwright, not a second browser). User tabs are not reactivated when a task ends.
 
-Tasks enter one serial FIFO queue. `waiting_actor` and paused tasks release the global execution slot; an Agent continuation keeps only its strict target reservation. An action receipt is not completion: `succeeded` requires explicit `Done` followed by successful target re-observation.
+Tasks enter one serial FIFO queue. `waiting_actor` and paused tasks release the global execution slot and generic target reservation. An action receipt is not completion: `succeeded` requires explicit `Done` followed by successful target re-observation.
 
 ## Requirements
 
@@ -59,12 +59,13 @@ cargo build -p lcu-cli -p lcu-desktop --release
 # Native macOS window service (auto-spawned by Runtime when found)
 cd native/macos-window-service && swift build -c release && cd ../..
 
-# start desktop-owned Runtime (production path)
-./target/release/lcu-desktop &
-
-# health (surfaces + permissions)
+# health (starts the menu-bar Runtime on demand)
 ./target/release/lcu doctor --json
 ```
+
+The on-demand host exits after 60 idle seconds when no task or approval is
+active. Run `./target/release/lcu-desktop` explicitly only for a persistent
+menu-bar host.
 
 ### Chrome surface (optional)
 
@@ -85,7 +86,7 @@ default above). Do not load the repository source directory into Chrome.
 3. Choose one explicit decision path:
    - Local model installed: `lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json`.
    - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`.
-4. If a gate is required, use the menu-bar / desktop UI (not the CLI). App access, foreground activation, and consequence confirmation/takeover are separate. Foreground approval may bring the exact window forward; the old proposal is discarded and the same Actor receives a fresh observation.
+4. If a gate is required, use the menu-bar / desktop UI (not the CLI). App access discloses that `auto` may bring the exact target forward; consequence confirmation/takeover remains separate. Activation or approval discards the old proposal and the same Actor receives a fresh observation.
 
 Persistent app access can be removed from the menu-bar item **Revoke app access…**.
 

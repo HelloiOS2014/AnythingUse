@@ -15,13 +15,13 @@ The architecture prioritizes:
 - explicit, observable completion;
 - no second privileged protocol for Agents.
 
-This document records the implemented source-level architecture and command
-contract. It is not evidence that every real application has stable runtime
-behavior; that requires target-specific verification.
+This document records the currently implemented source architecture. The
+normative migration target is the [Execution Contract](execution-contract.md);
+[Delivery status](status.md) states which parts have reached source and runtime
+verification.
 
-The reference comparison and rejected screenshot-only Operator candidate are
-tracked in [Computer Use Reference Notes](computer-use-reference.md). This page
-records only the accepted current-state architecture.
+External comparisons are kept separately in the non-normative
+[Computer Use Reference Notes](computer-use-reference.md).
 
 ## Components
 
@@ -108,15 +108,13 @@ Wire state names match the Runtime JSON: `waiting_actor` (older persisted aliase
 `cancelled`.
 
 The scheduler executes one desktop action at a time. `waiting_actor` and paused
-tasks do **not** hold the global execution slot; an external Agent continuation
-retains only its strict target reservation. A gate decision discards the old
-proposal, captures a fresh observation, and returns it to the same Actor. At
-most one foreground session exists at any time.
+tasks hold neither the global execution slot nor a generic PID/window
+reservation. Continuation re-resolves and re-observes the target. A gate
+decision discards the old proposal and returns a fresh observation to the same
+Actor.
 
-The task-scoped foreground capability survives an external-Agent decision, but
-native ownership does not: it is suspended while the Actor thinks. Resume never
-activates an app and succeeds only when the same exact window is still
-foreground and the native HID monitor observed no user input.
+The listen-only native HID monitor remains independent of foreground state and
+invalidates work when real user input touches the controlled target.
 The native service increments a session epoch on sleep/wake or login-session
 activation changes; Runtime pauses only tasks holding temporary target/grant
 state and releases those resources before any later action.
@@ -154,25 +152,20 @@ The Swift service resolves a concrete target using PID and `CGWindowID`. Accessi
 Rules:
 
 - background semantic first, then provably isolated background targeted input;
-  activation is used only inside one GUI-approved foreground session;
+  `auto` may activate only the exact app-access-permitted target when the
+  backend reports `foreground_required`; `background_only` fails instead;
 - do not fall back to another focused or first window when identity fails;
 - directed input must remain bound to the same target;
 - real user HID on the reserved window pauses the task;
 - target loss fails safely.
 
-**Foreground session (single slot, GUI-approved):** the Runtime keeps one
-`(task_id, pid, window_id)` session slot. It starts only after a task-scoped
-foreground grant (`auto` after `foreground_required`, or `foreground` at task
-start) and is cleared on terminal / pause / target change / release /
-runtime recovery. The Swift service mirrors it in a single slot; while active,
-the agent's own promotion is neither a FocusGuard steal nor user takeover, and
-`foreground_activate` (the only `NSRunningApplication.activate` entry) must
-raise or uniquely prove the exact window before activation and re-prove it
-after activation and before every directed input. The previous app is never
-restored. Real user HID on the target ends the session and pauses the task
-automatically; focus changes without target HID are not takeover. Ordinary actions
-inside an approved session do not repeat capability approval; consequences use
-separate one-time confirmation or takeover gates.
+**Foreground fallback:** app access discloses that `auto` may activate the
+exact target when verified background delivery is unavailable. Runtime then
+discards the old proposal. `foreground_activate` is the only AppKit activation
+entry; it must prove the exact window after
+activation and before directed input. The previous app is never restored.
+Real user HID on the target pauses the task; consequences retain separate
+one-time confirmation or takeover gates.
 
 ### Chrome backend
 
@@ -197,8 +190,8 @@ It does not require a new Agent-facing protocol.
 - No public TCP listener.
 - Runtime sockets use local filesystem permissions.
 - Screenshots and semantic trees are not returned through normal CLI results.
-- App access, foreground activation, and consequence confirmation/takeover are
-  distinct GUI-bound grants. Consequence matching uses Runtime-derived identity;
+- App access and consequence confirmation/takeover are distinct GUI-bound
+  decisions. App access discloses foreground fallback. Consequence matching uses Runtime-derived identity;
   screenshot-only input additionally requires exact fresh image/action evidence.
 - Agent source metadata is display-only and does not grant authority.
 - Model output is treated as untrusted input and validated before execution.

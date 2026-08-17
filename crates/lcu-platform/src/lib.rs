@@ -73,24 +73,12 @@ pub trait PlatformBackend: Send + Sync {
         Ok(0)
     }
 
-    /// Mark that the product worker currently owns control of `target`.
-    fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
-        let _ = (target, active);
-        Ok(())
-    }
-
-    /// Temporarily release native foreground ownership while preserving the
-    /// task's resumable session state.
-    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
-        self.set_agent_session(target, false)
-    }
-
-    /// Resume only if the exact window is still foreground and untouched.
-    /// Implementations must never activate an app here.
-    fn resume_agent_session(&self, _target: &AppTarget) -> LcuResult<()> {
+    /// Bring the exact permitted target to the front. The next action must use a
+    /// fresh observation; this method never executes the rejected old action.
+    fn activate_target(&self, _target: &AppTarget) -> LcuResult<()> {
         Err(LcuError::coded(
             ErrorCode::ForegroundRequired,
-            "foreground session cannot resume without a new approval",
+            "foreground activation is unsupported by this backend",
         ))
     }
 
@@ -102,7 +90,6 @@ pub trait PlatformBackend: Send + Sync {
 
     /// Release backend ownership of `target` (complete / cancel / fail / takeover).
     fn release(&self, target: &AppTarget) -> LcuResult<()> {
-        let _ = self.set_agent_session(target, false);
         let _ = self.set_takeover_watch(target, false);
         Ok(())
     }

@@ -2,7 +2,8 @@
 
 ## `runtime unavailable` (exit 69)
 
-- Start `lcu-desktop`, or set `LCU_EMBEDDED_RUNTIME=1` for local smoke only (debug builds).
+- `lcu` normally starts its sibling `lcu-desktop` automatically. Rebuild or
+  reinstall if that binary is missing.
 - Check socket under Runtime root; must not listen on TCP.
 
 ## Permissions denied
@@ -43,9 +44,9 @@ Older persisted rows may appear as `waiting_user` / `waiting_approval`.
 - AnythingUse may attempt one background coordinate click only when AX hit-testing
   can prove an actionable element or the exact editable becomes focused. It never
   follows an unverified click with text or Return/Enter.
-- If background delivery is unavailable, the Runtime parks **one** approval for a
-  foreground session (the target window may come to the front once; the agent
-  never switches back and real user input on the target pauses automatically).
+- If background delivery is unavailable, `auto` may activate only the exact
+  permitted target, discard the old proposal, and re-observe. `background_only`
+  fails instead. The agent never switches back.
 - Consequences still use separate one-time confirmation or takeover gates. Do
   not add an application-specific workaround or weaken Runtime's evidence floor.
 
@@ -63,26 +64,22 @@ Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered
 
 ## Target becomes frontmost
 
-- Inside a GUI-approved foreground session the target window may come to the
-  front — that is the disclosed effect of the approval, not a bug. The agent
-  never switches back to the previous app afterwards.
+- In `auto`, a permitted target may come to the front when background delivery
+  is unavailable. App access discloses this fallback; the agent never switches
+  back afterwards.
 - macOS control requires Input Monitoring to distinguish real user HID from
-  tagged AnythingUse input. While an external Agent
-  decides, native ownership is suspended; no-activation resume is allowed only
-  if the exact target stayed foreground and untouched.
-- Outside an approved session, an unexpected activation is a control-plane bug:
-  cancel the task. Do not work around it by activating the target and switching
-  back.
-- Real user HID on the target automatically ends the session and pauses the
-  task. `lcu pause` / `lcu cancel` remain explicit controls.
+  tagged AnythingUse input. Agent waits release generic ownership; continuation
+  re-resolves and re-observes the target.
+- Activation of any window other than the exact permitted target is a
+  control-plane bug: cancel the task. Do not switch back as a workaround.
+- Real user HID on the target pauses the task. `lcu pause` / `lcu cancel`
+  remain explicit controls.
 
 ## Foreground-required input
 
-- `exclusive` is not an Action. Choose task policy with
-  `--control-mode auto|background_only|foreground`.
-- `auto` tries background first and requests a task-scoped foreground grant
-  only after the backend returns `foreground_required`; `background_only`
-  fails instead of activating; `foreground` requests the grant at task start.
-- Foreground approval is a capability grant, not consequence confirmation.
-  After activation Runtime takes a fresh observation and asks the same Actor to
-  propose again. It never restores the previous app or emits global HID.
+- `exclusive` is not an Action. Choose `--control-mode auto|background_only`.
+- `auto` tries background first and activates only after the backend returns
+  `foreground_required`; `background_only` fails instead.
+- App access already disclosed this capability fallback. After activation
+  Runtime takes a fresh observation and asks the same Actor to propose again.
+  It never restores the previous app or emits global HID.

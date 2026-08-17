@@ -34,11 +34,7 @@ enum DirectedInput {
         // to the target window. Never write AX focus attributes.
         if let hit = AXBridge.elementAtScreenPoint(point, expectedPID: target.pid) {
             if AXBridge.elementBelongsToTargetWindow(hit, target: target) {
-                if ForegroundSession.shared.allowsSessionInput(
-                    pid: target.pid,
-                    windowID: target.windowID,
-                    appIsFrontmost: FocusGuard.isFrontmost(pid: target.pid)
-                ), let editable = AXBridge.editableAtOrAbove(hit)
+                if foregroundTargetProven(target), let editable = AXBridge.editableAtOrAbove(hit)
                     ?? AXBridge.editableBelow(hit, containing: point)
                 {
                     try AXBridge.focusEditable(editable, target: target)
@@ -67,15 +63,7 @@ enum DirectedInput {
             }
         }
 
-        // Approved foreground session: the session only marks the agent's
-        // activation owner; delivery still requires the exact-window proof
-        // (AX key-window identity, or the unique topmost same-PID CGWindow).
-        // Effect is judged by Runtime from the mandatory fresh observation.
-        if ForegroundSession.shared.allowsSessionInput(
-            pid: target.pid,
-            windowID: target.windowID,
-            appIsFrontmost: FocusGuard.isFrontmost(pid: target.pid)
-        ) {
+        if foregroundTargetProven(target) {
             try postMouseClick(pid: target.pid, point: point)
             return ActionReport(
                 path: "session_post_to_pid_click",
@@ -90,10 +78,11 @@ enum DirectedInput {
 
         // AX is optional for screenshot-driven apps; delivery is window-bound
         // and its effect is judged from the mandatory fresh observation. No
-        // input has happened at this point, so foreground_required (the
-        // ForegroundGrant fallback) is safe to report.
+        // input has happened at this point, so foreground_required is safe to
+        // report; Runtime may activate the exact permitted target and retry
+        // only after a fresh observation.
         throw ServiceError.foregroundRequired(
-            "click unavailable without an approved foreground session: no actionable AX element at "
+            "click unavailable without an exact foreground target: no actionable AX element at "
                 + String(format: "(%.1f, %.1f)", x, y)
         )
     }
@@ -157,7 +146,7 @@ enum DirectedInput {
     }
 
     /// Type into the target process's key window after a directed click (or an
-    /// approved foreground session made the window key). No editable proof is
+    /// exact-target foreground fallback made the window key). No editable proof is
     /// available on screenshot-only paths, so delivery requires the strict
     /// key-window proof instead; typing starts only when that holds.
     static func typeIntoKeyWindow(target: MacWindowTarget, text: String) throws {
@@ -213,15 +202,7 @@ enum DirectedInput {
     /// `CGEvent.postToPid` is PID-only; without key-window proof it can hit the
     /// user's same-app window A while the agent intended window B.
     private static func requireKeyWindowForCGEvent(target: MacWindowTarget, capability: String) throws {
-        // An approved foreground session still requires the exact-window proof
-        // (AX key-window identity or unique topmost same-PID window); the
-        // session only marks the agent's activation owner. Background
-        // (no session) keeps the strict proof below.
-        if ForegroundSession.shared.allowsSessionInput(
-            pid: target.pid,
-            windowID: target.windowID,
-            appIsFrontmost: FocusGuard.isFrontmost(pid: target.pid)
-        ) {
+        if foregroundTargetProven(target) {
             return
         }
         // A background process cannot receive the user's live keyboard/mouse stream;
@@ -249,6 +230,11 @@ enum DirectedInput {
                 + "(pid=\(target.pid) window_id=\(target.windowID)) is the process key window; "
                 + "PID-only delivery would risk same-app window isolation"
         )
+    }
+
+    private static func foregroundTargetProven(_ target: MacWindowTarget) -> Bool {
+        FocusGuard.isFrontmost(pid: target.pid)
+            && FocusGuard.provesExactWindow(pid: target.pid, windowID: target.windowID)
     }
 
     /// Segment size for mid-type key-window re-proof (characters).

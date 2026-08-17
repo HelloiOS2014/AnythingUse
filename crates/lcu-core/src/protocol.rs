@@ -70,6 +70,15 @@ impl<T> JsonEnvelope<T> {
             data: None,
         }
     }
+
+    pub fn waiting(data: T) -> Self {
+        Self {
+            schema_version: PROTOCOL_SCHEMA_VERSION.to_string(),
+            status: JsonStatus::WaitingUser,
+            error: None,
+            data: Some(data),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -10,12 +10,14 @@ import Darwin
 final class SocketServer {
     private let socketPath: String
     private let service: Service
+    private let parentPID: pid_t?
     private var serverFd: Int32 = -1
     private var running = false
 
-    init(socketPath: String, service: Service) {
+    init(socketPath: String, service: Service, parentPID: pid_t? = nil) {
         self.socketPath = socketPath
         self.service = service
+        self.parentPID = parentPID
     }
 
     func start() throws {
@@ -72,6 +74,10 @@ final class SocketServer {
         fputs("macos-window-service listening on \(socketPath)\n", stderr)
 
         while running {
+            if let parentPID, getppid() != parentPID {
+                stop()
+                break
+            }
             // Accept with short select so RunLoop can still process MainActor capture if needed.
             var fds = fd_set()
             // swift-format: fd_set helpers
@@ -101,6 +107,8 @@ final class SocketServer {
             serverFd = -1
         }
         try? FileManager.default.removeItem(atPath: socketPath)
+        let pidPath = (socketPath as NSString).deletingPathExtension + ".pid"
+        try? FileManager.default.removeItem(atPath: pidPath)
     }
 
     private static func handleClient(fd: Int32, service: Service) {

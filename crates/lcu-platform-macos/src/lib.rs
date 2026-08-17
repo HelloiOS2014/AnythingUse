@@ -443,68 +443,12 @@ impl PlatformBackend for MacosBackend {
             })
     }
 
-    fn set_agent_session(&self, target: &AppTarget, active: bool) -> LcuResult<()> {
-        if self.skeleton_only {
-            return Ok(());
-        }
-        // Single-slot foreground session in the Swift service. Activating the
-        // session is the only path that may call NSRunningApplication.activate
-        // (Swift `foreground_activate`), and it runs only after a GUI grant
-        // placed the approved session here.
-        self.client.call(
-            "set_foreground_session",
-            Some(json!({
-                "pid": target.pid,
-                "window_id": target.window_id,
-                "active": active,
-            })),
-        )?;
-        if active {
-            if let Err(activate_err) = self.client.call(
-                "foreground_activate",
-                Some(json!({
-                    "pid": target.pid,
-                    "window_id": target.window_id,
-                })),
-            ) {
-                // Roll back the session slot we just opened: a failed
-                // activation would otherwise leave the native session active
-                // with no Runtime slot to close it. Best-effort; the original
-                // activation error is the one we report.
-                let _ = self.client.call(
-                    "set_foreground_session",
-                    Some(json!({
-                        "pid": target.pid,
-                        "window_id": target.window_id,
-                        "active": false,
-                    })),
-                );
-                return Err(activate_err);
-            }
-        }
-        Ok(())
-    }
-
-    fn suspend_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
+    fn activate_target(&self, target: &AppTarget) -> LcuResult<()> {
         if self.skeleton_only {
             return Ok(());
         }
         self.client.call(
-            "suspend_foreground_session",
-            Some(json!({
-                "pid": target.pid,
-                "window_id": target.window_id,
-            })),
-        )?;
-        Ok(())
-    }
-
-    fn resume_agent_session(&self, target: &AppTarget) -> LcuResult<()> {
-        if self.skeleton_only {
-            return Ok(());
-        }
-        self.client.call(
-            "resume_foreground_session",
+            "foreground_activate",
             Some(json!({
                 "pid": target.pid,
                 "window_id": target.window_id,

@@ -40,37 +40,6 @@ final class Service {
             return try semantic(params)
         case "targeted":
             return try targeted(params)
-        case "set_foreground_session":
-            let p = params ?? [:]
-            let active = (p["active"] as? Bool) ?? false
-            if active {
-                guard UserInputMonitor.shared.isRunning else {
-                    throw ServiceError.permission(
-                        "Input Monitoring is required for safe foreground control"
-                    )
-                }
-                ForegroundSession.shared.begin(
-                    pid: pid_t(intValue(p["pid"]) ?? 0),
-                    windowID: CGWindowID(uintValue(p["window_id"]) ?? 0)
-                )
-            } else {
-                let pid = pid_t(intValue(p["pid"]) ?? 0)
-                let windowID = CGWindowID(uintValue(p["window_id"]) ?? 0)
-                if pid == 0, windowID == 0 {
-                    ForegroundSession.shared.clear()
-                } else {
-                    ForegroundSession.shared.clear(pid: pid, windowID: windowID)
-                }
-            }
-            return ["ok": true, "active": active]
-        case "suspend_foreground_session":
-            let target = try resolveTargetRequired(params)
-            ForegroundSession.shared.suspend(pid: target.pid, windowID: target.windowID)
-            return ["ok": true]
-        case "resume_foreground_session":
-            let target = try resolveTargetRequired(params)
-            try ForegroundSession.shared.resume(pid: target.pid, windowID: target.windowID)
-            return ["ok": true]
         case "foreground_activate":
             return try foregroundActivate(params)
         case "detect_conflict", "detect_control_state", "session_health":
@@ -435,7 +404,7 @@ final class Service {
                 // when possible, which also makes the target window key
                 // in-process), then type under strict key-window proof. When the
                 // proof cannot be established no input has occurred and the
-                // foreground session fallback applies.
+                // exact-target foreground fallback applies.
                 let click = try DirectedInput.click(
                     target: target,
                     normalizedX: x,
@@ -458,58 +427,59 @@ final class Service {
         }
     }
 
-    // MARK: - approved foreground session
+    // MARK: - foreground fallback
 
-    /// The only entry in this process that may call `NSRunningApplication.activate`.
-    /// Runs only for a session placed by `set_foreground_session` after a GUI
-    /// ForegroundGrant. The exact target is raised before activation and must
-    /// still exist afterwards. Every input inside the session separately
-    /// re-proves the exact key window (`ForegroundSession.allowsSessionInput`),
-    /// so a same-process sheet or popover cannot redirect input. Never restores
-    /// the previous app.
+    /// The only entry in this process that may activate another application.
+    /// App access is checked by Runtime before this call. Activation never
+    /// executes the rejected old action; Runtime observes again afterwards.
     private func foregroundActivate(_ params: [String: Any]?) throws -> [String: Any] {
         let p = params ?? [:]
         guard let pid = intValue(p["pid"]), let wid = uintValue(p["window_id"]) else {
             throw ServiceError.invalidRequest("foreground_activate requires pid and window_id")
         }
-        guard ForegroundSession.shared.isActive(pid: pid_t(pid), windowID: CGWindowID(wid)) else {
-            throw ServiceError.foregroundRequired(
-                "foreground_activate refused: no approved session for pid=\(pid) window_id=\(wid)"
-            )
-        }
         let target = try WindowResolver.resolve(pid: pid_t(pid), windowID: CGWindowID(wid))
         let accessibility = AXBridge.enableAccessibility(pid: target.pid)
         defer { accessibility.disable() }
-        let exactWindowPrepared = AXBridge.raiseExactWindow(target)
-            || FocusGuard.uniqueTopmostSamePIDWindow(pid: target.pid) == target.windowID
-        guard exactWindowPrepared else {
-            throw ServiceError.foregroundRequired(
-                "foreground_activate refused before activation: exact window cannot be raised or uniquely proven"
-            )
-        }
+        _ = AXBridge.raiseExactWindow(target)
         guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else {
             throw ServiceError.targetLost(
                 "foreground_activate: process \(pid) is no longer running"
             )
         }
-        guard app.activate(options: []) else {
-            throw ServiceError.actionFailed(
-                "foreground_activate failed: activation request rejected for pid \(pid)"
-            )
+        guard let appURL = app.bundleURL else {
+            throw ServiceError.actionFailed("foreground_activate failed: app bundle URL unavailable")
         }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = false
+        let completion = DispatchSemaphore(value: 0)
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, _ in
+            completion.signal()
+        }
+        guard completion.wait(timeout: .now() + 3) == .success else {
+            throw ServiceError.actionFailed("foreground_activate failed: activation timed out")
+        }
+        _ = AXBridge.raiseExactWindow(target)
         // AppKit activation is asynchronous. A same-process sheet or popover
         // may legitimately become key; the exact target remains the session
         // scope and every input re-proves its destination separately.
         for _ in 0..<20 {
             if FocusGuard.isFrontmost(pid: pid_t(pid)),
-               WindowResolver.windowExists(pid: pid_t(pid), windowID: CGWindowID(wid))
+               FocusGuard.provesExactWindow(pid: pid_t(pid), windowID: CGWindowID(wid))
             {
                 return ["ok": true, "pid": Int(pid), "window_id": Int(wid)]
             }
             usleep(50_000)
         }
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        let focused = FocusGuard.focusedWindowNumber(pid: pid_t(pid)).map(String.init) ?? "nil"
+        let topmost = FocusGuard.topmostSamePIDWindow(pid: pid_t(pid)).map(String.init) ?? "nil"
+        let center = CGPoint(x: target.bounds.midX, y: target.bounds.midY)
+        let hit = WindowResolver.windowAtScreenPoint(center)
+            .map { "\($0.0):\($0.1)" } ?? "nil"
         throw ServiceError.actionFailed(
-            "foreground_activate failed: target app/window was not available after activation"
+            "foreground_activate failed: target app/window was not available after activation "
+                + "frontmost=\(frontmost) focused=\(focused) topmost=\(topmost) center_hit=\(hit)"
         )
     }
 

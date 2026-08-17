@@ -26,7 +26,7 @@ Use this skill when the user wants an agent to operate **real** desktop applicat
 | Command | Purpose |
 |---|---|
 | `lcu doctor [--json]` | Permissions (`screen_recording`/`accessibility`/`input_monitoring`), runtime reachability, private entry, surface connectivity in `notes` (`mac_window` / `chrome_tab`) |
-| `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--actor vlm\|agent] [--control-mode auto\|background_only\|foreground] [--json]` | Submit a task (`--actor` picks the decision maker; `--control-mode` picks the task execution policy) |
+| `lcu run "<goal>" [--app <id>] [--wait] [--max-steps N] [--source human\|agent] [--source-name <name>] [--actor vlm\|agent] [--control-mode auto\|background_only] [--json]` | Submit a task (`--actor` picks the decision maker; `--control-mode` picks the task execution policy) |
 | `lcu list [--json]` | List global queue tasks |
 | `lcu status <task-id> [--json]` | Task state |
 | `lcu watch <task-id> [--seconds N]` | Incremental JSONL status lines |
@@ -77,9 +77,9 @@ Stable exit codes: `0` ok, `2` waiting user, `3` task failed, `4` permission, `6
 4. Claim completion only after `lcu result <task-id> --json` reports
    `succeeded`; otherwise continue the loop or cancel.
 
-There is **one serial FIFO queue** for the macOS login user. `waiting_actor` and user-paused tasks release the execution slot; a waiting Agent task keeps only its strict target reservation. Do not invent client secrets, `RegisterClient`, MCP, or Playwright.
+There is **one serial FIFO queue** for the macOS login user. `waiting_actor` and user-paused tasks release the execution slot and generic target reservation. Do not invent client secrets, `RegisterClient`, MCP, or Playwright.
 
-macOS execution ladder: background semantic → provably isolated background targeted → **foreground session** (task-scoped GUI grant) → explicit failure. Background is preferred, never promised. When foreground is required, Runtime discards the old proposal, activates only the exact approved target, takes a fresh observation, and returns control to the same Actor; it never restores the previous app. Agent think time suspends native ownership; no-activation resume requires the same untouched foreground window. Consequences (send/delete/pay/…) use separate one-time confirmation or takeover gates. Real user HID on the target ends the session and pauses the task automatically; focus changes alone do not (macOS control requires Input Monitoring). Chrome tasks use an inactive background task tab and do not reactivate user or task tabs on completion. Do **not** drive Chrome via page DOM, CDP, or Playwright from the agent — only `lcu run …`.
+macOS execution ladder: background semantic → provably isolated background targeted → disclosed exact-target foreground fallback in `auto` → explicit failure in `background_only`. App access discloses the fallback. Runtime discards the old proposal before activation, takes a fresh observation, and returns control to the same Actor; it never restores the previous app. Agent waits release generic target ownership. Consequences (send/delete/pay/…) use separate one-time confirmation or takeover gates. Real user HID on the target pauses the task automatically; focus changes alone do not (macOS control requires Input Monitoring). Chrome tasks use an inactive background task tab and do not reactivate user or task tabs on completion. Do **not** drive Chrome via page DOM, CDP, or Playwright from the agent — only `lcu run …`.
 
 ## Chrome setup and navigation
 
@@ -100,14 +100,15 @@ URLs with a host; never call the native-host method directly.
 ## What you must not do
 
 - Read `~/Library/Application Support/LocalComputerUse` task DBs or screenshot dirs for “cheating” evidence.
-- Bypass the three GUI gates: app access, task-scoped foreground activation, and one-time consequence confirmation/takeover.
+- Bypass app access or one-time consequence confirmation/takeover.
 - Open Runtime / chrome-control / macos-window sockets yourself.
 - Start Windows-specific tooling.
 
 ## References
 
 - `docs/status.md` — delivery boundary (v3.2)
-- `docs/command-contract.md` — full contract
+- `docs/execution-contract.md` — normative execution contract (live acceptance pending)
+- `docs/command-contract.md` — current implemented CLI contract
 - `docs/user-guide.md` — human setup (including Chrome extension install)
 - `docs/privacy.md` — data retention
 - `docs/troubleshooting.md` — common failures

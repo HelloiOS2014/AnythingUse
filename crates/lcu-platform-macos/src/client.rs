@@ -203,6 +203,8 @@ impl NativeClient {
             .arg("serve")
             .arg("--socket")
             .arg(&self.socket_path)
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

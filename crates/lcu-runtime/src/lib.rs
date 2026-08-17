@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{Duration, Utc};
 use lcu_core::action::{Action, EffectClaim, EffectKind, SemanticAction, TargetedInput};
 use lcu_core::approval::{
-    AppAccessDecision, AppPermission, ConsequenceGrant, ConsequenceIdentity, ForegroundGrant,
-    GateKind, GateRequest, GrantId, GrantStatus, ScreenshotEvidence,
+    AppAccessDecision, AppPermission, ConsequenceGrant, ConsequenceIdentity, GateKind, GateRequest,
+    GrantId, GrantStatus, ScreenshotEvidence,
 };
 use lcu_core::effect_guard::{EffectContext, EffectGuard, StaticEffectGuard};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
@@ -30,7 +30,7 @@ use lcu_core::protocol::{
 };
 use lcu_core::risk::RiskLevel;
 use lcu_core::task::{
-    ControlMode, TaskCommand, TaskEvent, TaskId, TaskRecord, TaskState, TaskStateMachine,
+    ControlMode, TaskCommand, TaskEvent, TaskId, TaskRecord, TaskState, TaskStateMachine, WaitReason,
 };
 use lcu_core::types::CallerIdentity;
 use lcu_model::VisionActor;
@@ -61,8 +61,8 @@ pub struct Runtime {
     /// Pending gate requests visible to the desktop GUI. CLI/Agents can never
     /// finalize them; a gate carries no executable Action to replay.
     gates: Mutex<HashMap<String, GateRequest>>,
-    /// Approved, not-yet-consumed grants (app access / foreground / consequence).
-    grants: Mutex<HashMap<String, Grant>>,
+    /// Approved, not-yet-consumed consequence grants.
+    grants: Mutex<HashMap<String, ConsequenceGrant>>,
     /// Persistent app permissions (always_allow only; revocable in settings).
     app_permissions: Mutex<HashMap<String, AppPermission>>,
     /// Task-scoped allow_once app access keys (released at task terminal).
@@ -89,22 +89,7 @@ pub struct Runtime {
     /// Capacity-one backend surfaces (currently the connected Chrome extension).
     surface_owners: Mutex<HashMap<String, TaskId>>,
     surface_waiters: Mutex<HashMap<String, Vec<TaskId>>>,
-    /// GUI-approved foreground session: task + exact target. Single slot (serial
-    /// FIFO). Starts only after a ForegroundGrant; cleared on terminal / pause /
-    /// target change / release / runtime recovery. Never restored to a previous app.
-    foreground: Mutex<Option<(TaskId, AppTarget)>>,
-    /// Task-scoped foreground authorization retained while the native session
-    /// is suspended for an external Agent decision.
-    foreground_authorized: Mutex<HashMap<String, AppTarget>>,
     control_epoch: AtomicU64,
-}
-
-/// Approved grant waiting to be consumed exactly once. App access is recorded
-/// as a permission at GUI decision time and never sits in this map.
-#[derive(Debug, Clone)]
-pub enum Grant {
-    Foreground(ForegroundGrant),
-    Consequence(ConsequenceGrant),
 }
 
 impl Runtime {
@@ -153,8 +138,6 @@ impl Runtime {
             target_waiters: Mutex::new(Vec::new()),
             surface_owners: Mutex::new(HashMap::new()),
             surface_waiters: Mutex::new(HashMap::new()),
-            foreground: Mutex::new(None),
-            foreground_authorized: Mutex::new(HashMap::new()),
             control_epoch: AtomicU64::new(control_epoch),
             agent_actor,
             default_actor,
@@ -192,8 +175,6 @@ impl Runtime {
             target_waiters: Mutex::new(Vec::new()),
             surface_owners: Mutex::new(HashMap::new()),
             surface_waiters: Mutex::new(HashMap::new()),
-            foreground: Mutex::new(None),
-            foreground_authorized: Mutex::new(HashMap::new()),
             control_epoch: AtomicU64::new(0),
             agent_actor: Arc::new(lcu_model::AgentActor::new()),
             default_actor: DecisionActor::Vlm,
@@ -240,13 +221,6 @@ impl Runtime {
                 .map(|(task_id, _)| task_id.clone()),
         );
         affected.extend(
-            self.foreground_authorized
-                .lock()
-                .expect("foreground_authorized")
-                .keys()
-                .cloned(),
-        );
-        affected.extend(
             self.surface_owners
                 .lock()
                 .expect("surface_owners")
@@ -258,10 +232,7 @@ impl Runtime {
                 .lock()
                 .expect("grants")
                 .values()
-                .map(|grant| match grant {
-                    Grant::Foreground(grant) => grant.task_id.0.clone(),
-                    Grant::Consequence(grant) => grant.task_id.0.clone(),
-                }),
+                .map(|grant| grant.task_id.0.clone()),
         );
 
         for id in &affected {
@@ -271,7 +242,11 @@ impl Runtime {
                 let _ = self.apply_command(&task_id, TaskCommand::PauseByUser, reason);
             } else {
                 self.release_current_target(&task_id);
-                self.clear_task_pending(&task_id);
+                if task.state.is_terminal() {
+                    self.clear_task_pending(&task_id);
+                } else {
+                    self.clear_task_gate(&task_id);
+                }
             }
         }
         affected
@@ -307,6 +282,16 @@ impl Runtime {
     }
 
     pub(crate) fn release_current_target(&self, task_id: &TaskId) {
+        let target = self.release_target_reservation(task_id);
+        if let Some(target) = target {
+            let _ = self.backend.release(&target);
+        }
+        self.release_serial_surface(task_id);
+    }
+
+    /// Release only the generic PID/window reservation. Backend task context
+    /// (notably a Chrome task-tab lease) remains alive while the task can resume.
+    pub(crate) fn release_target_reservation(&self, task_id: &TaskId) -> Option<AppTarget> {
         let target = self
             .current_target
             .lock()
@@ -316,8 +301,8 @@ impl Runtime {
             .lock()
             .expect("target_waiters")
             .retain(|(waiting, _, _)| waiting != task_id);
-        if let Some(t) = target {
-            let _ = self.backend.release(&t);
+        if let Some(t) = target.as_ref() {
+            let _ = self.backend.set_takeover_watch(t, false);
             let ready = {
                 let mut waiters = self.target_waiters.lock().expect("target_waiters");
                 let mut ready = Vec::new();
@@ -335,8 +320,7 @@ impl Runtime {
                 let _ = self.scheduler.enqueue(waiting);
             }
         }
-        self.close_foreground_session_for(task_id);
-        self.release_serial_surface(task_id);
+        target
     }
 
     pub(crate) fn reserve_serial_surface(
@@ -456,104 +440,12 @@ impl Runtime {
         if let Some(old) = previous {
             if old.pid != target.pid || old.window_id != target.window_id {
                 let _ = self.backend.release(&old);
-                self.close_foreground_session_for(task_id);
             }
         }
         Ok(true)
     }
 
-    /// Whether the GUI-approved foreground session matches this task + exact target.
-    pub(crate) fn foreground_is_active(&self, task_id: &TaskId, target: &AppTarget) -> bool {
-        self.foreground
-            .lock()
-            .expect("foreground")
-            .as_ref()
-            .map(|(owner, t)| owner == task_id && t.pid == target.pid && t.window_id == target.window_id)
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn foreground_is_authorized(&self, task_id: &TaskId, target: &AppTarget) -> bool {
-        self.foreground_authorized
-            .lock()
-            .expect("foreground_authorized")
-            .get(&task_id.0)
-            .is_some_and(|authorized| {
-                authorized.pid == target.pid && authorized.window_id == target.window_id
-            })
-    }
-
-    /// Open the approved foreground session: mark the slot and tell the backend
-    /// to activate the exact target (activation happens only here).
-    pub(crate) fn open_foreground_session(
-        &self,
-        task_id: &TaskId,
-        target: &AppTarget,
-    ) -> LcuResult<()> {
-        self.backend.set_agent_session(target, true)?;
-        self.foreground_authorized
-            .lock()
-            .expect("foreground_authorized")
-            .insert(task_id.0.clone(), target.clone());
-        *self.foreground.lock().expect("foreground") = Some((task_id.clone(), target.clone()));
-        Ok(())
-    }
-
-    pub(crate) fn resume_foreground_session(
-        &self,
-        task_id: &TaskId,
-        target: &AppTarget,
-    ) -> LcuResult<()> {
-        if !self.foreground_is_authorized(task_id, target) {
-            return Err(LcuError::coded(
-                ErrorCode::ForegroundRequired,
-                "foreground authorization missing",
-            ));
-        }
-        match self.backend.resume_agent_session(target) {
-            Ok(()) => {}
-            Err(e) if e.code() == ErrorCode::ForegroundRequired => {
-                self.backend.set_agent_session(target, true)?;
-            }
-            Err(e) => return Err(e),
-        }
-        *self.foreground.lock().expect("foreground") = Some((task_id.clone(), target.clone()));
-        Ok(())
-    }
-
-    pub(crate) fn suspend_foreground_session_for(&self, task_id: &TaskId) {
-        let slot = {
-            let mut foreground = self.foreground.lock().expect("foreground");
-            match foreground.as_ref() {
-                Some((owner, _)) if owner == task_id => foreground.take(),
-                _ => None,
-            }
-        };
-        if let Some((_, target)) = slot {
-            let _ = self.backend.suspend_agent_session(&target);
-        }
-    }
-
-    /// Clear the single foreground session slot (terminal / pause / release /
-    /// target change). Never restores the previous app.
-    pub(crate) fn close_foreground_session_for(&self, task_id: &TaskId) {
-        let slot = {
-            let mut foreground = self.foreground.lock().expect("foreground");
-            match foreground.as_ref() {
-                Some((owner, _)) if owner == task_id => foreground.take(),
-                _ => None,
-            }
-        };
-        let authorized = self
-            .foreground_authorized
-            .lock()
-            .expect("foreground_authorized")
-            .remove(&task_id.0);
-        if let Some(target) = authorized.or_else(|| slot.map(|(_, target)| target)) {
-            let _ = self.backend.set_agent_session(&target, false);
-        }
-    }
-
-    /// Terminal/pause cleanup for one task: drop the pending gate, invalidate
+    /// Terminal cleanup for one task: drop the pending gate, invalidate
     /// unconsumed grants, and release task-scoped allow_once permissions.
     /// Persistent always_allow permissions are untouched.
     pub(crate) fn clear_task_pending(&self, task_id: &TaskId) {
@@ -573,10 +465,7 @@ impl Runtime {
         }
         {
             let mut grants = self.grants.lock().expect("grants lock");
-            grants.retain(|_, grant| match grant {
-                Grant::Foreground(g) => g.task_id != *task_id,
-                Grant::Consequence(g) => g.task_id != *task_id,
-            });
+            grants.retain(|_, grant| grant.task_id != *task_id);
         }
     }
 
@@ -675,12 +564,11 @@ impl Runtime {
             record.control_mode = match mode {
                 "auto" => ControlMode::Auto,
                 "background_only" => ControlMode::BackgroundOnly,
-                "foreground" => ControlMode::Foreground,
                 other => {
                     return Err(LcuError::coded(
                         ErrorCode::InvalidRequest,
                         format!(
-                            "unknown --control-mode {other:?}; use auto, background_only or foreground"
+                            "unknown --control-mode {other:?}; use auto or background_only"
                         ),
                     ));
                 }
@@ -1053,17 +941,6 @@ impl Runtime {
         // Release whatever the dead process may have held (Chrome tab lease);
         // no-op for the macOS window backend.
         self.backend.clear_task_context();
-        // Reset any foreground session the dead process left active in the
-        // native service (single slot; pid 0 with active=false clears it).
-        let _ = self.backend.set_agent_session(
-            &AppTarget {
-                app_id: String::new(),
-                pid: 0,
-                window_id: 0,
-                window_title: String::new(),
-            },
-            false,
-        );
         // Gates/grants from the dead process are gone with it: invalidate and
         // drop all pending gate requests and unconsumed grants. Persistent
         // always_allow app permissions survive.
@@ -1082,6 +959,9 @@ impl Runtime {
     ) -> LcuResult<TaskRecord> {
         let mut record = self.load_task(task_id)?;
         TaskStateMachine::apply(&mut record, command)?;
+        if record.state != TaskState::WaitingActor {
+            record.wait_reason = None;
+        }
         let event = TaskEvent {
             task_id: record.task_id.clone(),
             state: record.state,
@@ -1097,26 +977,32 @@ impl Runtime {
                 .expect("budgets")
                 .remove(&record.task_id.0);
         } else if record.state == TaskState::WaitingActor {
-            // waiting_actor releases the native foreground session but keeps
-            // the non-executable target reservation (realignment §4.6).
-            self.suspend_foreground_session_for(task_id);
+            self.release_target_reservation(task_id);
         } else if record.state == TaskState::PausedByUser {
-            // Pause (user pause / request_user / takeover) ends the foreground
-            // session, invalidates unconsumed grants and releases the target
-            // reservation; the user owns the window until an explicit resume.
-            self.clear_task_pending(task_id);
-            self.close_foreground_session_for(task_id);
+            self.clear_task_gate(task_id);
             self.release_current_target(task_id);
         }
         self.persist_task(&record, Some(&event));
-        // A parked external-Agent decision owns only a temp screenshot and
-        // target reservation; terminal/pause removes both immediately.
+        // Terminal/pause removes any pending Agent screenshot immediately.
         if record.state.is_terminal() || record.state == TaskState::PausedByUser {
             if let Some(obs_id) = &record.last_observation_id {
                 self.agent_actor.discard(&obs_id.0);
             }
         }
         Ok(record)
+    }
+
+    pub(crate) fn set_wait_reason(&self, task_id: &TaskId, reason: WaitReason) -> LcuResult<()> {
+        let mut record = self.load_task(task_id)?;
+        if record.state != TaskState::WaitingActor {
+            return Err(LcuError::coded(
+                ErrorCode::InvalidRequest,
+                "wait_reason requires waiting_actor state",
+            ));
+        }
+        record.wait_reason = Some(reason);
+        self.persist_task(&record, None);
+        Ok(())
     }
 
     pub fn cancel_task(&self, task_id: &TaskId) -> LcuResult<TaskRecord> {
@@ -1244,38 +1130,7 @@ impl Runtime {
         self.grants
             .lock()
             .expect("grants lock")
-            .insert(grant_id.clone(), Grant::Consequence(grant));
-        grant_id
-    }
-
-    /// Insert a pending foreground gate (task-scoped, one-time, never persists).
-    pub(crate) fn insert_foreground_gate(
-        &self,
-        task_id: &TaskId,
-        app_key: &str,
-        target: &AppTarget,
-        reason: String,
-    ) -> String {
-        let request = GateRequest::new(
-            GateKind::Foreground,
-            task_id.clone(),
-            app_key,
-            reason,
-            format!(
-                "foreground activation: bring {} window {} to the front once",
-                target.app_id, target.window_id
-            ),
-            "foreground",
-            false,
-            Duration::minutes(5),
-        );
-        let grant_id = self.insert_gate(request);
-        let mut grant = ForegroundGrant::new(task_id.clone(), app_key, Duration::minutes(5));
-        grant.grant_id = GrantId(grant_id.clone());
-        self.grants
-            .lock()
-            .expect("grants lock")
-            .insert(grant_id.clone(), Grant::Foreground(grant));
+            .insert(grant_id.clone(), grant);
         grant_id
     }
 
@@ -1478,15 +1333,12 @@ impl Runtime {
             request.approve_in_gui(expected, Utc::now())?;
             (request.task_id.clone(), request.kind)
         };
-        if matches!(kind, GateKind::Foreground | GateKind::Consequence) {
+        if kind == GateKind::Consequence {
             let mut grants = self.grants.lock().expect("grants lock");
             let grant = grants.get_mut(grant_id).ok_or_else(|| {
                 LcuError::coded(ErrorCode::ApprovalInvalid, "gate has no matching grant")
             })?;
-            match grant {
-                Grant::Foreground(grant) => grant.status = GrantStatus::Approved,
-                Grant::Consequence(grant) => grant.status = GrantStatus::Approved,
-            }
+            grant.status = GrantStatus::Approved;
         }
         if task_id.0 != "pending" && kind != GateKind::AppAccess {
             if let Ok(task) = self.get_task(&task_id) {
@@ -1510,17 +1362,15 @@ impl Runtime {
         app_key: &str,
     ) -> Option<ConsequenceGrant> {
         let grants = self.grants.lock().expect("grants lock");
-        grants.values().find_map(|grant| match grant {
-            Grant::Consequence(g)
-                if g.task_id == *task_id
+        grants
+            .values()
+            .find(|g| {
+                g.task_id == *task_id
                     && g.app_key == app_key
                     && g.status == GrantStatus::Approved
-                    && !g.is_expired(Utc::now()) =>
-            {
-                Some(g.clone())
-            }
-            _ => None,
-        })
+                    && !g.is_expired(Utc::now())
+            })
+            .cloned()
     }
 
     /// Consume a consequence grant exactly once (identity/evidence match passed).
@@ -1529,15 +1379,9 @@ impl Runtime {
         grant_id: &str,
     ) -> LcuResult<ConsequenceGrant> {
         let mut grants = self.grants.lock().expect("grants lock");
-        let grant = match grants.get_mut(grant_id) {
-            Some(Grant::Consequence(g)) => g,
-            _ => {
-                return Err(LcuError::coded(
-                    ErrorCode::ApprovalInvalid,
-                    "unknown consequence grant",
-                ))
-            }
-        };
+        let grant = grants.get_mut(grant_id).ok_or_else(|| {
+            LcuError::coded(ErrorCode::ApprovalInvalid, "unknown consequence grant")
+        })?;
         if grant.status != GrantStatus::Approved {
             return Err(LcuError::coded(
                 ErrorCode::ApprovalInvalid,
@@ -1559,40 +1403,11 @@ impl Runtime {
     /// pause, cancel, restart). Consumed grants are never refunded.
     pub(crate) fn invalidate_consequence_grant(&self, grant_id: &str) {
         let mut grants = self.grants.lock().expect("grants lock");
-        if let Some(Grant::Consequence(g)) = grants.get_mut(grant_id) {
+        if let Some(g) = grants.get_mut(grant_id) {
             if g.status == GrantStatus::Approved {
                 g.status = GrantStatus::Invalidated;
             }
         }
-    }
-
-    /// Consume a foreground grant once; Runtime then activates the exact target.
-    pub(crate) fn consume_foreground_grant(&self, grant_id: &str) -> LcuResult<ForegroundGrant> {
-        let mut grants = self.grants.lock().expect("grants lock");
-        let grant = match grants.get_mut(grant_id) {
-            Some(Grant::Foreground(g)) => g,
-            _ => {
-                return Err(LcuError::coded(
-                    ErrorCode::ApprovalInvalid,
-                    "unknown foreground grant",
-                ))
-            }
-        };
-        if grant.status != GrantStatus::Approved {
-            return Err(LcuError::coded(
-                ErrorCode::ApprovalInvalid,
-                format!("foreground grant not approved: {:?}", grant.status),
-            ));
-        }
-        if grant.is_expired(Utc::now()) {
-            grant.status = GrantStatus::Expired;
-            return Err(LcuError::coded(
-                ErrorCode::ApprovalInvalid,
-                "foreground grant expired before consume",
-            ));
-        }
-        grant.status = GrantStatus::Consumed;
-        Ok(grant.clone())
     }
 
     pub fn doctor_report(&self) -> DoctorReport {
@@ -1631,7 +1446,7 @@ impl Runtime {
             } else {
                 "product worker: scheduler not started (desktop must call start_scheduler)".into()
             },
-            "gates: app access / consequence / foreground grants; desktop tray only; CLI never finalizes".into(),
+            "gates: app access / consequence; desktop tray only; CLI never finalizes".into(),
             "queue: global serial FIFO; waiting_actor / paused release the execution slot".into(),
             "control: pause/stop only on taken_over, target_lost, or explicit commands".into(),
             format!("runtime root: {}", self.paths.root.display()),
@@ -2395,27 +2210,19 @@ mod tests {
     }
 
     #[test]
-    fn waiting_actor_releases_foreground_but_keeps_target_reservation() {
+    fn waiting_actor_releases_target_reservation() {
         let rt = test_runtime();
         let current = rt
             .submit_task("current", CallerIdentity::HumanCli, None)
             .unwrap();
         let target = sample_obs("Open").target;
         assert!(rt.set_current_target(&current.task_id, target.clone()).unwrap());
-        rt.open_foreground_session(&current.task_id, &target).unwrap();
-        assert!(rt.foreground_is_active(&current.task_id, &target));
-
         rt.apply_command(&current.task_id, TaskCommand::Start, "test start")
             .unwrap();
         rt.apply_command(&current.task_id, TaskCommand::WaitActor, "agent thinking")
             .unwrap();
 
-        assert!(!rt.foreground_is_active(&current.task_id, &target));
-        assert!(rt.foreground_is_authorized(&current.task_id, &target));
-        assert_eq!(rt.current_target_for(&current.task_id), Some(target.clone()));
-
-        rt.resume_foreground_session(&current.task_id, &target).unwrap();
-        assert!(rt.foreground_is_active(&current.task_id, &target));
+        assert_eq!(rt.current_target_for(&current.task_id), None);
     }
 
     #[test]
@@ -2719,6 +2526,32 @@ mod tests {
             rt3.app_access_state(&TaskId("other_task".into()), "com.example.app"),
             AppAccessOutcome::RequestDecision,
             "revoked always_allow stays revoked after restart"
+        );
+    }
+
+    #[test]
+    fn allow_once_survives_pause_until_terminal() {
+        let rt = test_runtime();
+        let task = rt
+            .submit_task("demo", CallerIdentity::HumanCli, None)
+            .unwrap();
+        rt.apply_command(&task.task_id, TaskCommand::Start, "start")
+            .unwrap();
+        rt.allow_once
+            .lock()
+            .unwrap()
+            .insert((task.task_id.0.clone(), "com.example.app".into()));
+
+        rt.pause_task(&task.task_id).unwrap();
+        assert_eq!(
+            rt.app_access_state(&task.task_id, "com.example.app"),
+            AppAccessOutcome::Allowed
+        );
+
+        rt.cancel_task(&task.task_id).unwrap();
+        assert_eq!(
+            rt.app_access_state(&task.task_id, "com.example.app"),
+            AppAccessOutcome::RequestDecision
         );
     }
 
