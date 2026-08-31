@@ -2,7 +2,7 @@
 
 ## What this is
 
-**AnythingUse** runs a single-instance Runtime on your Mac (CLI codename `lcu`; data root `~/Library/Application Support/AnythingUse`). Humans and Agents both use the same `lcu` CLI. High-risk actions require you to approve in the desktop UI.
+**AnythingUse** runs a single-instance Runtime on your Mac (CLI codename `lcu`; data root `~/Library/Application Support/AnythingUse`). Humans and Agents both use the same `lcu` CLI. First-app access is shown automatically in the desktop UI; high-risk actions require you to approve there too.
 
 This guide describes the implemented setup and interface, not a blanket
 real-app stability certification. Runtime behavior is verified per target
@@ -10,7 +10,7 @@ scenario.
 
 Execution surfaces:
 
-- **macOS apps** — strict window-targeted control via `macos-window-service`. Choose `--control-mode auto|background_only`; `auto` prefers background and may activate the exact permitted target when required, while `background_only` fails instead. The agent never switches back. Agent waits release generic ownership and resume from a fresh target observation; real user input on that target pauses automatically. Consequences use separate one-time confirmation or takeover gates.
+- **macOS apps** — strict window-targeted control via `macos-window-service`. An explicit bundle ID is launched without taking frontmost when it has no existing window. Choose `--control-mode auto|background_only`; `auto` prefers background and may activate the exact permitted target when required, while `background_only` fails instead. The agent never switches back. Agent waits release generic ownership and resume from a fresh target observation; real user input on that target pauses automatically. Consequences use separate one-time confirmation or takeover gates.
 - **Chrome** — real Chrome Extension + Native Messaging + debugger/CDP on an inactive background task tab (not Playwright, not a second browser). User tabs are not reactivated when a task ends.
 
 Tasks enter one serial FIFO queue. `waiting_actor` and paused tasks release the global execution slot and generic target reservation. An action receipt is not completion: `succeeded` requires explicit `Done` followed by successful target re-observation.

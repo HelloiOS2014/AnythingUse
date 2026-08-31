@@ -4,6 +4,7 @@
 //! computer-use actions; only Runtime may. Tray can complete **GUI approvals**
 //! (human presence) via private Runtime methods — never through `lcu approve`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -137,6 +138,7 @@ struct TrayApp {
     revoke_access_id: muda::MenuId,
     idle_exit_after: Option<Duration>,
     idle_since: Option<Instant>,
+    presented_app_access: HashSet<String>,
 }
 
 impl ApplicationHandler for TrayApp {
@@ -341,6 +343,26 @@ impl ApplicationHandler for TrayApp {
             }
         }
 
+        if let Some(pending) = self
+            .runtime
+            .list_pending_gates()
+            .into_iter()
+            .find(|p| {
+                p.kind == lcu_core::approval::GateKind::AppAccess
+                    && !self.presented_app_access.contains(&p.grant_id)
+            })
+        {
+            self.presented_app_access.insert(pending.grant_id.clone());
+            if let Some(decision) = app_access_dialog(&pending) {
+                if let Err(error) = self
+                    .runtime
+                    .app_access_in_gui(&pending.grant_id, decision)
+                {
+                    tracing::warn!(%error, "automatic app access dialog failed");
+                }
+            }
+        }
+
         let Some(idle_exit_after) = self.idle_exit_after else {
             return;
         };
@@ -432,6 +454,7 @@ fn run_tray(
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs),
         idle_since: None,
+        presented_app_access: HashSet::new(),
     };
 
     let event_loop = EventLoop::new().context("create event loop")?;

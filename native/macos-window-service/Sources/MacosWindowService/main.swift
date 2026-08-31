@@ -108,6 +108,7 @@ func printHelp() {
           {"id":"1","method":"ping"}
           {"id":"2","method":"permissions"}
           {"id":"3","method":"resolve","params":{"app_id":"TextEdit"}}
+          {"id":"3a","method":"launch","params":{"app_id":"com.apple.TextEdit"}}
           {"id":"3b","method":"app_identity","params":{"pid":1,"window_id":2}}
           {"id":"3c","method":"set_takeover_watch","params":{"pid":1,"window_id":2,"active":true}}
           {"id":"4","method":"observe","params":{"pid":1,"window_id":2}}
@@ -143,7 +144,10 @@ func runSelfCheck() throws {
     guard UserInputMonitor.shared.selfCheck() else {
         throw ServiceError.actionFailed("self-check failed: HID baseline")
     }
-    fputs("self-check ok: user input monitor\n", stderr)
+    guard ExperimentalWindowRouting.selfCheck() else {
+        throw ServiceError.actionFailed("self-check failed: experimental window routing")
+    }
+    fputs("self-check ok: user input monitor + experimental window routing\n", stderr)
 }
 
 func printJSON(_ value: Any) {

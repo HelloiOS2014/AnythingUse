@@ -45,6 +45,11 @@ again before any later input. The previous app is never restored.
 The listen-only HID monitor ignores tagged AnythingUse events. A real user
 click, key, or scroll on the target is `taken_over`, including while suspended.
 
+Developer probe: start a fresh Runtime with
+`LCU_MACOS_EXPERIMENTAL_WINDOW_ROUTING=1` to try window-addressed background
+left clicks. It is off by default and does not enable background typing,
+scrolling, activation primers, or focus-event suppression.
+
 ## Wire protocol
 
 Newline-delimited JSON:
@@ -54,7 +59,7 @@ Newline-delimited JSON:
 {"id":"1","ok":true,"result":{...}}
 ```
 
-Methods: `ping`, `permissions`, `list`, `resolve`, `observe`, `semantic`, `targeted`, `set_takeover_watch`, `foreground_activate`, `detect_conflict` (aliases: `detect_control_state`, `session_health`).
+Methods: `ping`, `permissions`, `list`, `resolve`, `launch`, `observe`, `semantic`, `targeted`, `set_takeover_watch`, `foreground_activate`, `detect_conflict` (aliases: `detect_control_state`, `session_health`).
 
 ## Permissions
 

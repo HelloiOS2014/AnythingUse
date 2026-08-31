@@ -180,7 +180,9 @@ impl PlatformBackend for MacosBackend {
         if let Some(ref t) = selector.window_title_contains {
             params["window_title_contains"] = json!(t);
         }
-        let v = self.client.call("resolve", Some(params))?;
+        let v = self
+            .client
+            .call(target_resolution_method(selector), Some(params))?;
         parse_app_target(&v)
     }
 
@@ -602,6 +604,14 @@ fn parse_perm_flag(v: Option<&Value>) -> PermissionFlag {
     }
 }
 
+fn target_resolution_method(selector: &AppSelector) -> &'static str {
+    if selector.pid.is_none() && selector.app_id.as_ref().is_some_and(|id| !id.is_empty()) {
+        "launch"
+    } else {
+        "resolve"
+    }
+}
+
 fn semantic_to_json(action: &SemanticAction) -> LcuResult<Value> {
     Ok(match action {
         SemanticAction::Navigate { .. } => {
@@ -713,10 +723,17 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::NotImplemented);
     }
 
-
-
-
-
+    #[test]
+    fn bundle_id_launches_but_pid_only_resolves() {
+        let mut selector = AppSelector {
+            app_id: Some("com.apple.TextEdit".into()),
+            pid: None,
+            window_title_contains: None,
+        };
+        assert_eq!(target_resolution_method(&selector), "launch");
+        selector.pid = Some(42);
+        assert_eq!(target_resolution_method(&selector), "resolve");
+    }
     #[test]
     fn navigate_is_explicitly_unsupported() {
         let err = semantic_to_json(&SemanticAction::Navigate {

@@ -23,6 +23,8 @@ final class Service {
             return WindowResolver.listOnScreenWindows().map { encodeTarget($0) }
         case "resolve":
             return try encodeTarget(resolveParams(params))
+        case "launch":
+            return try launch(params)
         case "app_identity":
             return try appIdentity(params)
         case "set_takeover_watch":
@@ -62,6 +64,55 @@ final class Service {
             pid: intValue(p["pid"]).map { pid_t($0) },
             windowTitleContains: p["window_title_contains"] as? String
         )
+    }
+
+    /// Launch an explicitly selected app without taking frontmost, then resolve
+    /// the first window it publishes. Existing windows are returned unchanged.
+    private func launch(_ params: [String: Any]?) throws -> [String: Any] {
+        let p = params ?? [:]
+        guard let appID = p["app_id"] as? String, !appID.isEmpty else {
+            throw ServiceError.invalidRequest("launch requires app_id bundle identifier")
+        }
+        if let target = try? WindowResolver.resolveSelector(
+            appId: appID,
+            pid: nil,
+            windowTitleContains: p["window_title_contains"] as? String
+        ) {
+            return encodeTarget(target)
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appID) else {
+            throw ServiceError.notFound("no installed application for bundle id \(appID)")
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.createsNewApplicationInstance = false
+        let completion = DispatchSemaphore(value: 0)
+        var launchError: Error?
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            launchError = error
+            completion.signal()
+        }
+        guard completion.wait(timeout: .now() + 5) == .success else {
+            throw ServiceError.actionFailed("launch timed out for \(appID)")
+        }
+        if let launchError {
+            throw ServiceError.actionFailed("launch failed for \(appID): \(launchError)")
+        }
+
+        for _ in 0..<50 {
+            if let target = try? WindowResolver.resolveSelector(
+                appId: appID,
+                pid: nil,
+                windowTitleContains: p["window_title_contains"] as? String
+            ) {
+                var result = encodeTarget(target)
+                result["launched"] = true
+                return result
+            }
+            usleep(100_000)
+        }
+        throw ServiceError.notFound("\(appID) launched but published no controllable window")
     }
 
     private func appIdentity(_ params: [String: Any]?) throws -> [String: Any] {

@@ -58,7 +58,10 @@ lcu act <task-id> --observation-id <obs> --action '{"kind":"done","summary":"Goa
 Always pass `--app <bundle_id>` (or `--app pid:NNNN`) with `lcu run`: the
 Runtime never infers the target app from the goal text and never falls back to
 the frontmost or largest window. Without an explicit selector the task fails
-with a usage error.
+with a usage error. On macOS, an explicit bundle ID launches the installed app
+without taking frontmost when it has no existing window; a PID selector never
+launches another process. The Runtime automatically presents the first-app
+access dialog; the Agent waits for the human decision and then continues.
 
 Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). A stale
 `observation_id` is rejected — fetch a fresh decision. Cancel/pause aborts a
