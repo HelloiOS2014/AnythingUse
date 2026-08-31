@@ -63,8 +63,23 @@ enum DirectedInput {
             }
         }
 
+        if ExperimentalWindowRouting.isEnabled && !FocusGuard.isFrontmost(pid: target.pid) {
+            // ponytail: probe window routing first; add activation/taps only if
+            // controlled runs prove routing fields alone are insufficient.
+            try postMouseClick(target: target, point: point, windowAddressed: true)
+            return ActionReport(
+                path: "experimental_window_addressed_click",
+                detail: String(
+                    format: "window-addressed background click at (%.1f, %.1f) nx=%.3f ny=%.3f → pid %d window_id=%u",
+                    x, y, nx, ny, target.pid, target.windowID
+                ),
+                mouseEventsPosted: true,
+                keyEventsPosted: false
+            )
+        }
+
         if foregroundTargetProven(target) {
-            try postMouseClick(pid: target.pid, point: point)
+            try postMouseClick(target: target, point: point)
             return ActionReport(
                 path: "session_post_to_pid_click",
                 detail: String(
@@ -284,7 +299,11 @@ enum DirectedInput {
         }
     }
 
-    static func postMouseClick(pid: pid_t, point: CGPoint) throws {
+    static func postMouseClick(
+        target: MacWindowTarget,
+        point: CGPoint,
+        windowAddressed: Bool = false
+    ) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ServiceError.actionFailed("CGEventSource create failed")
         }
@@ -307,11 +326,15 @@ enum DirectedInput {
         }
         down.setIntegerValueField(.mouseEventClickState, value: 1)
         up.setIntegerValueField(.mouseEventClickState, value: 1)
+        if windowAddressed {
+            ExperimentalWindowRouting.stamp(down, target: target)
+            ExperimentalWindowRouting.stamp(up, target: target)
+        }
         down.setIntegerValueField(.eventSourceUserData, value: UserInputMonitor.syntheticEventTag)
         up.setIntegerValueField(.eventSourceUserData, value: UserInputMonitor.syntheticEventTag)
-        down.postToPid(pid)
+        down.postToPid(target.pid)
         usleep(30_000)
-        up.postToPid(pid)
+        up.postToPid(target.pid)
     }
 
     static func postScroll(pid: pid_t, point: CGPoint, lines: Int32) throws {
