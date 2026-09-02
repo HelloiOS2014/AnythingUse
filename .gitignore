@@ -33,3 +33,9 @@
 /tmp/
 __pycache__/
 dist/
+
+# Local Agent/runtime evidence (commit .pi/settings.json only)
+.pi/*
+!.pi/settings.json
+.recover-handoff/
+evidence/computer-use/

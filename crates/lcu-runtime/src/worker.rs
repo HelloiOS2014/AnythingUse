@@ -21,7 +21,7 @@ use lcu_core::risk::RiskLevel;
 use lcu_core::task::{ControlMode, TaskCommand, TaskId, TaskState};
 use lcu_model::{
     ensure_observation_binding, validate_action, validate_effect, LoopGuard, LoopGuardConfig,
-    ModelObservation, ModelTaskContext, SubprocessVisionActor, VisionActor,
+    ModelElement, ModelObservation, ModelTaskContext, SubprocessVisionActor, VisionActor,
 };
 
 use crate::{consequence_identity_for, screenshot_evidence_for, AppAccessOutcome, Runtime};
@@ -367,7 +367,7 @@ impl Runtime {
         let (proposal, actor_name) = if uses_agent {
             match resumed_agent {
                 Some((previous, previous_ctx, mut proposal)) => {
-                    if !same_decision_surface(&previous, &model_obs) {
+                    if !same_decision_surface(&previous, &model_obs, &proposal.action) {
                         self.agent_actor.begin_decision(&model_obs, &previous_ctx)?;
                         self.scheduler.schedule_agent_timeout(
                             task_id.clone(),
@@ -1224,11 +1224,100 @@ fn present_hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
     matches!((left.as_deref(), right.as_deref()), (Some(a), Some(b)) if !a.is_empty() && a == b)
 }
 
-fn same_decision_surface(previous: &ModelObservation, current: &ModelObservation) -> bool {
-    previous.app_id == current.app_id
+fn same_decision_surface(
+    previous: &ModelObservation,
+    current: &ModelObservation,
+    action: &Action,
+) -> bool {
+    let same_target = previous.app_id == current.app_id
         && previous.pid == current.pid
         && previous.window_id == current.window_id
         && previous.window_frame == current.window_frame
+        && previous.image_width == current.image_width
+        && previous.image_height == current.image_height
+        && previous.display_scale == current.display_scale;
+    if !same_target {
+        return false;
+    }
+
+    match action {
+        // Coordinates are meaningful only for the exact pixels the Agent saw.
+        // Compare the semantic blocker at that coordinate rather than the whole
+        // tree: unrelated offscreen AX frame jitter must not cause an infinite
+        // stale-decision loop, while an empty/changed blocker still fails closed.
+        Action::Targeted(TargetedInput::Click { x, y, .. }) => {
+            present_hashes_match(&previous.image_hash, &current.image_hash)
+                && previous.elements.is_empty() == current.elements.is_empty()
+                && semantic_model_element_at(previous, *x, *y, "invoke")
+                    == semantic_model_element_at(current, *x, *y, "invoke")
+        }
+        Action::Targeted(TargetedInput::TypeText {
+            x: Some(x),
+            y: Some(y),
+            ..
+        }) => {
+            present_hashes_match(&previous.image_hash, &current.image_hash)
+                && previous.elements.is_empty() == current.elements.is_empty()
+                && semantic_model_element_at(previous, *x, *y, "set_value")
+                    == semantic_model_element_at(current, *x, *y, "set_value")
+        }
+        Action::Targeted(_) => {
+            previous.elements == current.elements
+                && present_hashes_match(&previous.image_hash, &current.image_hash)
+        }
+        // Done is a side-effect-free terminal claim. Re-observe and bind it to
+        // the same resolved window/title, but tolerate dynamic pixel and
+        // element drift inside that window. AX availability may not disappear
+        // between the decision and the terminal verification.
+        Action::Done { .. } => {
+            previous.window_title == current.window_title
+                && previous.elements.is_empty() == current.elements.is_empty()
+        }
+        // Element ids are observation-local. Preserve a semantic proposal only
+        // when its referenced element and advertised capabilities are unchanged;
+        // unrelated pixel or offscreen element drift does not invalidate it.
+        Action::Semantic(_) => action.referenced_element_id().map_or_else(
+            || previous.elements == current.elements,
+            |id| {
+                previous.elements.iter().find(|element| element.id == id)
+                    == current.elements.iter().find(|element| element.id == id)
+            },
+        ),
+        Action::Observe
+        | Action::Wait { .. }
+        | Action::Fail { .. }
+        | Action::RequestUser { .. } => true,
+    }
+}
+
+fn semantic_model_element_at<'a>(
+    observation: &'a ModelObservation,
+    x: f64,
+    y: f64,
+    required: &str,
+) -> Option<&'a ModelElement> {
+    observation
+        .elements
+        .iter()
+        .filter(|element| {
+            let [left, top, width, height] = element.frame;
+            width > 0.0
+                && height > 0.0
+                && x >= left
+                && x <= left + width
+                && y >= top
+                && y <= top + height
+                && element
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == required)
+        })
+        .min_by(|left, right| {
+            let area = |element: &ModelElement| element.frame[2] * element.frame[3];
+            area(left)
+                .partial_cmp(&area(right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 fn proposal_action_summary(
@@ -1525,17 +1614,50 @@ mod tests {
     }
 
     #[test]
-    fn agent_proposal_survives_pixel_drift_on_the_same_surface() {
+    fn agent_proposal_is_bound_to_the_current_action_surface() {
         let previous_obs = screenshot_observation("previous");
         let mut current_obs = previous_obs.clone();
         current_obs.observation_id = ObservationId("current".into());
         current_obs.image_hash = Some("pixel-drift".into());
         let previous = ModelObservation::from(&previous_obs);
         let mut current = ModelObservation::from(&current_obs);
+        let targeted = Action::Targeted(TargetedInput::Click {
+            x: 0.2,
+            y: 0.15,
+            button: MouseButton::Left,
+        });
+        let semantic = Action::Semantic(SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let done = Action::Done {
+            summary: "Goal verified complete".into(),
+        };
 
-        assert!(same_decision_surface(&previous, &current));
+        assert!(!same_decision_surface(&previous, &current, &targeted));
+        assert!(same_decision_surface(&previous, &current, &semantic));
+        assert!(same_decision_surface(&previous, &current, &done));
+
+        current.image_hash = previous.image_hash.clone();
+        current.elements.push(ModelElement {
+            id: "offscreen".into(),
+            role: "AXImage".into(),
+            label: Some("unrelated".into()),
+            frame: [0.9, 1.0, 0.02, 0.02],
+            capabilities: vec!["invoke".into()],
+        });
+        assert!(same_decision_surface(&previous, &current, &targeted));
+        assert!(same_decision_surface(&previous, &current, &semantic));
+
+        current.elements.clear();
+        assert!(!same_decision_surface(&previous, &current, &semantic));
+        assert!(!same_decision_surface(&previous, &current, &targeted));
+        assert!(!same_decision_surface(&previous, &current, &done));
+
+        current.elements = previous.elements.clone();
+        current.window_title = "Different".into();
+        assert!(!same_decision_surface(&previous, &current, &done));
 
         current.window_id += 1;
-        assert!(!same_decision_surface(&previous, &current));
+        assert!(!same_decision_surface(&previous, &current, &targeted));
     }
 }

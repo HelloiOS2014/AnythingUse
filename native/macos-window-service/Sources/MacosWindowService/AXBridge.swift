@@ -171,39 +171,83 @@ enum AXBridge {
             }
         }
 
-        // Some Chromium shells expose no AXWindows/AXWindowNumber but do expose
-        // one focused window with the exact CG frame. Accept that frame only
-        // when it identifies one same-process CG window.
-        let frameUniquelyIdentifiesTarget = WindowResolver.listOnScreenWindows(minSize: 1)
-            .filter { $0.pid == target.pid && framesRoughlyEqual($0.bounds, target.bounds) }
+        // Some apps expose the requested background window only through their
+        // main/focused AX attributes, not AXWindows. Accept geometry only when
+        // it identifies exactly one same-process CG window.
+        let sameProcessWindows = WindowResolver.listOnScreenWindows(minSize: 1)
+            .filter { $0.pid == target.pid }
+        let frameUniquelyIdentifiesTarget = sameProcessWindows
+            .filter { framesRoughlyEqual($0.bounds, target.bounds) }
+            .map(\.windowID) == [target.windowID]
+        let sizeUniquelyIdentifiesTarget = sameProcessWindows
+            .filter { sizesRoughlyEqual($0.bounds, target.bounds) }
             .map(\.windowID) == [target.windowID]
 
-        // Main / focused only when they prove the same window identity.
+        var attributedWindows: [(String, AXUIElement)] = []
         for attr in [kAXMainWindowAttribute as String, kAXFocusedWindowAttribute as String] {
             var ref: CFTypeRef?
             if AXUIElementCopyAttributeValue(app, attr as CFString, &ref) == .success,
                let el = ref
             {
                 let element = el as! AXUIElement
-                let role = copyString(element, kAXRoleAttribute as CFString) ?? ""
-                if (role == (kAXWindowRole as String) || role == "AXWindow"),
-                   windowIDEquals(element, target.windowID)
-                    || (frameUniquelyIdentifiesTarget && windowFrameMatches(element, target: target))
-                {
-                    return element
-                }
+                attributedWindows.append((attr, element))
+            }
+        }
+        if let focused = focusedElement(pid: target.pid),
+           let window = climbToWindow(from: focused)
+        {
+            attributedWindows.append(("AXFocusedUIElement ancestor", window))
+        }
+        for (_, element) in attributedWindows {
+            let role = copyString(element, kAXRoleAttribute as CFString) ?? ""
+            guard role == (kAXWindowRole as String) || role == "AXWindow" else { continue }
+            if windowIDEquals(element, target.windowID)
+                || (frameUniquelyIdentifiesTarget && windowFrameMatches(element, target: target))
+                || (sizeUniquelyIdentifiesTarget && windowSizeMatches(element, target: target))
+            {
+                return element
             }
         }
 
-        // Hit-test at CG window center; accept only if climbed window matches identity.
-        if let hit = elementAtScreenPoint(
-            CGPoint(x: target.bounds.midX, y: target.bounds.midY),
-            expectedPID: target.pid
-        ), let window = climbToWindow(from: hit),
-           windowIDEquals(window, target.windowID)
-            || (frameUniquelyIdentifiesTarget && windowFrameMatches(window, target: target))
+        // Hit-test at CG window center. Background Finder often exposes only the
+        // desktop AX window (full display frame) while CGWindowID is the folder
+        // window; identity on the climbed AX window then fails. If CoreGraphics
+        // z-order at that point is still the target window, accept a unique
+        // descendant whose AX frame matches the CG window.
+        let center = CGPoint(x: target.bounds.midX, y: target.bounds.midY)
+        let cgPointIsTarget = WindowResolver.windowAtScreenPoint(center)
+            .map { $0.0 == target.pid && $0.1 == target.windowID } ?? false
+        // App-restricted hit-test misses background Finder folder windows that
+        // are absent from AXWindows; system-wide hit-test at a CG-proven point
+        // on a secondary display still lands in that folder UI.
+        let hit = elementAtScreenPoint(center, expectedPID: target.pid)
+            ?? elementAtScreenPoint(center, expectedPID: nil).flatMap { el -> AXUIElement? in
+                var pid: pid_t = 0
+                guard AXUIElementGetPid(el, &pid) == .success, pid == target.pid else {
+                    return nil
+                }
+                return el
+            }
+        if let hit,
+           let window = climbToWindow(from: hit)
         {
-            return window
+            if windowIDEquals(window, target.windowID)
+                || (frameUniquelyIdentifiesTarget && windowFrameMatches(window, target: target))
+            {
+                return window
+            }
+            if cgPointIsTarget,
+               let framed = uniqueFrameMatch(from: window, target: target, maxNodes: 200)
+                ?? uniqueSizeMatch(from: window, target: target, maxNodes: 200)
+            {
+                return framed
+            }
+        }
+        if cgPointIsTarget,
+           let framed = uniqueFrameMatch(from: app, target: target, maxNodes: 250)
+            ?? uniqueSizeMatch(from: app, target: target, maxNodes: 250)
+        {
+            return framed
         }
 
         // Walk application children for a window matching identity.
@@ -235,10 +279,16 @@ enum AXBridge {
             let attribute = copyInt(window, kAXWindowNumberAttribute).map(String.init) ?? "-"
             return "\(exact)/\(attribute)/\(roundedFrame(copyFrame(window)))"
         }.joined(separator: ";")
+        let attributedSummary = attributedWindows.map { name, window in
+            let exact = exactWindowID(window).map(String.init) ?? "-"
+            let attribute = copyInt(window, kAXWindowNumberAttribute).map(String.init) ?? "-"
+            return "\(name)=\(exact)/\(attribute)/\(roundedFrame(copyFrame(window)))"
+        }.joined(separator: ";")
         throw ServiceError.notFound(
             "strict AX window match failed pid=\(target.pid) wid=\(target.windowID) "
                 + "axerr=\(err.rawValue) n=\(windows.count) "
-                + "target=\(roundedFrame(target.bounds)) candidates(e/a/f)=\(candidateSummary)"
+                + "target=\(roundedFrame(target.bounds)) candidates(e/a/f)=\(candidateSummary) "
+                + "attributed(e/a/f)=\(attributedSummary)"
         )
     }
 
@@ -266,6 +316,64 @@ enum AXBridge {
         return CGWindowID(cgid) == windowID
     }
 
+    /// Unique descendant (or self) whose AX frame matches the CG window.
+    /// Used when Finder lists only the desktop AX window for a background folder.
+    private static func uniqueFrameMatch(
+        from root: AXUIElement,
+        target: MacWindowTarget,
+        maxNodes: Int
+    ) -> AXUIElement? {
+        var hits: [AXUIElement] = []
+        if let frame = copyFrame(root), framesRoughlyEqual(frame, target.bounds) {
+            hits.append(root)
+        }
+        for node in walk(from: root, maxNodes: maxNodes) {
+            if let frame = copyFrame(node.element), framesRoughlyEqual(frame, target.bounds) {
+                hits.append(node.element)
+            }
+        }
+        if hits.count == 1 {
+            return hits[0]
+        }
+        let windows = hits.filter {
+            let role = copyString($0, kAXRoleAttribute as CFString) ?? ""
+            return role == (kAXWindowRole as String) || role == "AXWindow"
+        }
+        return windows.count == 1 ? windows[0] : nil
+    }
+
+    /// Same-size unique descendant. AX origin may not match CGWindowBounds on
+    /// a secondary display even when the folder window is in the tree.
+    private static func uniqueSizeMatch(
+        from root: AXUIElement,
+        target: MacWindowTarget,
+        maxNodes: Int
+    ) -> AXUIElement? {
+        var hits: [AXUIElement] = []
+        if let frame = copyFrame(root),
+           abs(frame.width - target.bounds.width) <= 8,
+           abs(frame.height - target.bounds.height) <= 8
+        {
+            hits.append(root)
+        }
+        for node in walk(from: root, maxNodes: maxNodes) {
+            if let frame = copyFrame(node.element),
+               abs(frame.width - target.bounds.width) <= 8,
+               abs(frame.height - target.bounds.height) <= 8
+            {
+                hits.append(node.element)
+            }
+        }
+        if hits.count == 1 {
+            return hits[0]
+        }
+        let windows = hits.filter {
+            let role = copyString($0, kAXRoleAttribute as CFString) ?? ""
+            return role == (kAXWindowRole as String) || role == "AXWindow"
+        }
+        return windows.count == 1 ? windows[0] : nil
+    }
+
     /// Frame-only identity, valid only when exact ids are unavailable.
     private static func windowFrameMatches(_ el: AXUIElement, target: MacWindowTarget) -> Bool {
         if exactWindowID(el) != nil || copyInt(el, kAXWindowNumberAttribute) != nil {
@@ -275,6 +383,23 @@ enum AXBridge {
             return false
         }
         return framesRoughlyEqual(frame, target.bounds)
+    }
+
+    /// Size-only identity is allowed only when the caller has already proved
+    /// that exactly one same-process CG window has this size. Finder can report
+    /// a different AX origin for a background window on another display.
+    private static func windowSizeMatches(_ el: AXUIElement, target: MacWindowTarget) -> Bool {
+        if exactWindowID(el) != nil || copyInt(el, kAXWindowNumberAttribute) != nil {
+            return false
+        }
+        guard let frame = copyFrame(el), target.bounds.width > 1, target.bounds.height > 1 else {
+            return false
+        }
+        return sizesRoughlyEqual(frame, target.bounds)
+    }
+
+    private static func sizesRoughlyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.width - rhs.width) <= 8 && abs(lhs.height - rhs.height) <= 8
     }
 
     /// True when `element` lives under the target window (climb + identity).
@@ -504,6 +629,57 @@ enum AXBridge {
 
     static func getValue(_ element: AXUIElement) -> String {
         copyString(element, kAXValueAttribute as CFString) ?? ""
+    }
+
+    static func canSelect(_ element: AXUIElement) -> Bool {
+        selectionTarget(for: element) != nil
+    }
+
+    static func select(_ element: AXUIElement) throws {
+        guard let (container, row) = selectionTarget(for: element) else {
+            throw ServiceError.unsupported("AX selected rows attribute is not settable")
+        }
+        let err = AXUIElementSetAttributeValue(
+            container,
+            kAXSelectedRowsAttribute as CFString,
+            [row] as CFArray
+        )
+        guard err == .success else {
+            throw ServiceError.actionFailed("AX select failed: \(err.rawValue)")
+        }
+    }
+
+    private static func selectionTarget(
+        for element: AXUIElement
+    ) -> (container: AXUIElement, row: AXUIElement)? {
+        var current: AXUIElement? = element
+        var row: AXUIElement?
+        for _ in 0..<12 {
+            guard let el = current else { return nil }
+            let role = copyString(el, kAXRoleAttribute as CFString) ?? ""
+            if role == (kAXRowRole as String) || role == "AXRow" {
+                row = el
+            }
+            var settable = DarwinBoolean(false)
+            if let row,
+               AXUIElementIsAttributeSettable(
+                   el,
+                   kAXSelectedRowsAttribute as CFString,
+                   &settable
+               ) == .success,
+               settable.boolValue
+            {
+                return (el, row)
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                el,
+                kAXParentAttribute as CFString,
+                &parent
+            ) == .success else { return nil }
+            current = parent.map { $0 as! AXUIElement }
+        }
+        return nil
     }
 
     /// Returns true for AXPress and false when only AXConfirm was accepted.

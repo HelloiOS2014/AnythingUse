@@ -571,10 +571,11 @@ fn decide(task_id: String, json: bool, wait: bool) -> Result<ExitCode, ExitCode>
                     println!("elements:");
                     for e in &observation.elements {
                         println!(
-                            "  {} role={} label={}",
+                            "  {} role={} label={} capabilities={}",
                             e.id,
                             e.role,
-                            e.label.as_deref().unwrap_or("")
+                            e.label.as_deref().unwrap_or(""),
+                            e.capabilities.join(",")
                         );
                     }
                     println!("expires_in_secs: {expires_in_secs}");
@@ -746,6 +747,8 @@ fn call_with_autostart(
 }
 
 fn start_runtime(paths: &RuntimePaths) -> std::io::Result<()> {
+    // Product contract: `lcu-desktop` is a sibling of this `lcu` (PATH install or packaged `bin/`).
+    // Do not resolve through the checkout; a lone symlink into the repo is not a product install.
     let binary = std::env::current_exe()?.with_file_name(format!(
         "lcu-desktop{}",
         std::env::consts::EXE_SUFFIX

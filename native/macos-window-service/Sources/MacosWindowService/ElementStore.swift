@@ -61,10 +61,13 @@ final class ElementStore {
         target: MacWindowTarget,
         maxNodes: Int = 750
     ) throws -> [[String: Any]] {
-        bind(pid: target.pid, windowID: target.windowID, frame: target.bounds)
         // ponytail: if AX cannot prove this exact window, return no semantic tree.
         // Screenshot-directed postToPid input is safer than acting on another window.
         let root = try AXBridge.axWindow(for: target)
+        // Do not destroy the last proven element cache when a background app
+        // transiently omits this window from AX. Service may reuse that cache
+        // only after proving the target and screenshot pixels are unchanged.
+        bind(pid: target.pid, windowID: target.windowID, frame: target.bounds)
         var nodes: [[String: Any]] = []
         var counter = 0
         walk(
@@ -128,6 +131,7 @@ final class ElementStore {
         }
         if isPressable(role) { actions.append("AXPress") }
         if isEditable(role) { actions.append("AXSetValue") }
+        if AXBridge.canSelect(element) { actions.append("AXSelect") }
         if role.contains("Scroll") { actions.append("AXScroll") }
         actions = Array(Set(actions)).sorted()
 

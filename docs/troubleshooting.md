@@ -1,9 +1,40 @@
 # Troubleshooting
 
+## Finder / target keeps stealing frontmost from the Agent TUI
+
+- First check **execute path**, not window matching. Finder sidebar
+  「下载」 is `AXStaticText` → `AXCell` → `AXRow` → `AXOutline`. It has no
+  `AXPress`. The writable attribute is the outline's `kAXSelectedRowsAttribute`
+  (`ax_select: select eN`). Seeing the label in `decide` is not enough.
+- Compact `decide` JSON omits raw `actions` but exposes generic `capabilities`.
+  `invoke` the labeled `element_id`; Runtime live-checks `AXSelect`. Targeted
+  click/type on a semantic-capable element is rejected with
+  `semantic_action_required`.
+- If `last_action_summary` is `target activated; discarded pre-activation`,
+  `auto` already activated because an explicit targeted action required the
+  foreground. Semantic `invoke` / `set_value` never hide that fallback.
+- To never activate: `--control-mode background_only` (hard fail instead of
+  `foreground_activate`). Real user click/key/scroll on the target still pauses.
+
+## Agent wrapped `lcu` in a script / missing `image_path` file
+
+- Call `lcu` **directly** each step. A Python/JS `subprocess` driver is not the
+  product surface. `python3 -c 'json.load(...)'` after redirect is still a
+  Python script — do not do it. Extract the redirected file with
+  `ctx_execute_file` or the harness Read tool.
+- `decide` is compact elements, not a full tree. Do not echo `elements`.
+- If `image_path` is missing after `decide`, the CLI was likely started with a
+  rewritten `TMPDIR` (tool sandbox / `ctx_execute`). `lcu-desktop` inherits
+  that dir; the 0600 PNG is deleted with the sandbox. Re-run `lcu` in the
+  login user environment, then extract from a redirected JSON file if needed.
+
 ## `runtime unavailable` (exit 69)
 
-- `lcu` normally starts its sibling `lcu-desktop` automatically. Rebuild or
-  reinstall if that binary is missing.
+- `lcu` starts its sibling `lcu-desktop` from the same directory. Product
+  install is `~/.local/bin` via `./scripts/install-cli.sh` (both binaries).
+  A PATH `lcu` without sibling `lcu-desktop` fails with exit 69. Checkout
+  `./target/release/lcu` is debug-only. Rebuild or reinstall if the sibling
+  is missing.
 - Check socket under Runtime root; must not listen on TCP.
 
 ## Permissions denied
@@ -41,9 +72,12 @@ Older persisted rows may appear as `waiting_user` / `waiting_approval`.
 ## `lcu decide` returns `elements: []`
 
 - The target app exposed a screenshot but no usable macOS Accessibility tree.
+  Finder on a secondary display can still yield a tree after CG hit-test; do not
+  jump to titlebar primers or `foreground_activate` just because the first match failed.
 - AnythingUse may attempt one background coordinate click only when AX hit-testing
   can prove an actionable element or the exact editable becomes focused. It never
-  follows an unverified click with text or Return/Enter.
+  follows an unverified click with text or Return/Enter. Finder sidebar rows are
+  `AXSelect`, not that click.
 - If background delivery is unavailable, `auto` may activate only the exact
   permitted target, discard the old proposal, and re-observe. `background_only`
   fails instead. The agent never switches back.

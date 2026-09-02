@@ -46,7 +46,7 @@ flowchart LR
     USER["用户输入"] -. "同目标接管" .-> RT
 ```
 
-循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：在通常的未设置/`auto` Runtime 默认值下，外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）；本地 VLM 可按任务显式选择（`lcu run --actor vlm`）。两者走完全相同的校验、风险与审批管线。详见 [架构](docs/architecture.md)。
+循环是 `observe → decide → guard → act → observe`。`decide` 是可插拔步骤：在通常的未设置/`auto` Runtime 默认值下，外部 Agent 取观察（`lcu decide`）并提交动作（`lcu act`）；本地 VLM 可按任务显式选择（`lcu run --actor vlm`）。两者走完全相同的校验、风险与审批管线。Agent **直接**调用 `lcu`（不要包一层驱动脚本）；`decide` 返回 compact elements + `image_path`，由调用方自行提取，不是完整语义树。详见 [架构](docs/architecture.md)。
 
 ## 快速开始
 
@@ -55,15 +55,16 @@ flowchart LR
 cargo build -p lcu-cli -p lcu-desktop --release
 (cd native/macos-window-service && swift build -c release)
 
-# lcu 会按需启动菜单栏 Runtime
-./target/release/lcu doctor --json
+# 产品入口：把成对的 lcu + lcu-desktop 装到 ~/.local/bin
+./scripts/install-cli.sh
+lcu doctor --json
 
 # 外部 Agent 路径：Skill 随后执行 lcu decide / lcu act
-./target/release/lcu run "Open Downloads in Finder" \
+lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor agent --json
 
 # 人类/本地路径：需要先安装下方可选模型资源
-./target/release/lcu run "Open Downloads in Finder" \
+lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor vlm --wait --json
 ```
 
@@ -74,9 +75,14 @@ Runtime 常驻时，才需要手动运行 `lcu-desktop`。
 
 ## 以插件方式安装 Skill
 
-`local-computer-use` 技能以插件形式从这个仓库分发。**安装**（二选一）：
+`local-computer-use` 技能从这个仓库分发。**安装**（一选）：
 
 ```bash
+# Pi（原生包；全局安装请用绝对路径）
+./scripts/install-pi.sh
+# 或：pi install /absolute/path/to/AnythingUse
+pi install git:github.com/HelloiOS2014/AnythingUse
+
 # Claude Code
 claude plugin marketplace add HelloiOS2014/AnythingUse
 claude plugin install anythinguse
@@ -85,13 +91,17 @@ claude plugin install anythinguse
 grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust
 ```
 
+本仓库在 Pi 信任该项目后，会通过 `.pi/settings.json` 自动加载该技能。产品入口是 PATH：`./scripts/install-cli.sh` 会把成对的 `lcu` 与 `lcu-desktop` 链到 `~/.local/bin`（Pi 的 `./scripts/install-pi.sh` 也会调用它）。仓库里的 `./target/release/lcu` 只作 debug 回退。
+
 **更新**：
 
 ```bash
+# Pi 本地 checkout 直接生效（不拷贝）。Git 安装：
+pi install git:github.com/HelloiOS2014/AnythingUse
 claude plugin update anythinguse    # 或：grok plugin update
 ```
 
-技能更新随仓库走；`lcu` 二进制保持独立构建。
+技能更新随仓库走；`lcu` / `lcu-desktop` 二进制保持独立的 PATH 安装（`./scripts/install-cli.sh`）。
 
 ## 非干扰模型
 
@@ -126,6 +136,8 @@ MCP、Playwright、公共 TCP 与长周期 Top100/soak 门槛**不是**当前产
 
 ```text
 apps/lcu-desktop/             Runtime 宿主与审批 UI
+package.json                  Pi 包清单（发布 Skill）
+.pi/settings.json             项目级 Pi 包自动加载
 crates/lcu-cli/               公开命令面
 crates/lcu-core/              共享契约（动作、风险、任务状态、协议）
 crates/lcu-platform/          PlatformBackend trait + 空后端

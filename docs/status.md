@@ -96,6 +96,7 @@ Neither changes the current source-level delivery statement.
 | CLI binary | `lcu` |
 | Desktop host | `lcu-desktop` |
 | Agent Skill directory | `skills/local-computer-use` |
+| Pi package | `package.json` (`pi.skills` → `./skills`); project autoload `.pi/settings.json` |
 | Runtime data directory | `~/Library/Application Support/AnythingUse` |
 | Crates / native prefixes | `lcu-*`, historical “Local Computer Use” phrasing in some docs |
 

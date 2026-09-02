@@ -5,8 +5,17 @@ import Security
 
 /// JSON-RPC method handlers for the macOS window control service.
 final class Service {
+    private struct SemanticSnapshot {
+        let pid: pid_t
+        let windowID: CGWindowID
+        let size: CGSize
+        let imageHash: String
+        let elements: [[String: Any]]
+    }
+
     let store = ElementStore()
     private let lock = NSLock()
+    private var semanticSnapshot: SemanticSnapshot?
 
     func handle(method: String, params: [String: Any]?) throws -> Any {
         switch method {
@@ -204,6 +213,7 @@ final class Service {
         var imageWidth = max(1, Int(target.bounds.width))
         var imageHeight = max(1, Int(target.bounds.height))
         var imageHash: String?
+        var semanticBackend = elements.isEmpty ? "none" : "ax"
 
         do {
             let shot = try awaitMain {
@@ -239,9 +249,57 @@ final class Service {
             }
         }
 
+        // Finder and other background apps may temporarily omit an unchanged
+        // rendered window from AXWindows. Reuse the last semantic snapshot only
+        // when target identity, window size and exact screenshot pixels match,
+        // and only while the native element cache is still bound to that target.
+        if elements.isEmpty,
+           let imageHash,
+           let snapshot = semanticSnapshot,
+           snapshot.pid == target.pid,
+           snapshot.windowID == target.windowID,
+           abs(snapshot.size.width - target.bounds.width) <= 1,
+           abs(snapshot.size.height - target.bounds.height) <= 1,
+           snapshot.imageHash == imageHash,
+           store.matches(pid: target.pid, windowID: target.windowID)
+        {
+            elements = snapshot.elements
+            semanticBackend = "ax_cached_same_pixels"
+            semanticError = nil
+        } else if !elements.isEmpty, let imageHash {
+            semanticSnapshot = SemanticSnapshot(
+                pid: target.pid,
+                windowID: target.windowID,
+                size: target.bounds.size,
+                imageHash: imageHash,
+                elements: elements
+            )
+        }
+
         // Both observation channels empty: never return a false healthy
         // observation. ScreenCaptureKit errors are already typed permission
         // failures, so surface that with the capture detail.
+        if elements.isEmpty {
+            let msg =
+                "observe empty AX pid=\(target.pid) window=\(target.windowID) "
+                    + "semantic=\(semanticError ?? "none") capture=\(captureError ?? "ok")\n"
+            fputs("macos-window-service \(msg)", stderr)
+            let logDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/AnythingUse/logs")
+            try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+            let logUrl = logDir.appendingPathComponent("macos-window-service.log")
+            if let data = msg.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: logUrl.path),
+                   let handle = try? FileHandle(forWritingTo: logUrl)
+                {
+                    defer { try? handle.close() }
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                } else {
+                    try? data.write(to: logUrl)
+                }
+            }
+        }
         if elements.isEmpty && imageB64 == nil {
             throw ServiceError.permission(
                 "no observation data: AX elements empty and screen capture failed"
@@ -262,6 +320,7 @@ final class Service {
                 "height": imageHeight
             ],
             "elements": elements,
+            "semantic_backend": semanticBackend,
             "semantic_error": semanticError as Any,
             "capture_error": captureError as Any,
             "image_png_b64": imageB64 as Any,
@@ -294,6 +353,16 @@ final class Service {
                 let elementId = try requireString(action, "element_id")
                 let el = try store.resolveElement(target: target, elementId: elementId)
                 let metadata = try store.metadata(for: elementId)
+                // Re-prove the advertised generic capability on the live AX tree.
+                // Finder sidebar rows use the outline's writable AXSelectedRows,
+                // not AXPress or a coordinate fallback.
+                if AXBridge.canSelect(el)
+                    && !metadata.actions.contains("AXPress")
+                    && !metadata.actions.contains("AXConfirm")
+                {
+                    try AXBridge.select(el)
+                    return okAction(path: "ax_select", detail: "select \(elementId)")
+                }
                 if metadata.actions.contains("AXConfirm")
                     && !metadata.actions.contains("AXPress")
                     && (metadata.role.contains("Text") || metadata.role.contains("Field"))
@@ -303,17 +372,10 @@ final class Service {
                 }
                 if !metadata.actions.contains("AXPress")
                     && !metadata.actions.contains("AXConfirm")
-                    && metadata.frame.width > 0
-                    && metadata.frame.height > 0
                 {
-                    // Element-bound fallback used by native Computer Use: click the
-                    // observed node through postToPid, never a model-invented point.
-                    let report = try DirectedInput.click(
-                        target: target,
-                        normalizedX: metadata.frame.midX,
-                        normalizedY: metadata.frame.midY
+                    throw ServiceError.unsupported(
+                        "invoke refused: \(elementId) has no proven semantic action"
                     )
-                    return okAction(path: report.path, detail: "invoke \(elementId): \(report.detail)")
                 }
                 let usedPress = try AXBridge.press(el)
                 return okAction(
@@ -325,77 +387,24 @@ final class Service {
                 let elementId = try requireString(action, "element_id")
                 let value = try requireString(action, "value")
                 let el = try store.resolveElement(target: target, elementId: elementId)
-                let metadata = try store.metadata(for: elementId)
 
                 // Primary path: AX setValue + readback. Native AppKit apps
                 // (TextEdit etc.) update their model directly, so background
                 // set_value works without focus or keyboard delivery.
                 do {
                     try AXBridge.setValue(el, value)
-                    let readback = AXBridge.getValue(el)
-                    if readback == value || (!value.isEmpty && readback.contains(value)) {
-                        return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
-                    }
                 } catch {
-                    // Fall through to the interaction path below.
-                }
-
-                // Fallback for Chromium-style editable controls: they often
-                // report AXSetValue success without dispatching input/change
-                // events (readback mismatch above). Deliver an element-bound
-                // click and real typing; the keyboard gate fail-closes when
-                // the target window cannot be proven key.
-                if (metadata.role.contains("Text") || metadata.role.contains("Field"))
-                    && metadata.frame.width > 0
-                    && metadata.frame.height > 0
-                {
-                    // Click first: it is the main fail-closed rejection point
-                    // (key-window gate), and a rejected click must not have cleared
-                    // the user's content. Clear only after the click landed.
-                    let click = try DirectedInput.click(
-                        target: target,
-                        normalizedX: metadata.frame.midX,
-                        normalizedY: metadata.frame.midY
-                    )
-                    try AXBridge.setValue(el, "")
-                    guard AXBridge.getValue(el).isEmpty else {
-                        throw ServiceError.actionFailed(
-                            "set_value clear effect unverified for \(elementId)"
-                        )
-                    }
-                    let typePath: String
-                    if value.isEmpty {
-                        typePath = "empty"
-                    } else {
-                        do {
-                            typePath = try DirectedInput.typeUnicode(
-                                target: target,
-                                expectedEditable: el,
-                                text: value
-                            )
-                        } catch let e as ServiceError where e.code == "foreground_required" {
-                            // The click and clear already happened: reporting
-                            // foreground_required would make Runtime retry and
-                            // repeat a side effect. Fail hard after input.
-                            throw ServiceError.actionFailed(
-                                "set_value click landed but keyboard delivery cannot be proven for \(elementId): \(e)"
-                            )
-                        }
-                    }
-                    guard value.isEmpty || AXBridge.getValue(el).contains(value) else {
-                        throw ServiceError.actionFailed(
-                            "set_value typing effect unverified for \(elementId)"
-                        )
-                    }
-                    return okAction(
-                        path: "\(click.path)+\(typePath)",
-                        detail: "set_value \(elementId) len=\(value.count)"
+                    throw ServiceError.unsupported(
+                        "set_value refused: \(elementId) has no proven AXSetValue capability"
                     )
                 }
-
-                throw ServiceError.unsupported(
-                    "set_value refused: \(elementId) is not a proven editable target"
-                )
+                let readback = AXBridge.getValue(el)
+                guard readback == value || (!value.isEmpty && readback.contains(value)) else {
+                    throw ServiceError.actionFailed(
+                        "ax_set_value effect unverified for \(elementId)"
+                    )
+                }
+                return okAction(path: "ax_set_value", detail: "set_value \(elementId)")
 
             case "focus":
                 let elementId = try requireString(action, "element_id")
@@ -489,6 +498,13 @@ final class Service {
             throw ServiceError.invalidRequest("foreground_activate requires pid and window_id")
         }
         let target = try WindowResolver.resolve(pid: pid_t(pid), windowID: CGWindowID(wid))
+        // AXPress/click may already have promoted this exact window; a second
+        // NSWorkspace.openApplication is the extra 抢焦点 users see in Agent loops.
+        if FocusGuard.isFrontmost(pid: target.pid),
+           FocusGuard.provesExactWindow(pid: target.pid, windowID: target.windowID)
+        {
+            return ["ok": true, "pid": Int(pid), "window_id": Int(wid)]
+        }
         let accessibility = AXBridge.enableAccessibility(pid: target.pid)
         defer { accessibility.disable() }
         _ = AXBridge.raiseExactWindow(target)

@@ -1,0 +1,10 @@
+{
+  "name": "anythinguse",
+  "version": "0.1.1",
+  "private": true,
+  "description": "AnythingUse / lcu — local-first control plane for real macOS apps and Chrome. Ships the local-computer-use skill for Pi and other CLI agents.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "skills": ["./skills"]
+  }
+}

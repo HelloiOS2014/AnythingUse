@@ -18,7 +18,7 @@ pub use validate::{
 
 use lcu_core::action::{Action, ProposedAction};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
-use lcu_core::observation::AppObservation;
+use lcu_core::observation::{AppObservation, ElementNode};
 use serde::{Deserialize, Serialize};
 
 /// Compact observation view safe to send to a model worker.
@@ -48,6 +48,27 @@ pub struct ModelElement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub frame: [f64; 4],
+    /// Platform-neutral actions the caller may propose for this element.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+pub(crate) fn capabilities_for_element(element: &ElementNode) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    for action in &element.actions {
+        let capability = match action.to_ascii_lowercase().as_str() {
+            "invoke" | "press" | "axpress" | "axconfirm" | "axselect" => "invoke",
+            "set_value" | "setvalue" | "axsetvalue" => "set_value",
+            "focus" => "focus",
+            "scroll" | "axscroll" => "scroll",
+            _ => continue,
+        };
+        if !capabilities.iter().any(|existing| existing == capability) {
+            capabilities.push(capability.to_string());
+        }
+    }
+    capabilities.sort();
+    capabilities
 }
 
 impl From<&AppObservation> for ModelObservation {
@@ -79,6 +100,7 @@ impl From<&AppObservation> for ModelObservation {
                     role: e.role.clone(),
                     label: e.label.clone(),
                     frame: [e.frame.x, e.frame.y, e.frame.width, e.frame.height],
+                    capabilities: capabilities_for_element(e),
                 })
                 .collect(),
             // Product VLM path may attach in-memory PNG; Agent IPC never serializes this field.

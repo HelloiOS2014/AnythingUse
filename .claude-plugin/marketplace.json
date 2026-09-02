@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "anythinguse",
-  "description": "AnythingUse — local-first control plane for real macOS apps and Chrome, from any agent (Claude Code, Grok Build, Codex).",
+  "description": "AnythingUse — local-first control plane for real macOS apps and Chrome, from any agent (Pi, Claude Code, Grok Build, Codex).",
   "owner": {
     "name": "AnythingUse",
     "email": "helloios2014@users.noreply.github.com"

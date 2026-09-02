@@ -15,8 +15,8 @@ records migration completion, this file describes the current wire surface.
 ## Principles
 
 1. Humans and Agents share the same `lcu` binary and flags.
-2. Agents never open the private Runtime socket themselves; they only run `lcu`.
-3. `--json` / JSONL outputs never include screenshots, full semantic trees, or long model reasoning.
+2. Agents never open the private Runtime socket themselves; they only run `lcu` **directly** (no Python/JS/shell driver that subprocess-calls `lcu`).
+3. `--json` / JSONL outputs never include screenshots, full semantic trees, or long model reasoning. `decide` returns **compact** `elements`; the caller extracts key fields and must not echo the array or ask for a fuller tree.
 4. `lcu approve` only opens the desktop confirmation UI. It never completes approval in the CLI.
 5. Exit codes are stable and machine-readable.
 6. No second Agent protocol (no MCP Computer Use control plane).
@@ -123,13 +123,26 @@ Schema and internal protocol versions.
 Agent decision mode for a task submitted with `--actor agent`. No Runtime
 restart is needed; the task-level actor overrides the process default.
 
-`decide` returns the strict target, capture transform/hash, compact elements,
-goal/step, and an `image_path` to a 0600 temp screenshot (read it before
-submitting — the file is removed once the decision is consumed or times
-out). `--wait` polls until a decision is available. `act` submits an action
-JSON for that observation; the action then flows through the exact same
-pipeline as VLM proposals (validation, EffectGuard, approvals, control
-gates). A stale `observation_id` is rejected with exit 3; use `decide` again.
+`decide` returns the strict target, capture transform/hash, **compact**
+elements (id/role/label/frame plus platform-neutral `capabilities`; not a full
+AX/DOM tree and not raw platform `actions`), goal/step, and an `image_path` to
+a 0600 temp screenshot. The
+**caller extracts** matching ids from that payload; do not paste `elements`
+into the chat or wrap `lcu` in a driver because the JSON is large. Redirect
+to a file and extract with `ctx_execute_file` / Read — never `python3 -c`
+or a helper script, even if that helper does not spawn `lcu`. Finder outline rows are
+executed as `AXSelect` (`kAXSelectedRowsAttribute`) inside Runtime `invoke`,
+not as a coordinate click. Read `image_path` before submitting — the file is
+removed once the decision is consumed or times out. Do not run `lcu` under a
+rewritten `TMPDIR` (sandbox `ctx_execute` included): `lcu-desktop` inherits
+it and the screenshot path dies with the sandbox. `--wait` polls until a
+decision is available. `act` submits an action JSON for that observation; the
+action then flows through the exact same pipeline as VLM proposals
+(validation, EffectGuard, approvals, control gates). A stale
+`observation_id` is rejected with exit 3; use `decide` again.
+Targeted click/type on an element that advertises the equivalent semantic
+capability is rejected with `semantic_action_required`; use that element's
+`invoke` or `set_value` capability instead.
 Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s).
 Cancel/pause aborts a parked decision immediately (exit 2 semantics preserved).
 

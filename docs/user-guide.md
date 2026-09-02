@@ -10,7 +10,7 @@ scenario.
 
 Execution surfaces:
 
-- **macOS apps** — strict window-targeted control via `macos-window-service`. An explicit bundle ID is launched without taking frontmost when it has no existing window. Choose `--control-mode auto|background_only`; `auto` prefers background and may activate the exact permitted target when required, while `background_only` fails instead. The agent never switches back. Agent waits release generic ownership and resume from a fresh target observation; real user input on that target pauses automatically. Consequences use separate one-time confirmation or takeover gates.
+- **macOS apps** — strict window-targeted control via `macos-window-service`. An explicit bundle ID is launched without taking frontmost when it has no existing window. Choose `--control-mode auto|background_only`; `auto` prefers background and may activate the exact permitted target when required, while `background_only` fails instead. The agent never switches back. If the Agent TUI (Pi/iTerm) is frontmost while thinking, the next `act` may activate Finder/the target again — that is the disclosed fallback, not a restore of the TUI. Agent waits release generic ownership and resume from a fresh target observation; real user input on that target pauses automatically. Consequences use separate one-time confirmation or takeover gates.
 - **Chrome** — real Chrome Extension + Native Messaging + debugger/CDP on an inactive background task tab (not Playwright, not a second browser). User tabs are not reactivated when a task ends.
 
 Tasks enter one serial FIFO queue. `waiting_actor` and paused tasks release the global execution slot and generic target reservation. An action receipt is not completion: `succeeded` requires explicit `Done` followed by successful target re-observation.
@@ -59,13 +59,14 @@ cargo build -p lcu-cli -p lcu-desktop --release
 # Native macOS window service (auto-spawned by Runtime when found)
 cd native/macos-window-service && swift build -c release && cd ../..
 
-# health (starts the menu-bar Runtime on demand)
-./target/release/lcu doctor --json
+# product PATH entry: sibling `lcu` + `lcu-desktop` in ~/.local/bin
+./scripts/install-cli.sh
+lcu doctor --json
 ```
 
 The on-demand host exits after 60 idle seconds when no task or approval is
-active. Run `./target/release/lcu-desktop` explicitly only for a persistent
-menu-bar host.
+active. Run `lcu-desktop` explicitly only for a persistent menu-bar host.
+Checkout `./target/release/lcu` is a debug fallback only.
 
 ### Chrome surface (optional)
 
@@ -85,7 +86,7 @@ default above). Do not load the repository source directory into Chrome.
 2. `lcu doctor --json` — check permissions (`screen_recording`/`accessibility`/`input_monitoring`) and surface connectivity in `notes` (`mac_window` / `chrome_tab`).
 3. Choose one explicit decision path:
    - Local model installed: `lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json`.
-   - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`.
+   - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`. Pi: `./scripts/install-pi.sh` (or `pi install /absolute/path/to/AnythingUse`). Claude Code / Grok: see the README plugin section.
 4. If a gate is required, use the menu-bar / desktop UI (not the CLI). App access discloses that `auto` may bring the exact target forward; consequence confirmation/takeover remains separate. Activation or approval discards the old proposal and the same Actor receives a fresh observation.
 
 Persistent app access can be removed from the menu-bar item **Revoke app access…**.
@@ -96,7 +97,7 @@ Without `--wait`, `lcu run` returns after queuing the task. Use `lcu status`, `l
 
 The decision maker is pluggable; both receive the same data surface (compact elements + scaled screenshot) and their proposals flow through the same safety pipeline.
 
-- **Agent-driven (product default when `LCU_VISION_ACTOR` is unset/`auto`)**: submit with `--actor agent`, then drive the loop with `lcu decide <task-id> --wait --json` and `lcu act <task-id> --observation-id <obs> --action '<json>' --effect '<json>'`. Executable actions require the shared closed-set effect claim. Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
+- **Agent-driven (product default when `LCU_VISION_ACTOR` is unset/`auto`)**: submit with `--actor agent`, then invoke `lcu decide` / `lcu act` **directly** (no driver script). `decide` returns compact elements with generic `capabilities` plus `image_path` (no raw platform `actions`); the caller extracts matching `element_id`s and reads the screenshot. Runtime rejects coordinate input when the target element advertises the equivalent semantic capability. Finder sidebar rows are `AXSelect` on the outline, not `AXPress`. To forbid bringing the target front: `--control-mode background_only`. Executable actions require the shared closed-set effect claim. Do not run `lcu` under a rewritten `TMPDIR`. Decision timeout: `LCU_AGENT_DECISION_TIMEOUT_SECS` (default 600s). See the Agent Skill for the full workflow.
 - **Local VLM (optional)**: submit with `--actor vlm`; `lcu-desktop` runs the Qwen3-VL subprocess automatically. Requires the weights under `models/Qwen3-VL-4B-Instruct` (see above).
 
 For Chrome, put the destination in the high-level goal. An external Agent may

@@ -33,14 +33,23 @@ pub fn default_service_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    // Relative to CARGO_MANIFEST_DIR / workspace when developing.
-    let candidates = [
+    // Product layout: sibling of the running host (`~/.local/bin` or packaged `bin/`).
+    // Compile-time checkout paths are debug-only and must not be required at runtime.
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe.with_file_name("macos-window-service"));
+    }
+    candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../native/macos-window-service/.build/release/macos-window-service"),
+    );
+    candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../native/macos-window-service/.build/debug/macos-window-service"),
-        PathBuf::from("native/macos-window-service/.build/release/macos-window-service"),
-    ];
+    );
+    candidates.push(PathBuf::from(
+        "native/macos-window-service/.build/release/macos-window-service",
+    ));
     for c in candidates {
         if c.is_file() {
             return Some(c);

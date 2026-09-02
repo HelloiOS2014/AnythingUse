@@ -48,7 +48,7 @@ enum DirectedInput {
                         keyEventsPosted: false
                     )
                 }
-                if let pressable = AXBridge.pressableAtOrAbove(hit) {
+                if foregroundTargetProven(target), let pressable = AXBridge.pressableAtOrAbove(hit) {
                     try AXBridge.press(pressable)
                     return ActionReport(
                         path: "ax_press_at_point",

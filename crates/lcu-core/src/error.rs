@@ -33,6 +33,8 @@ pub enum ErrorCode {
     ApprovalInvalid,
     #[error("unsupported_capability")]
     UnsupportedCapability,
+    #[error("semantic_action_required")]
+    SemanticActionRequired,
     #[error("foreground_required")]
     ForegroundRequired,
     #[error("internal_error")]
@@ -50,6 +52,7 @@ impl ErrorCode {
             | Self::TaskNotFound
             | Self::ApprovalInvalid
             | Self::UnsupportedCapability
+            | Self::SemanticActionRequired
             | Self::ForegroundRequired
             | Self::NotImplemented => ExitCode::TaskFailed,
             Self::InvalidRequest | Self::UsageError => ExitCode::UsageError,

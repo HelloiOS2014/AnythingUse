@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 import Darwin
 
@@ -101,7 +102,7 @@ func printHelp() {
           permissions               Print TCC probe JSON
           list                      List on-screen windows (pid + window_id)
           socket-path               Print default socket path
-          self-check                Run the user-input monitor regression check
+          self-check                Run native regression checks
           help
 
         Socket protocol (newline-delimited JSON):
@@ -147,7 +148,10 @@ func runSelfCheck() throws {
     guard ExperimentalWindowRouting.selfCheck() else {
         throw ServiceError.actionFailed("self-check failed: experimental window routing")
     }
-    fputs("self-check ok: user input monitor + experimental window routing\n", stderr)
+    guard !AXBridge.canSelect(AXUIElementCreateSystemWide()) else {
+        throw ServiceError.actionFailed("self-check failed: AX selection must fail closed")
+    }
+    fputs("self-check ok: input monitor + window routing + AX selection guard\n", stderr)
 }
 
 func printJSON(_ value: Any) {

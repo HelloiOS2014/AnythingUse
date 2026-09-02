@@ -50,7 +50,7 @@ flowchart LR
     USER["User input"] -. "same-target takeover" .-> RT
 ```
 
-The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: with the normal unset/`auto` Runtime default, the external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`); the local VLM is optional (`lcu run --actor vlm`). Both flow through the same validation, risk, and approval gates. See [Architecture](docs/architecture.md) for details.
+The loop is `observe → decide → guard → act → observe`. `decide` is the pluggable step: with the normal unset/`auto` Runtime default, the external Agent fetches the observation (`lcu decide`) and submits one (`lcu act`); the local VLM is optional (`lcu run --actor vlm`). Both flow through the same validation, risk, and approval gates. Agents invoke `lcu` directly (no driver script); `decide` returns compact elements + `image_path` for the caller to extract — not a full semantic tree. See [Architecture](docs/architecture.md) for details.
 
 ## Quick start
 
@@ -59,15 +59,16 @@ The loop is `observe → decide → guard → act → observe`. `decide` is the 
 cargo build -p lcu-cli -p lcu-desktop --release
 (cd native/macos-window-service && swift build -c release)
 
-# lcu starts the menu-bar Runtime on demand
-./target/release/lcu doctor --json
+# product PATH entry (sibling lcu + lcu-desktop in ~/.local/bin)
+./scripts/install-cli.sh
+lcu doctor --json
 
 # external Agent path: the Skill continues with lcu decide / lcu act
-./target/release/lcu run "Open Downloads in Finder" \
+lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor agent --json
 
 # human/local path: requires the optional model assets below
-./target/release/lcu run "Open Downloads in Finder" \
+lcu run "Open Downloads in Finder" \
   --app com.apple.finder --actor vlm --wait --json
 ```
 
@@ -81,9 +82,14 @@ Optional: Chrome surface — run `./native/chrome-control/scripts/install-native
 
 ## Install the Skill as a plugin
 
-The `local-computer-use` skill ships as a plugin from this repo. **Install** (one of):
+The `local-computer-use` skill ships from this repo. **Install** (one of):
 
 ```bash
+# Pi (native package; use an absolute path for global install)
+./scripts/install-pi.sh
+# or: pi install /absolute/path/to/AnythingUse
+pi install git:github.com/HelloiOS2014/AnythingUse
+
 # Claude Code
 claude plugin marketplace add HelloiOS2014/AnythingUse
 claude plugin install anythinguse
@@ -92,13 +98,22 @@ claude plugin install anythinguse
 grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust
 ```
 
+This checkout also autoloads the skill for Pi via `.pi/settings.json` after the
+project is trusted. Product binaries live on PATH: `./scripts/install-cli.sh`
+links sibling `lcu` and `lcu-desktop` into `~/.local/bin` (Pi:
+`./scripts/install-pi.sh` runs that too). Checkout `./target/release/lcu` is a
+debug fallback only.
+
 **Update**:
 
 ```bash
+# Pi local checkout is live (no copy). Git install:
+pi install git:github.com/HelloiOS2014/AnythingUse
 claude plugin update anythinguse    # or: grok plugin update
 ```
 
-Skill updates ride the repo; the `lcu` binaries stay a separate build.
+Skill updates ride the repo; the `lcu` / `lcu-desktop` binaries stay a separate
+PATH install (`./scripts/install-cli.sh`).
 
 ## Non-interference model
 
@@ -135,6 +150,8 @@ MCP, Playwright, public TCP, and long Top100/soak gates are **not** current prod
 
 ```text
 apps/lcu-desktop/             Runtime host and approval UI
+package.json                  Pi package manifest (ships the Skill)
+.pi/settings.json             Project-local Pi package autoload
 crates/lcu-cli/               Public command surface
 crates/lcu-core/              Shared contracts (actions, risk, task state, protocol)
 crates/lcu-platform/          PlatformBackend trait + null backend

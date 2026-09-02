@@ -1,7 +1,7 @@
 {
   "name": "anythinguse",
-  "version": "0.1.0",
-  "description": "AnythingUse / lcu — operate real macOS apps and Chrome from any agent (Claude Code, Grok Build, Codex) through the lcu CLI. Decision maker is pluggable: local VLM or the agent itself (lcu decide/act).",
+  "version": "0.1.1",
+  "description": "AnythingUse / lcu — operate real macOS apps and Chrome from any agent (Pi, Claude Code, Grok Build, Codex) through the lcu CLI. Decision maker is pluggable: local VLM or the agent itself (lcu decide/act).",
   "author": {
     "name": "AnythingUse",
     "url": "https://github.com/HelloiOS2014/AnythingUse"

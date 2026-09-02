@@ -4,9 +4,13 @@
 //! closed-set `effect`; missing or invalid values are rejected here, never
 //! mapped to a hidden default business policy.
 
-use lcu_core::action::{is_http_navigation_url, Action, EffectClaim, SemanticAction, TargetedInput};
+use lcu_core::action::{
+    is_http_navigation_url, Action, EffectClaim, SemanticAction, TargetedInput,
+};
 use lcu_core::error::{ErrorCode, LcuError, LcuResult};
-use lcu_core::observation::{AppObservation, ObservationId};
+use lcu_core::observation::{AppObservation, ElementNode, ObservationId};
+
+use crate::capabilities_for_element;
 
 /// Validate the closed-set effect declaration of an executable proposal.
 ///
@@ -72,10 +76,21 @@ pub fn validate_action(obs: &AppObservation, action: &Action) -> LcuResult<()> {
                 }
                 ensure_element(obs, id)?;
             }
-            let _ = sem;
+            match sem {
+                SemanticAction::Invoke { element_id } => {
+                    require_capability(obs, element_id, "invoke")?
+                }
+                SemanticAction::SetValue { element_id, .. } => {
+                    require_capability(obs, element_id, "set_value")?
+                }
+                SemanticAction::Focus { element_id } => {
+                    require_capability(obs, element_id, "focus")?
+                }
+                SemanticAction::Navigate { .. } | SemanticAction::Scroll { .. } => {}
+            }
             Ok(())
         }
-        Action::Targeted(t) => validate_targeted(t),
+        Action::Targeted(t) => validate_targeted(obs, t),
     }
 }
 
@@ -90,7 +105,77 @@ fn ensure_element(obs: &AppObservation, id: &str) -> LcuResult<()> {
     }
 }
 
-fn validate_targeted(t: &TargetedInput) -> LcuResult<()> {
+fn require_capability(obs: &AppObservation, id: &str, required: &str) -> LcuResult<()> {
+    let element = obs
+        .elements
+        .iter()
+        .find(|element| element.id == id)
+        .expect("element existence checked before capability validation");
+    if capabilities_for_element(element)
+        .iter()
+        .any(|capability| capability == required)
+    {
+        Ok(())
+    } else {
+        Err(LcuError::coded(
+            ErrorCode::UnsupportedCapability,
+            format!("element {id} does not support semantic {required}"),
+        ))
+    }
+}
+
+fn semantic_element_at<'a>(
+    obs: &'a AppObservation,
+    x: f64,
+    y: f64,
+    required: &str,
+) -> Option<&'a ElementNode> {
+    obs.elements
+        .iter()
+        .filter(|element| {
+            let frame = element.frame;
+            frame.width > 0.0
+                && frame.height > 0.0
+                && x >= frame.x
+                && x <= frame.x + frame.width
+                && y >= frame.y
+                && y <= frame.y + frame.height
+                && capabilities_for_element(element)
+                    .iter()
+                    .any(|capability| capability == required)
+        })
+        .min_by(|a, b| {
+            let area = |element: &ElementNode| element.frame.width * element.frame.height;
+            area(a)
+                .partial_cmp(&area(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn reject_targeted_when_semantic_exists(
+    obs: &AppObservation,
+    x: Option<f64>,
+    y: Option<f64>,
+    required: &str,
+) -> LcuResult<()> {
+    let element = match (x, y) {
+        (Some(x), Some(y)) => semantic_element_at(obs, x, y, required),
+        _ => None,
+    };
+    if let Some(element) = element {
+        Err(LcuError::coded(
+            ErrorCode::SemanticActionRequired,
+            format!(
+                "element {} supports {required}; targeted input is not allowed",
+                element.id
+            ),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_targeted(obs: &AppObservation, t: &TargetedInput) -> LcuResult<()> {
     match t {
         TargetedInput::Click { x, y, .. } => {
             if !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) {
@@ -99,7 +184,7 @@ fn validate_targeted(t: &TargetedInput) -> LcuResult<()> {
                     format!("click coordinates out of bounds: ({x},{y})"),
                 ));
             }
-            Ok(())
+            reject_targeted_when_semantic_exists(obs, Some(*x), Some(*y), "invoke")
         }
         TargetedInput::TypeText { text, x, y } => {
             if text.is_empty() {
@@ -128,7 +213,7 @@ fn validate_targeted(t: &TargetedInput) -> LcuResult<()> {
                     ));
                 }
             }
-            Ok(())
+            reject_targeted_when_semantic_exists(obs, *x, *y, "set_value")
         }
         TargetedInput::KeyCombo { keys } => {
             if keys.is_empty() {
@@ -185,7 +270,6 @@ pub fn compress_elements_for_model(
     els
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,19 +299,34 @@ mod tests {
                 width: 100,
                 height: 100,
             },
-            elements: vec![ElementNode {
-                id: "e1".into(),
-                role: "button".into(),
-                label: Some("Open".into()),
-                value: None,
-                frame: Rect {
-                    x: 0.1,
-                    y: 0.1,
-                    width: 0.2,
-                    height: 0.1,
+            elements: vec![
+                ElementNode {
+                    id: "e1".into(),
+                    role: "button".into(),
+                    label: Some("Open".into()),
+                    value: None,
+                    frame: Rect {
+                        x: 0.1,
+                        y: 0.1,
+                        width: 0.2,
+                        height: 0.1,
+                    },
+                    actions: vec!["press".into()],
                 },
-                actions: vec!["press".into()],
-            }],
+                ElementNode {
+                    id: "e2".into(),
+                    role: "text_field".into(),
+                    label: Some("Search".into()),
+                    value: None,
+                    frame: Rect {
+                        x: 0.4,
+                        y: 0.4,
+                        width: 0.2,
+                        height: 0.1,
+                    },
+                    actions: vec!["AXSetValue".into()],
+                },
+            ],
             transform_id: TransformId("t".into()),
             surface_scope: None,
             image_hash: None,
@@ -294,5 +393,66 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn exposes_capabilities_and_requires_semantic_actions() {
+        let obs = sample_obs();
+        let model = crate::ModelObservation::from(&obs);
+        assert_eq!(model.elements[0].capabilities, vec!["invoke"]);
+        assert_eq!(model.elements[1].capabilities, vec!["set_value"]);
+
+        let click = validate_action(
+            &obs,
+            &Action::Targeted(TargetedInput::Click {
+                x: 0.15,
+                y: 0.15,
+                button: Default::default(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(click.code(), ErrorCode::SemanticActionRequired);
+
+        let type_text = validate_action(
+            &obs,
+            &Action::Targeted(TargetedInput::TypeText {
+                text: "hello".into(),
+                x: Some(0.45),
+                y: Some(0.45),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(type_text.code(), ErrorCode::SemanticActionRequired);
+
+        assert!(validate_action(
+            &obs,
+            &Action::Targeted(TargetedInput::TypeText {
+                text: "canvas input".into(),
+                x: None,
+                y: None,
+            })
+        )
+        .is_ok());
+
+        assert!(validate_action(
+            &obs,
+            &Action::Semantic(SemanticAction::SetValue {
+                element_id: "e2".into(),
+                value: "hello".into(),
+            })
+        )
+        .is_ok());
+        assert_eq!(
+            validate_action(
+                &obs,
+                &Action::Semantic(SemanticAction::SetValue {
+                    element_id: "e1".into(),
+                    value: "hello".into(),
+                })
+            )
+            .unwrap_err()
+            .code(),
+            ErrorCode::UnsupportedCapability
+        );
     }
 }
