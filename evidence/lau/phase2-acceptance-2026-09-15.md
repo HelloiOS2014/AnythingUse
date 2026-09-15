@@ -1,0 +1,254 @@
+# LAU Phase 2 真机验收 — 2026-09-15
+
+- 设备：Xiaomi 2211133C（``）· Android 16 · serial `<device-serial>`（USB）
+- 主机：macOS · adb 1.0.41 (35.0.2) · `lau` 由 `70ac8ce` 构建（debug，含本轮 P0 修复）
+- 依据：`docs/lau-android-plan.md` §8「Phase 2 验收（确定性断言，非元素计数）」
+- 纪律：**全程不使用 ADB 输入注入**（无 `input tap/text`、无 `am start`）；所有动作都经 helper 的 AccessibilityService
+
+## 结果总览
+
+| # | 断言 | 结果 | 证据摘要 |
+|---|---|---|---|
+| 1 | doctor 四态 + 未启用时的引导 blocker | ✅ 两条路径均通过 | 正常：四态全绿、exit 0；**禁用后**：`enabled:false` + 精确引导 blocker + exit 3（见发现 G） |
+| 2 | dump：已知 label / 能力字段 / 包与窗口身份 | 🟡 部分通过 | 包名 ✓、能力字段 ✓、已知 label ✓；**窗口身份缺失**（发现 B） |
+| 3 | invoke：语义点开已知条目、无坐标、断言层级变化 | ✅ 通过 | `invoke e7` → `{"performed":"invoke"}`；代次 15→16；label 集由设置首页变为「我的设备」详情页 |
+| 4 | set_value：输入 `你好LCU` 并重 dump 断言值相等 | ✅ 通过 | `{"performed":"set_value","value":"你好LCU"}`；重 dump 该 EditText `value == 你好LCU` |
+| 5 | 陈旧 observationId → stale；能力未声明 → unsupported | ✅ 通过 | 见下（两条均 exit 3） |
+| 6 | 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒 | ✅ 通过 | 关屏 → `screen_off`；亮屏锁屏 → `device_locked`；`mWakefulness` 保持 `Asleep`，未被唤醒/解锁 |
+| 7 | 杀 helper → 服务自动恢复；重启手机 → doctor 全绿 | 🟡 **前半成立，但被 HyperOS 反制** | `am crash` 后 PID 17820→32256、≤2s 内 ping 恢复；**随后系统自行把无障碍服务关掉（机主确认未操作）**，必须人工重开（见发现 I）；重启未做 |
+
+## 追加：Phase 3 验收第 3 条（getevent 真机双验）— ✅ 通过
+
+```
+$ lau run "在设置中打开深色模式" --app com.android.settings --actor agent --json
+{"data":{"state":"waiting_actor","task_id":"task_1789469160358181000"},"status":"ok"}   exit=0
+   ↑ 本轮新增的 ensure_watch 在真机通过：getevent 监听成功挂载（挂不上会直接拒绝建任务）
+
+$ lau status <task-id> --json   → "watch":{"healthy":true,"dead_reason":null}
+$ lau decide <task-id> --json   → {"status":"ok","obs":"obs_2","n":34}   exit=0
+
+[机主用手指在屏幕上滑了一下]
+
+$ lau decide <task-id> --json   → {"error":"taken_over","status":"paused"}   exit=3
+   任务：state=paused, wait_reason=taken_over, last_action_summary="paused: real touch on device"
+   → 真实触摸被正确识别为接管 ✅
+
+$ lau resume <task-id> --json   → state=waiting_actor, observation_id=null   exit=0   ← resume 真机验证 ✅
+$ lau decide <task-id> --json   → obs_3（旧 obs_2 已作废）
+$ lau act <task-id> --observation-id obs_3 \
+      --action '{"kind":"semantic","type":"invoke","element_id":"e1"}' \
+      --effect '{"kind":"navigate","summary":"返回上一页"}'
+  → {"last_action_summary":"invoke ok","step":1,"state":"waiting_actor"}   exit=0
+$ lau decide <task-id> --json   → status ok（**不是** taken_over）
+   → 注入动作不触发接管 ✅
+```
+
+旁证：`adb shell getevent -lt` 能正常打开设备事件流（`fts` 触摸设备在列），说明该 ROM 确实会吐触摸事件 ——
+这证伪了我此前标注为"纸上测不出来"的那个假设风险（fail-closed 只有半截的风险），**该实现成立**。
+
+## 逐步证据
+
+### #1 doctor 四态
+
+```
+$ lau doctor --json
+{"data":{...,"helper":{"blockers":[],"bound":true,"enabled":true,"installed":true,"ping":true},
+ "target":"<device-serial>","model":"2211133C","android_version":"16"},"status":"ok"}   exit=0
+```
+
+### #2 dump
+
+```
+$ lau dump --json | jq '.data | keys'
+["elements","isInteractive","keyguardLocked","observationId","packageName","screenHeight","screenWidth","windowTitle"]
+
+$ jq '.data | {observationId, packageName, windowTitle, isInteractive, keyguardLocked}' dump.json
+{"observationId":15,"packageName":"com.android.settings","windowTitle":"","isInteractive":true,"keyguardLocked":false}
+
+$ jq '.data.elements | length'   → 30
+$ jq '[.data.elements[].capabilities[]] | unique'  → ["focus","invoke","scroll"]
+```
+
+已知 label 断言成功（`搜索系统设置项`、`我的设备`、`WLAN`、`蓝牙`、`锁屏`… 均为「设置」真实条目）。
+
+### #3 invoke（语义、无坐标）
+
+```
+$ lau dump --json          → observationId 15；首页
+$ lau invoke e7 --observation-id 15 --json
+{"data":{"performed":"invoke"},"status":"ok"}   exit=0
+$ lau dump --json          → observationId 16，packageName 仍为 com.android.settings
+   label 集变化：WLAN/蓝牙/移动网络…（首页）
+              → 设备名称/<phone-name>/存储空间/108.3GB/128GB/OS版本/保修期/处理器/运行内存（详情页）
+```
+
+同包内层级变化成立（规划对同包场景要求的正是「窗口标题/层级变化」）。
+
+### #4 set_value（中文）
+
+```
+$ lau dump --json                    → observationId 18；搜索页 EditText e8 [invoke,set_value,focus]
+$ lau set-value e8 "你好LCU" --observation-id 18 --json
+{"data":{"performed":"set_value","value":"你好LCU"},"status":"ok"}   exit=0
+$ lau dump --json | jq '[.data.elements[]|select(.value=="你好LCU")]|length'  → 1（PASS）
+```
+
+### #5 两条拒绝路径
+
+```
+$ lau invoke e2 --observation-id 15 --json
+{"error":"stale_observation: observation 15 is not current (20)","status":"error"}   exit=3
+
+$ lau set-value e2 "x" --observation-id 15 --json
+{"error":"stale_observation: observation 15 is not current (20)","status":"error"}   exit=3
+
+$ lau invoke e8 --observation-id 15 --json      # e8 是 TextView，无 invoke 能力
+{"error":"unsupported_capability: e8 has no invoke","status":"error"}                 exit=3
+```
+
+### #7 杀 helper（前半）
+
+```
+$ adb shell kill -9 17820
+/system/bin/sh: kill: 17820: Operation not permitted     ← 第一次尝试失败（SELinux/UID），helper 未死，不计入
+$ adb shell am crash dev.anythinguse.lau.helper
+t=2s  pid=32256  {"blockers":[],"bound":true,"enabled":true,"installed":true,"ping":true}   ← 真正死亡并自动恢复
+```
+
+PID 变化证明进程确实被换掉，而非"没杀成"。
+
+### #6 锁屏 / 灭屏
+
+```
+[机主按电源键关屏]
+$ lau dump --json    → {"error":"screen_off: display is not interactive","status":"error"}   exit=3
+$ lau foreground     → {"isInteractive":false,"keyguardLocked":true,"packageName":"com.android.systemui"}  exit=0
+$ lau screenshot     → {"bytes":15580,"image_path":"…/lau-….png","sha256":"c35bac…"}        exit=0   ← 见发现 F
+$ adb shell dumpsys power | grep mWakefulness   → mWakefulness=Asleep                        ← 未被唤醒
+
+[机主按电源键亮屏，停在锁屏]
+$ lau dump --json    → {"error":"device_locked: device is locked","status":"error"}          exit=3
+$ lau foreground     → {"isInteractive":true,"keyguardLocked":true,"packageName":"com.android.systemui"}
+$ adb shell dumpsys  → 锁屏仍锁定（未自动解锁）
+```
+
+## 新发现（规划未覆盖，需回写 §0）
+
+### D. `observationId` 不持久，且没有会话身份 → 旧观察可能"复活"
+
+- `generation` 是 **服务实例内的计数器**（`LauAccessibilityService.kt:33`），无持久化、无 boot/session 标识。
+- 实测：`am crash` 后（PID 32256）代次一路涨到 22；**机主关屏再亮屏后，代次回到 2**，而 PID 仍是 32256 —— 即系统重建了 AccessibilityService 实例（`onServiceConnected` 再次执行），计数器归零。
+- 含义：只要计数器爬回同一个数值，**旧观察的 id 会与新的"当前代次"相等**，`requireNode` 的代次校验就会放行；而节点是按**新 dump 的下标** `e{N}` 取的 —— 于是动作可能落在**与当初观察毫无关系的另一个元素**上。
+- 触发条件很日常：关屏/亮屏、ROM 重新绑定服务、force-stop 后重开、崩溃重启（验收 7 自己就会触发）。
+
+### E. helper 没有做规划 §5.2 要求的"复核窗口 ID/包名/bounds/能力"
+
+```kotlin
+private fun requireNode(req: JSONObject): AccessibilityNodeInfo {
+    … if (obs != generation) throw stale_observation          // ① 代次
+      val idx = eid.removePrefix("e")…; if (idx !in nodes.indices) throw element_not_found  // ② 下标
+      val node = nodes[idx]; if (!node.refresh()) throw stale_observation                   // ③ 节点还在
+      if (node.packageName == packageName) throw forbidden_package                          // ④ 自身包名
+      return node
+}
+```
+
+规划 §5.2 写的是「校验代次 → `refresh()` → **复核窗口 ID/包名/bounds/能力** → 任一不符 → `stale_observation`」，实际只做了 ①②③④，**没有复核窗口/包名/bounds/能力与观察时是否一致**。与发现 D 叠加后，就是上面那条"动作可能落到别的元素"的路径。
+
+### F. 关屏时 `screenshot` 照常"成功"
+
+关屏状态下 `lau screenshot` 仍返回 PNG（锁屏内容，15580 字节，exit 0），**没有屏幕状态校验**。Agent 若只看截图、不看 `screen_off`，会拿到一张无意义的图并据此决策。
+
+
+
+### A. 可点元素与 label 分离
+- 可 `invoke` 的元素（`LinearLayout`/`FrameLayout`/`RecyclerView`）**没有 label**；
+- 带 label 的元素（`TextView`/`Button`）**大多没有 invoke 能力**（如 `e13 TextView 蓝牙 []` 对 `e12 LinearLayout (无label) [invoke,focus]`）。
+- 后果：Agent 无法把「点开蓝牙」从 dump 直接映射为一个 element id，必须自行做几何包含解析（本次验收就是这么做的：按 frame 包含关系找到行）。
+- mac 侧同类问题在 Runtime/Swift 解决（Finder 行 → outline 的 `kAXSelectedRowsAttribute`）；**lau 侧没有等价机制**，helper 只做 `requireNode` + `ACTION_CLICK`。
+
+### B. 窗口身份缺失
+- helper 的 `windowTitle` 取自 `root.contentDescription`（`LauAccessibilityService.kt:194`），实测恒为空串；dump 中**没有 `windowId`**。
+- §5.3 要求的 时间戳 / 方向或 display ID / 截图可用性 **均未提供**；实有字段为 `isInteractive`、`keyguardLocked`、`screenWidth/Height`。
+- 因此验收 #2 的「包/窗口身份」只完成包名那一半。
+
+### C. 代次增长快 → decide/act 之间极易过期
+- 一次会话内 generation 15→20→21→22：输入文字、搜索结果出现、页面切换都会 bump。
+- 元素 id 随代次重排（同一输入框：`e8` → `e2`）。
+- 含义：Phase 3 的 `decide` → `act` 之间只要 UI 有任何变化就会 `stale_observation`，Agent 必须"拿到即用"。
+
+### G. doctor 的 `bound` / `ping` 判据不可靠（假阳性）
+
+服务被禁用期间实测：
+
+```
+$ lau doctor --json   → {"helper":{"bound":true,"enabled":false,"ping":true}}   ← bound/ping 均误报为真
+（约 1 分钟后）
+$ lau doctor --json   → {"helper":{"bound":true,"enabled":false,"ping":false}}  ← ping 才跟上；bound 仍是 true
+```
+
+- `bound` 的判据是 `dumpsys accessibility` 输出里是否包含 `LauAccessibilityService`；禁用后 dumpsys 里仍保留
+  `button:{dev.anythinguse.lau.helper/…LauAccessibilityService, …}`（无障碍快捷按钮条目）→ **恒为真的假阳性**。
+- `ping` 存在滞后窗口：服务已禁用，但旧实例的 socket 尚未销毁，仍能应答，直到实例销毁才转为 false。
+- 结论：**四态里只有 `enabled`（读 `settings get secure enabled_accessibility_services`）可信**；`bound`/`ping` 只能当诊断信息，不能当门禁。
+
+### H. 服务禁用后 socket 一度可连但返回空响应
+
+```
+$ lau dump --json   → {"error":"helper returned an empty response","status":"error"}   exit=3
+```
+
+连接被接受后立即关闭、无响应；CLI 的报错对用户没有指导性（既不像 `screen_off` 那样说明原因，也不提示去开无障碍）。
+`localabstract:dev.anythinguse.lau.helper` 随即消失，而 `adb forward --list` 仍留着过期映射（每次 RPC 会重建 forward，无实际影响）。
+
+### I. 【更正验收 7】HyperOS 会自行关闭无障碍服务
+
+时间线（机主全程只按过电源键、解锁、进设置页，未动过开关）：
+
+1. `am crash` → PID 17820→32256，t=2s 时 `ping:true`（进程确已重启）；
+2. 随后锁屏/解锁测试期间 helper 一直正常应答（能返回 `screen_off`/`device_locked`）；
+3. 机主进入设置的无障碍页时，发现 **「AnythingUse LAU」已处于关闭状态**，且
+   `settings get secure enabled_accessibility_services` 里已不含我们的服务（master `accessibility_enabled` 仍为 1）；
+4. 机主手动重新打开 → `doctor` 四态立刻恢复全绿，`dump` 恢复正常（PID 仍是 32256，代次回到 1）。
+
+含义：规划 Phase 2 验收第 7 条「杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复」**只对了一半** ——
+进程确实会被系统重启，但 **HyperOS 会把无障碍开关一起关掉**，需要人工重新开启才能继续工作。
+这正是规划 §9 风险表里「HyperOS 杀后台/自启动关 → 服务不复活」那一条的真实命中。
+
+**未确证**：是 `am crash` 触发的自动禁用，还是关屏/解锁过程触发的；logcat 已被覆盖，未留下证据。要定论需做一次受控复现。
+
+### J. 【补强发现 D】实例重建不需要进程重启
+
+重新打开无障碍服务后：
+
+```
+$ adb shell pidof dev.anythinguse.lau.helper   → 32256      ← 进程与崩溃后相同，从未变化
+$ lau dump --json                              → gen = 1    ← 计数器却是全新的
+```
+
+即：**同一个进程内，服务实例被销毁重建即可把 `generation` 归零**。这比"进程重启才归零"更容易发生（关屏/重绑/开关切换都会触发），
+使发现 D 的"旧 observationId 复活"从理论风险变成日常风险。
+
+### K. 【新缺陷 · 未复现】daemon 响应被截断在 8192 字节 → decide 偶发 exit 70
+
+真机跑 Phase 3 双验时实测到一次：
+
+```
+$ lau decide task_1789469160358181000 --json
+lau: daemon response is not JSON: EOF while parsing a string at line 1 column 8192     exit=70
+```
+
+- **同一条命令立刻重试即成功**；随后 12 次 + 15 次连续 `decide` 全部成功（响应 6.5–7.4 KB）。
+- 发生时机：紧跟一次成功 `act` 之后、页面切换尚未稳定时。
+- `8192` = 8 KiB，与 `BufReader` / `BufferedWriter` 默认缓冲一致，但**根因未确证**：
+  - helper 侧 `BufferedWriter`（默认 8 KiB）每次 `write()` 后都 `flush()`，不像它；
+  - daemon 侧用 `write_all` 整体写出；CLI 侧用 `read_line`（按语义不应截断）。
+- 我尝试把响应顶过 8 KiB 来复现，但设置界面各页只有 31–36 个元素（6–7 KB），**未能复现**。
+- 影响：Agent 的 `decide`/`act` 循环会偶发中断（exit 70 = 内部错误）；`decide --wait` **不会**重试该错误（它是硬错误，不是"暂停"）。
+- 建议（**待评审，未实施**）：传输改为显式分帧（长度前缀或读到 EOF）；或在 daemon 侧记录每次响应的字节数，便于下次复发时定位。
+
+## 未完成项（需机主配合）
+
+1. #1 blocker 路径：在手机上临时关闭「AnythingUse LAU」无障碍开关 → 抓 doctor blocker → 再打开。
+2. #6 锁屏/灭屏：按电源键关屏 → 抓 `screen_off`；再按一次亮屏停在锁屏 → 抓 `device_locked`；并确认任务不会自动唤醒。
+3. #7 后半：`adb reboot` 后 doctor 全绿（重启会中断手机使用，需明确同意）。
