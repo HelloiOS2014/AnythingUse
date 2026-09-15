@@ -19,6 +19,12 @@
 *.pem
 *.mobileprovision
 
+# Android helper
+native/android-helper/.gradle/
+native/android-helper/build/
+native/android-helper/app/build/
+native/android-helper/local.properties
+
 # Build / packaging artifacts
 /dist/
 /artifacts/

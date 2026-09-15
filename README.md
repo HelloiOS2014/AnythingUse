@@ -6,7 +6,7 @@
 
 AnythingUse is a local-first control layer for humans and Agents. **Today:** real macOS applications and the user's installed Chrome. **Future:** Windows and other endpoint types through the same command-oriented model.
 
-**Naming:** product name is **AnythingUse**. The public CLI is still `lcu`; crates, sockets, and the CLI keep the historical **LCU** codename (`lcu`, `lcu-*`); the data root is `~/Library/Application Support/AnythingUse`.
+**Naming:** product name is **AnythingUse**. The computer CLI is `lcu` (**Local Computer Use**); crates, sockets, and the CLI keep the historical **LCU** codename. **Android is not `lcu`**: its endpoint CLI is `lau` (**Local Android Use**), reserved for that surface. The data root is `~/Library/Application Support/AnythingUse`.
 
 ## Why AnythingUse
 
@@ -24,6 +24,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Window capture and AX/targeted actions on a strict PID + window target; background first, disclosed exact-target foreground fallback in `auto`, explicit failure in `background_only` |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
+| Android (`lau`) | Phase 1 scaffold — `lau doctor` (ADB presence, device, authorization) and `lau screenshot` (`adb exec-out screencap`); semantic control via a helper APK comes later |
 | Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
 | Safety | Shared closed-set effect, independent Runtime risk floor, separate app-access and consequence gates, takeover detection |
@@ -86,9 +87,8 @@ The `local-computer-use` skill ships from this repo. **Install** (one of):
 
 ```bash
 # Pi (native package; use an absolute path for global install)
-./scripts/install-pi.sh
-# or: pi install /absolute/path/to/AnythingUse
 pi install git:github.com/HelloiOS2014/AnythingUse
+# or: ./scripts/install-pi.sh  (git package + PATH binaries; not this checkout)
 
 # Claude Code
 claude plugin marketplace add HelloiOS2014/AnythingUse

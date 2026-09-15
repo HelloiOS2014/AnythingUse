@@ -4,7 +4,7 @@
 
 AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** 真实的 macOS 应用和用户已安装的 Chrome。**未来：** Windows 及其他端点类型，通过同一套命令模型扩展。
 
-**命名说明：** 产品名是 **AnythingUse**。公开 CLI 仍是 `lcu`；crate 与 socket 沿用历史代号 **LCU**（`lcu`、`lcu-*`）；数据根目录为 `~/Library/Application Support/AnythingUse`。
+**命名说明：** 产品名是 **AnythingUse**。电脑的公开 CLI 是 `lcu`（**Local Computer Use**）；crate 与 socket 沿用历史代号 **LCU**。**Android 不用 `lcu`：** 它的端点 CLI 是 `lau`（**Local Android Use**），为这个面预留。数据根目录为 `~/Library/Application Support/AnythingUse`。
 
 ## 为什么是 AnythingUse
 
@@ -22,6 +22,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 |---|---|
 | macOS 应用 | 对严格 PID + 窗口目标截图并执行 AX/定向动作；后台优先；按任务选择或需要时申请前台授权；否则明确失败 |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
+| Android（`lau`） | Phase 1 骨架：`lau doctor`（ADB、设备、授权）与 `lau screenshot`（`adb exec-out screencap`）；语义控制走 helper APK，后续阶段 |
 | 决策器 | `LCU_VISION_ACTOR` 未设置或为 `auto` 时默认由外部 Agent 决策；本地 Qwen3-VL 可按任务显式选择（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
 | 安全 | 双 Actor 共用闭集效果、Runtime 独立风险下限、应用/前台/后果三类独立门槛、接管检测 |
@@ -79,9 +80,8 @@ Runtime 常驻时，才需要手动运行 `lcu-desktop`。
 
 ```bash
 # Pi（原生包；全局安装请用绝对路径）
-./scripts/install-pi.sh
-# 或：pi install /absolute/path/to/AnythingUse
 pi install git:github.com/HelloiOS2014/AnythingUse
+# 或：./scripts/install-pi.sh（装 git 包 + PATH 二进制，不把本仓库写进全局 packages）
 
 # Claude Code
 claude plugin marketplace add HelloiOS2014/AnythingUse

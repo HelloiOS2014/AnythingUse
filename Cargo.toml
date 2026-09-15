@@ -9,6 +9,7 @@ members = [
     "crates/lcu-model",
     "crates/lcu-runtime",
     "crates/lcu-cli",
+    "crates/lau-cli",
     "apps/lcu-desktop",
 ]
 default-members = [
@@ -20,6 +21,7 @@ default-members = [
     "crates/lcu-model",
     "crates/lcu-runtime",
     "crates/lcu-cli",
+    "crates/lau-cli",
     "apps/lcu-desktop",
 ]
 

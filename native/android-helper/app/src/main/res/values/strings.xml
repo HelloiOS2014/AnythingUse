@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AnythingUse LAU</string>
+    <string name="service_description">AnythingUse Local Android Use helper. Lets the lau CLI dump the accessibility tree and perform semantic actions (click / set text / scroll). It does not send data off the device.</string>
+    <string name="enable_title">Enable the LAU helper</string>
+    <string name="enable_body">Open Accessibility settings and turn on “AnythingUse LAU”. On HyperOS also allow USB install (Mi account) and unrestricted battery if the service does not stay on.</string>
+    <string name="open_settings">Open Accessibility settings</string>
+    <string name="status_on">Service running — lau can dump / invoke.</string>
+    <string name="status_off">Service not enabled.</string>
+</resources>
