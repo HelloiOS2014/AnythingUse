@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EXIT_USAGE: i32 = 64;
 const EXIT_ADB_UNAVAILABLE: i32 = 69;
@@ -106,7 +106,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Compact observation for an agent task
+    /// Compact observation for an agent task (`--wait` polls until one is available)
     Decide {
         task_id: String,
         #[arg(long)]
@@ -141,6 +141,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Resume a task paused by takeover or a lost touch watch
+    Resume {
+        task_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the Mac approval dialog for a parked consequence (never auto-approves)
     Approve {
         task_id: String,
@@ -167,7 +173,8 @@ impl Device {
     }
 }
 
-fn adb_path() -> PathBuf {
+/// ADB binary used by the CLI and by the daemon's `getevent` watch.
+pub(crate) fn adb_path() -> PathBuf {
     match std::env::var("LAU_ADB_BIN") {
         Ok(p) if !p.is_empty() => PathBuf::from(p),
         _ => PathBuf::from("adb"),
@@ -500,9 +507,46 @@ fn screenshot(json: bool, out: Option<PathBuf>, cli_serial: Option<&str>) -> Res
     Ok(0)
 }
 
+/// Errors that only a human can clear (`lau resume`, or fixing the device):
+/// `decide --wait` keeps polling through them instead of giving up.
+const RETRYABLE_WAIT_ERRORS: [&str; 3] = ["taken_over", "task is paused", "watch_unavailable"];
+
 fn daemon_cmd(req: Value, json: bool) -> Result<i32> {
     daemon::ensure_daemon()?;
     let resp = daemon::rpc(&req)?;
+    Ok(emit_daemon_response(resp, json))
+}
+
+/// `lau decide --wait`: poll until a fresh observation is available. Waits
+/// through pauses (a human may `lau resume`) but returns immediately on a
+/// consequence gate, on a terminal task, or on an unknown task id.
+fn decide_cmd(task_id: &str, wait: bool, json: bool) -> Result<i32> {
+    let deadline = Instant::now() + Duration::from_secs(decide_wait_secs());
+    loop {
+        daemon::ensure_daemon()?;
+        let resp = daemon::rpc(&json!({"op": "decide", "task_id": task_id}))?;
+        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        let retry = wait
+            && !ok
+            && RETRYABLE_WAIT_ERRORS.contains(&err)
+            && Instant::now() < deadline;
+        if !retry {
+            return Ok(emit_daemon_response(resp, json));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn decide_wait_secs() -> u64 {
+    std::env::var("LAU_DECIDE_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(600)
+}
+
+fn emit_daemon_response(resp: Value, json: bool) -> i32 {
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     let err = resp
         .get("error")
@@ -516,11 +560,12 @@ fn daemon_cmd(req: Value, json: bool) -> Result<i32> {
         } else {
             println!("{data}");
         }
-        return Ok(0);
+        return 0;
     }
     let status = if err == "waiting_user" {
         "waiting_user"
-    } else if err == "taken_over" {
+    } else if RETRYABLE_WAIT_ERRORS.contains(&err.as_str()) {
+        // Paused: only a human action clears it (plan §0 #1/#2).
         "paused"
     } else {
         "error"
@@ -530,11 +575,11 @@ fn daemon_cmd(req: Value, json: bool) -> Result<i32> {
     } else {
         eprintln!("lau: {err}");
     }
-    Ok(if err == "waiting_user" {
+    if err == "waiting_user" {
         2
     } else {
         3
-    })
+    }
 }
 
 fn helper_op(json: bool, cli_serial: Option<&str>, op: &str, extra: Value) -> Result<i32> {
@@ -645,9 +690,9 @@ fn main() {
         ),
         Commands::Decide {
             task_id,
-            wait: _,
+            wait,
             json,
-        } => daemon_cmd(json!({"op": "decide", "task_id": task_id}), *json),
+        } => decide_cmd(&task_id, *wait, *json),
         Commands::Act {
             task_id,
             observation_id,
@@ -690,6 +735,9 @@ fn main() {
         }
         Commands::Cancel { task_id, json } => {
             daemon_cmd(json!({"op": "cancel", "task_id": task_id}), *json)
+        }
+        Commands::Resume { task_id, json } => {
+            daemon_cmd(json!({"op": "resume", "task_id": task_id}), *json)
         }
         Commands::Approve { task_id, json } => {
             daemon_cmd(json!({"op": "approve", "task_id": task_id}), *json)

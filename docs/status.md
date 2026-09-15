@@ -79,9 +79,9 @@ Android is a **separate** CLI (`lau`, never `lcu`) with its own plan
 ([LAU Android plan](lau-android-plan.md)). It is **not** part of the v3.2
 macOS-core delivery claim above, and it has **no recorded live acceptance**:
 
-- Source exists for `lau doctor`/`screenshot`/`dump`/`invoke`/`set_value`/`scroll`/`foreground`/`launch`, for an on-demand daemon, and for `run`/`decide`/`act`/`status`/`result`/`cancel`/`approve`.
+- Source exists for `lau doctor`/`screenshot`/`dump`/`invoke`/`set_value`/`scroll`/`foreground`/`launch`, for an on-demand daemon, and for `run`/`decide`/`act`/`status`/`result`/`cancel`/`resume`/`approve`.
 - The helper APK builds from `native/android-helper/` (Kotlin AccessibilityService). ADB stays transport/observation only — no ADB input injection.
-- The safety model is **incomplete**: no app-access gate, no Android evidence layer, R4 has no human-takeover path, and the `getevent` touch watch fails open. Section 0 of the plan lists every gap.
+- The safety model is **incomplete**: no app-access gate, no Android evidence layer, R4 has no human-takeover path. The hardware-touch watch is fail-closed (a dead `getevent` stream pauses the task; `lau resume` rebuilds it) and `lau-cli` gained its first unit tests. Section 0 of the plan lists every remaining gap.
 - Not productized: `./scripts/install-cli.sh` installs only `lcu`/`lcu-desktop`, `package-release.sh` does not package `lau`, and there is no Android Skill.
 
 Shared platform-neutral contracts now live in `crates/anything-core`

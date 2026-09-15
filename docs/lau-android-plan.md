@@ -13,6 +13,9 @@
 - daemon：按需拉起、空闲 60s 退出（`LAU_IDLE_EXIT_SECS`）、socket `~/.local/share/AnythingUse/lau/lau.sock`、**任务状态仅存内存**（daemon 重启即失）。
 - helper：Kotlin AccessibilityService，`localabstract:dev.anythinguse.lau.helper`（ADB 只做 `forward`），op = `ping` / `dump` / `foreground` / `invoke` / `set_value` / `scroll` / `launch`；每次 dump 递增代次并在动作时校验 → `stale_observation`；`set_value` 执行后重读比对；拒绝对自身包名自动化；灭屏/锁屏 → `screen_off` / `device_locked`；节点上限 400。
 - 接管检测：`run` 时启动 `adb shell getevent -lt`，捕获 `BTN_TOUCH` / `ABS_MT_TRACKING_ID` 递增触摸纪元；`decide` / `act` 前比对，不一致 → `paused` + `wait_reason=taken_over`。
+- **触摸守卫（fail-closed，2026-09-15 补）**：每个设备一条监听、纪元按 serial 隔离；`run` 时监听起不来即拒绝建任务，`decide` / `act` 前监听已断流 → 任务转 `paused` + `wait_reason=watch_unavailable`。
+- **`lau resume`（2026-09-15 补）**：解除 `taken_over` / `watch_unavailable` 造成的暂停；恢复时**重建该设备监听**（仍不健康则再次 fail-closed），并作废暂停前的 `observation_id` 与待批准动作。
+- **`decide --wait`（2026-09-15 补）**：轮询直到有可决策观察；只等人处理的暂停会继续等（`lau resume` 可解除），遇 consequence 门 / 终态 / 未知任务立即返回；超时 `LAU_DECIDE_WAIT_SECS`（默认 600s）。
 - 后果门：`act` 的 `effect` 属 `Destructive` / `ExternalCommunication` / `ExternalSubmit` / `PermissionChange` / `Financial` / `Credential` / `Unknown` 时停为 `wait_reason=consequence`，弹 **Mac** osascript 对话框（默认 Deny），CLI 返回 `waiting_user`（exit 2）；`lau approve <task-id>` 只重新打开该对话框。
 - 语义优先：坐标动作（`Targeted`）在 `act` 一律被拒（`semantic_action_required`）；`Navigate` 声明为 Chrome-only。
 
@@ -20,10 +23,10 @@
 
 | # | 差距 | 位置 | 影响 |
 |---|---|---|---|
-| 1 | `getevent_ok` **只写不读**：getevent 起不来或中途断流时没有任何后果 | `daemon.rs` | 与 §6「断流 fail-closed、不宣称共存」相反，当前是 **fail-open** |
-| 2 | 触摸纪元是**全局**的（`Inner.touch_epoch`），非 per-serial / per-task | `daemon.rs` | 多设备时 A 机触摸会暂停 B 机任务；Phase 3 验收第 8 条不成立 |
-| 3 | 无 `resume` / `pause` / `watch`；`taken_over` 的任务只能 `cancel` | `main.rs` | 接管后无法恢复 |
-| 4 | `decide --wait` 参数被解析后丢弃 | `main.rs` | Agent 侧只能自行轮询 |
+| 1 ✅ | ~~`getevent_ok` 只写不读~~ **已修**：`run` 时监听起不来直接拒绝建任务；`decide`/`act` 前监听已断流 → 任务 `paused`（`wait_reason=watch_unavailable`） | `daemon.rs` | 满足 §6 的 fail-closed，不再静默放行 |
+| 2 ✅ | ~~触摸纪元是全局的~~ **已修**：改为 `watches: HashMap<serial, TouchWatch>`，纪元与健康状态按设备隔离 | `daemon.rs` | 双设备的接管判定互不干扰 |
+| 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
+| 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
 | 5 | 无 app_access 门（首次控制某包没有 allow_once / always_allow / deny） | `daemon.rs` | 审批模型少一层 |
 | 6 | 无 Android 证据层 guard（§7）：role 规范化 / `isPassword` / 包签名身份 / 敏感页 / 截图可用性 / 树完整性 | `daemon.rs` | 风险只按 Actor 声明的 `EffectKind` 分流，没有独立证据下限 |
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | 与 §5.4 / D6 的高危定义不符 |
@@ -33,7 +36,9 @@
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
 | 13 | 分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill | `scripts/` | 未产品化 |
-| 14 | `lau-cli` / `android-helper` **零测试** | 全仓 | 无回归保护 |
+| 14 | `android-helper` 无测试；`lau-cli` 已有 5 个单测（守卫/纪元）但无端到端 | 全仓 | 回归保护仍薄弱 |
+
+**✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿）。
 
 **口径澄清（2026-09-15，已由项目所有者确认）**：审批**只在 Mac**、**禁止任何手机弹窗**（手机弹窗会误触发 getevent 接管，操作者也不在看手机）。§5.4 与 D6 从始至终如此规定；Phase 3 验收第 5 条原先误写为「设备对话框」，已统一为 Mac 对话框。实现 app_access 门时必须遵守这一点。
 
@@ -59,7 +64,7 @@
 | daemon | `lau` daemon（按需拉起，空闲 60s 退出，对齐 `lcu-desktop` 模式；**非常驻**） |
 | helper | `native/android-helper/`（Kotlin APK，sideload） |
 | 包名 | `dev.anythinguse.lau.helper`（socket 名带包名前缀，见 §4） |
-| 环境变量 | `LAU_ADB_BIN`、`LAU_SERIAL`、`LAU_HELPER_PORT`、`LAU_IDLE_EXIT_SECS` |
+| 环境变量 | `LAU_ADB_BIN`、`LAU_SERIAL`、`LAU_HELPER_PORT`、`LAU_IDLE_EXIT_SECS`、`LAU_DECIDE_WAIT_SECS` |
 | 数据根 | Mac 侧 `~/.local/share/AnythingUse/lau/`；设备侧无持久化 |
 | Skill | Android 单独出 skill（不塞 `local-computer-use`），Phase 3 末定名 |
 
@@ -74,7 +79,7 @@
 | 观察 | 窗口截图 + AX 树 + Input Monitoring | `adb screencap` + Accessibility dump + `getevent` 硬件触摸纪元 |
 | 语义执行 | AXPress/AXSelect/AXSetValue | `performAction`：CLICK / SET_TEXT / SCROLL / FOCUS |
 | 坐标兜底 | DirectedInput（需前台） | helper `dispatchGesture`（`canPerformGestures`，API 24+；**不经 ADB**）—— **尚未实现**；当前 `lau act` 直接拒绝坐标动作 |
-| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分）—— 已实现，但**断流不 fail-closed**、纪元是全局的（§0 #1/#2） |
+| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分）—— 已实现，纪元按 serial 隔离；监听断流即 fail-closed（§0 #1/#2 已修） |
 | 审批 | lcu-desktop 菜单栏 GUI | **Mac 对话框**（osascript，人在电脑前点；**不在手机弹**） |
 
 **关键映射**（复用 `anything-core` 类型的依据）：
@@ -130,7 +135,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 
 - **生命周期**：首个 `lau run` 拉起；`LAU_IDLE_EXIT_SECS`（默认 60）无活动退出。不写 launchd。不用时进程不存在，零消耗；任务期间一个小 Rust 进程（socket + 单任务队列 + getevent 读进程，内存几 MB，空闲 0 CPU）。
 - **职责**（跨 CLI 进程持有）：任务状态与队列（**每 serial 一条串行队列**）、app_access/consequence 门、观察代次、forward 会话管理、`getevent -lt` 触摸纪元（getepoch）。
-- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现差距**：断流未 fail-closed，纪元为全局而非 per-serial（§0 #1/#2）。
+- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现**：断流已 fail-closed（任务转 `paused` 并报告，`lau resume` 会重建监听）；纪元按 serial 隔离（§0 #1/#2 已修）。真机双验（真手指 vs 注入）仍待实测。
 - CLI 前缀进程（`lau run/decide/act/result/status/resume/cancel`）都是 daemon 的薄客户端；`doctor`/`screenshot`/`dump` 等无状态命令 Phase 2 起即单进程直连。
 
 ## 7. 与 mac 端共用/不复用
@@ -156,7 +161,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒
   7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）
 
-### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / 后果门已有；安全模型主要缺口见 §0）
+### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；安全模型主要缺口见 §0）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded`
@@ -183,7 +188,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 | dump 时视图滞后（动画中） | 新鲜 dump + 代次 + `stale_observation` |
 | forward 失效 / 响应不确定 | 每会话重建 + `indeterminate` 强制重观察，绝不重放 |
 | 本机其他进程可触 forward 端口 | 包名 socket + peer credential 校验 + 可选 session token（如实声明威胁模型）；**peer 校验尚未实现（§0 #12）** |
-| getevent 断流时静默 fail-open | **未修**：当前断流不会暂停任务（§0 #1）。修好前不得对外宣称「与用户共存」 |
+| getevent 断流 | 已修（§0 #1）：断流即 fail-closed 暂停并报告；`lau resume` 重建监听，重建不成功则任务保持暂停 |
 | 灭屏/锁屏/FLAG_SECURE 假成功 | 观察带屏幕态 + 显式错误码；不自动唤醒 |
 | 多设备 | per-serial 队列/forward/权限；doctor 不再吞歧义 |
 

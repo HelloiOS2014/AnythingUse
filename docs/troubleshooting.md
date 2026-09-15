@@ -129,5 +129,5 @@ Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered
 - **HyperOS install failure** (`INSTALL_FAILED_USER_RESTRICTED`) — enable “Install via USB” (needs a Xiaomi account) and retry.
 - **helper socket not responding** — toggle the accessibility service off/on. The CLI re-creates `adb forward` on every RPC, so a stale forward is not the usual cause.
 - **task parked in `waiting_actor` with `wait_reason=consequence`** — a Mac dialog is open, or `lau approve <task-id>` reopens it. The CLI cannot approve.
-- **task `paused` with `wait_reason=taken_over`** — real touch on the device paused it. There is **no `lau resume` yet**; only `lau cancel`.
-- **known gap** — if `getevent` dies, tasks are **not** paused today (fail-open). Do not treat that as verified coexistence.
+- **task `paused` with `wait_reason=taken_over`** — real touch on the device paused it. `lau resume <task-id>` clears the pause: it rebuilds the device touch watch and drops the pre-pause observation, so the next `decide` re-observes instead of continuing an old frame. `lau cancel` remains the alternative.
+- **`watch_unavailable`** — the device's `getevent` touch watch is not live (spawn failed, or the stream ended). `lau run` refuses to create a task, and a running task is paused rather than acting blind. Fix the ADB/device link, then `lau resume <task-id>`; if the watch still cannot attach, resume fails closed and the task stays paused. `lau status <task-id> --json` reports the watch's `healthy` / `dead_reason`.

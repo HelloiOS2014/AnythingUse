@@ -98,11 +98,90 @@ struct Task {
     pending_effect: Option<EffectClaim>,
 }
 
+/// Per-device hardware-touch watch. The epoch is keyed by serial (never one
+/// global counter) and the watch must be live before any task on that device
+/// may be steered — a dead stream pauses the task instead of silently
+/// pretending the user is co-existing.
+struct TouchWatch {
+    /// Bumped on every real hardware touch sequence seen for this device.
+    epoch: u64,
+    /// True while the `getevent` reader is attached and streaming.
+    healthy: bool,
+    /// Why the watch is not live (spawn failure / stream ended / never started).
+    dead_reason: Option<String>,
+}
+
+impl TouchWatch {
+    fn starting(epoch: u64) -> Self {
+        Self {
+            epoch,
+            healthy: false,
+            dead_reason: None,
+        }
+    }
+}
+
+/// Snapshot of a device watch, taken before mutably borrowing a task.
+struct WatchState {
+    epoch: u64,
+    healthy: bool,
+    dead_reason: Option<String>,
+}
+
+impl WatchState {
+    fn reason(&self) -> String {
+        self.dead_reason
+            .clone()
+            .unwrap_or_else(|| "touch watch is not attached".into())
+    }
+}
+
+fn watch_state(inner: &Inner, serial: &str) -> WatchState {
+    match inner.watches.get(serial) {
+        Some(w) => WatchState {
+            epoch: w.epoch,
+            healthy: w.healthy,
+            dead_reason: w.dead_reason.clone(),
+        },
+        None => WatchState {
+            epoch: 0,
+            healthy: false,
+            dead_reason: Some("no touch watch for this device".into()),
+        },
+    }
+}
+
+fn watch_epoch(inner: &Arc<Mutex<Inner>>, serial: &str) -> u64 {
+    inner
+        .lock()
+        .map(|g| g.watches.get(serial).map(|w| w.epoch).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// Fail-closed guard shared by `decide` and `act`. A task may only be steered
+/// while its device's touch watch is live and has not seen a real touch.
+/// Returns the error code to report; the task is already paused.
+fn watch_gate(t: &mut Task, watch: &WatchState) -> Option<&'static str> {
+    if !watch.healthy {
+        t.state = "paused".into();
+        t.wait_reason = Some("watch_unavailable".into());
+        t.error = Some(watch.reason());
+        return Some("watch_unavailable");
+    }
+    if t.touch_epoch != watch.epoch {
+        t.state = "paused".into();
+        t.wait_reason = Some("taken_over".into());
+        t.last_action_summary = Some("paused: real touch on device".into());
+        return Some("taken_over");
+    }
+    None
+}
+
 struct Inner {
     tasks: HashMap<String, Task>,
     last_activity: Instant,
-    touch_epoch: u64,
-    getevent_ok: bool,
+    /// One hardware-touch watch per device serial.
+    watches: HashMap<String, TouchWatch>,
 }
 
 pub fn daemon_main() -> Result<()> {
@@ -116,8 +195,7 @@ pub fn daemon_main() -> Result<()> {
     let inner = Arc::new(Mutex::new(Inner {
         tasks: HashMap::new(),
         last_activity: Instant::now(),
-        touch_epoch: 0,
-        getevent_ok: false,
+        watches: HashMap::new(),
     }));
     let idle = Duration::from_secs(idle_secs());
     loop {
@@ -160,6 +238,7 @@ fn handle_client(mut stream: UnixStream, inner: &Arc<Mutex<Inner>>) -> Result<()
         "status" => op_status(&req, inner),
         "result" => op_result(&req, inner),
         "cancel" => op_cancel(&req, inner),
+        "resume" => op_resume(&req, inner),
         "approve" => op_approve(&req, inner),
         _ => json!({"ok": false, "error": "unknown op"}),
     };
@@ -183,7 +262,13 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
             return json!({"ok": false, "error": m});
         }
     };
-    start_getevent(serial.clone(), inner);
+    // Fail closed at submission: no live hardware-touch watch means no task.
+    if let Err(e) = ensure_watch(&serial, inner) {
+        return json!({
+            "ok": false,
+            "error": format!("watch_unavailable: {e}"),
+        });
+    }
     let fg = helper_rpc(&serial, helper::wrap_op("foreground", json!({})))
         .ok()
         .and_then(|v| helper::unwrap_ok(v).ok());
@@ -210,7 +295,7 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    let epoch = inner.lock().map(|g| g.touch_epoch).unwrap_or(0);
+    let epoch = watch_epoch(inner, &serial);
     let task = Task {
         id: id.clone(),
         goal,
@@ -296,7 +381,11 @@ fn decide_view(t: &Task) -> Value {
 fn op_decide(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
     let mut g = inner.lock().expect("inner");
-    let epoch = g.touch_epoch;
+    let serial = match g.tasks.get(id) {
+        Some(t) => t.serial.clone(),
+        None => return json!({"ok": false, "error": format!("unknown task {id}")}),
+    };
+    let watch = watch_state(&g, &serial);
     let t = match g.tasks.get_mut(id) {
         Some(t) => t,
         None => return json!({"ok": false, "error": format!("unknown task {id}")}),
@@ -305,13 +394,10 @@ fn op_decide(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         return json!({"ok": false, "error": "task is paused", "data": task_view(t)});
     }
     if t.state == "succeeded" || t.state == "failed" || t.state == "cancelled" {
-        return json!({"ok": false, "error": format!("task is {}", t.state)});
+        return json!({"ok": false, "error": format!("task is {}", t.state), "data": task_view(t)});
     }
-    if t.touch_epoch != epoch {
-        t.state = "paused".into();
-        t.wait_reason = Some("taken_over".into());
-        t.last_action_summary = Some("paused: real touch on device".into());
-        return json!({"ok": false, "error": "taken_over", "data": task_view(t)});
+    if let Some(err) = watch_gate(t, &watch) {
+        return json!({"ok": false, "error": err, "data": task_view(t)});
     }
     if let Err(e) = capture(t) {
         t.state = "failed".into();
@@ -336,21 +422,23 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok());
     let mut g = inner.lock().expect("inner");
-    let epoch = g.touch_epoch;
+    let watch_serial = match g.tasks.get(id) {
+        Some(t) => t.serial.clone(),
+        None => return json!({"ok": false, "error": format!("unknown task {id}")}),
+    };
+    let watch = watch_state(&g, &watch_serial);
     let t = match g.tasks.get_mut(id) {
         Some(t) => t,
         None => return json!({"ok": false, "error": format!("unknown task {id}")}),
     };
     if t.state == "paused" {
-        return json!({"ok": false, "error": "task is paused"});
+        return json!({"ok": false, "error": "task is paused", "data": task_view(t)});
     }
     if t.observation_id.as_deref() != Some(obs) {
-        return json!({"ok": false, "error": "stale observation_id"});
+        return json!({"ok": false, "error": "stale observation_id", "data": task_view(t)});
     }
-    if t.touch_epoch != epoch {
-        t.state = "paused".into();
-        t.wait_reason = Some("taken_over".into());
-        return json!({"ok": false, "error": "taken_over"});
+    if let Some(err) = watch_gate(t, &watch) {
+        return json!({"ok": false, "error": err, "data": task_view(t)});
     }
     match &action {
         Action::Done { summary } => {
@@ -468,7 +556,7 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     match helper_rpc(&serial, helper::wrap_op(op, extra)).and_then(helper::unwrap_ok) {
         Ok(_) => {
             let mut g = inner.lock().expect("inner");
-            let epoch = g.touch_epoch;
+            let epoch = watch_state(&g, &serial).epoch;
             if let Some(t) = g.tasks.get_mut(id) {
                 t.step += 1;
                 t.last_action_summary = Some(format!("{op} ok"));
@@ -493,7 +581,17 @@ fn op_status(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
     let g = inner.lock().expect("inner");
     match g.tasks.get(id) {
-        Some(t) => json!({"ok": true, "data": task_view(t)}),
+        Some(t) => {
+            let mut view = task_view(t);
+            let watch = watch_state(&g, &t.serial);
+            if let Some(obj) = view.as_object_mut() {
+                obj.insert(
+                    "watch".into(),
+                    json!({"healthy": watch.healthy, "dead_reason": watch.dead_reason}),
+                );
+            }
+            json!({"ok": true, "data": view})
+        }
         None => json!({"ok": false, "error": format!("unknown task {id}")}),
     }
 }
@@ -515,6 +613,46 @@ fn op_cancel(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         }
         None => json!({"ok": false, "error": format!("unknown task {id}")}),
     }
+}
+
+/// Clear a pause caused by takeover or a lost touch watch. Fail closed: the
+/// device watch must be live again, and the pre-pause observation is dropped so
+/// the next `act` cannot bind to a stale frame.
+fn op_resume(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
+    let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    let serial = {
+        let g = inner.lock().expect("inner");
+        match g.tasks.get(id) {
+            Some(t) if t.state == "paused" => t.serial.clone(),
+            Some(t) => {
+                return json!({
+                    "ok": false,
+                    "error": format!("task is {}", t.state),
+                    "data": task_view(t),
+                })
+            }
+            None => return json!({"ok": false, "error": format!("unknown task {id}")}),
+        }
+    };
+    if let Err(e) = ensure_watch(&serial, inner) {
+        return json!({"ok": false, "error": format!("watch_unavailable: {e}")});
+    }
+    let mut g = inner.lock().expect("inner");
+    let epoch = watch_state(&g, &serial).epoch;
+    let t = match g.tasks.get_mut(id) {
+        Some(t) => t,
+        None => return json!({"ok": false, "error": format!("unknown task {id}")}),
+    };
+    t.state = "waiting_actor".into();
+    t.wait_reason = Some("agent_decision".into());
+    t.touch_epoch = epoch;
+    // Resume never continues a stored action or a pre-pause frame.
+    t.observation_id = None;
+    t.pending_action = None;
+    t.pending_effect = None;
+    t.error = None;
+    t.last_action_summary = Some("resumed; re-observe with the next decide".into());
+    json!({"ok": true, "data": task_view(t)})
 }
 
 fn op_approve(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
@@ -573,7 +711,7 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
         match helper_call(&serial, gen, &action) {
             Ok(op) => {
                 let mut g = inner.lock().expect("inner");
-                let epoch = g.touch_epoch;
+                let epoch = watch_state(&g, &serial).epoch;
                 if let Some(t) = g.tasks.get_mut(&task_id) {
                     t.step += 1;
                     t.last_action_summary = Some(format!("{op} ok (approved on Mac)"));
@@ -636,42 +774,194 @@ fn helper_call(serial: &str, gen: i64, action: &Action) -> Result<&'static str> 
     Ok(op)
 }
 
-fn start_getevent(serial: String, inner: &Arc<Mutex<Inner>>) {
-    let watch = inner.clone();
-    thread::spawn(move || {
-        let adb = match std::env::var("LAU_ADB_BIN") {
-            Ok(p) if !p.is_empty() => p,
-            _ => "adb".into(),
+/// Start (or restart) the per-device `getevent` watch and wait until it is
+/// actually attached. Fail closed: while the watch is not live, no agent task is
+/// accepted for that device (plan §6 — never claim coexistence without it).
+fn ensure_watch(serial: &str, inner: &Arc<Mutex<Inner>>) -> std::result::Result<(), String> {
+    {
+        let g = inner.lock().map_err(|_| "daemon state poisoned".to_string())?;
+        if let Some(w) = g.watches.get(serial) {
+            if w.healthy {
+                return Ok(());
+            }
+        }
+    }
+    {
+        let mut g = inner.lock().map_err(|_| "daemon state poisoned".to_string())?;
+        // Keep the previous epoch across a restart: other tasks on this device
+        // must not read a reset counter as a takeover.
+        let epoch = g.watches.get(serial).map(|w| w.epoch).unwrap_or(0);
+        g.watches
+            .insert(serial.to_string(), TouchWatch::starting(epoch));
+    }
+    spawn_getevent(serial.to_string(), Arc::clone(inner));
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(50));
+        let g = match inner.lock() {
+            Ok(g) => g,
+            Err(_) => return Err("daemon state poisoned".into()),
         };
-        let mut child = match Command::new(adb)
+        match g.watches.get(serial) {
+            Some(w) if w.healthy => return Ok(()),
+            Some(w) if w.dead_reason.is_some() => {
+                return Err(w.dead_reason.clone().unwrap_or_else(|| "watch died".into()))
+            }
+            _ => {}
+        }
+    }
+    Err("getevent watch did not attach within 2s".into())
+}
+
+/// Watch the device's hardware touch stream. AnythingUse injects through the
+/// helper's AccessibilityService, which never emits `getevent` frames, so a
+/// frame on this stream is the user.
+fn spawn_getevent(serial: String, inner: Arc<Mutex<Inner>>) {
+    thread::spawn(move || {
+        let child = Command::new(crate::adb_path())
             .args(["-s", &serial, "shell", "getevent", "-lt"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-        {
+            .spawn();
+        let mut child = match child {
             Ok(c) => c,
-            Err(_) => {
-                if let Ok(mut g) = watch.lock() {
-                    g.getevent_ok = false;
+            Err(e) => {
+                if let Ok(mut g) = inner.lock() {
+                    if let Some(w) = g.watches.get_mut(&serial) {
+                        w.healthy = false;
+                        w.dead_reason = Some(format!("getevent spawn failed: {e}"));
+                    }
                 }
                 return;
             }
         };
-        if let Ok(mut g) = watch.lock() {
-            g.getevent_ok = true;
+        if let Ok(mut g) = inner.lock() {
+            if let Some(w) = g.watches.get_mut(&serial) {
+                w.healthy = true;
+                w.dead_reason = None;
+            }
         }
         if let Some(out) = child.stdout.take() {
             let reader = BufReader::new(out);
             for line in reader.lines().map_while(Result::ok) {
                 if line.contains("BTN_TOUCH") || line.contains("ABS_MT_TRACKING_ID") {
-                    if let Ok(mut g) = watch.lock() {
-                        g.touch_epoch = g.touch_epoch.saturating_add(1);
+                    if let Ok(mut g) = inner.lock() {
+                        if let Some(w) = g.watches.get_mut(&serial) {
+                            w.epoch = w.epoch.saturating_add(1);
+                        }
                     }
                 }
             }
         }
-        if let Ok(mut g) = watch.lock() {
-            g.getevent_ok = false;
+        let _ = child.wait();
+        // The stream is gone: everything on this device must stop until resume.
+        if let Ok(mut g) = inner.lock() {
+            if let Some(w) = g.watches.get_mut(&serial) {
+                w.healthy = false;
+                w.dead_reason = Some("getevent stream ended".into());
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(touch_epoch: u64) -> Task {
+        Task {
+            id: "task_test".into(),
+            goal: "open dark mode".into(),
+            app: "com.android.settings".into(),
+            serial: "SERIAL".into(),
+            actor: "agent".into(),
+            state: "waiting_actor".into(),
+            wait_reason: Some("agent_decision".into()),
+            step: 0,
+            observation_id: Some("obs_1".into()),
+            helper_generation: 1,
+            elements: json!([]),
+            image_path: None,
+            last_action_summary: None,
+            summary: None,
+            error: None,
+            touch_epoch,
+            pending_action: None,
+            pending_effect: None,
+        }
+    }
+
+    fn watch(epoch: u64, healthy: bool, dead_reason: Option<&str>) -> WatchState {
+        WatchState {
+            epoch,
+            healthy,
+            dead_reason: dead_reason.map(str::to_string),
+        }
+    }
+
+    fn empty_inner() -> Inner {
+        Inner {
+            tasks: HashMap::new(),
+            last_activity: Instant::now(),
+            watches: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn missing_watch_pauses_instead_of_acting() {
+        let mut t = task(3);
+        let err = watch_gate(&mut t, &watch(3, false, Some("getevent stream ended")));
+        assert_eq!(err, Some("watch_unavailable"));
+        assert_eq!(t.state, "paused");
+        assert_eq!(t.wait_reason.as_deref(), Some("watch_unavailable"));
+        assert_eq!(t.error.as_deref(), Some("getevent stream ended"));
+    }
+
+    #[test]
+    fn real_touch_since_the_baseline_pauses_as_taken_over() {
+        let mut t = task(3);
+        let err = watch_gate(&mut t, &watch(4, true, None));
+        assert_eq!(err, Some("taken_over"));
+        assert_eq!(t.state, "paused");
+        assert_eq!(t.wait_reason.as_deref(), Some("taken_over"));
+    }
+
+    #[test]
+    fn live_watch_at_the_same_epoch_lets_the_step_through() {
+        let mut t = task(7);
+        assert_eq!(watch_gate(&mut t, &watch(7, true, None)), None);
+        assert_eq!(t.state, "waiting_actor");
+        assert!(t.error.is_none());
+    }
+
+    #[test]
+    fn unknown_device_serial_is_never_healthy() {
+        let state = watch_state(&empty_inner(), "SERIAL");
+        assert!(!state.healthy);
+        assert!(state.reason().contains("no touch watch"));
+    }
+
+    #[test]
+    fn watch_health_is_tracked_per_serial_not_globally() {
+        let mut inner = empty_inner();
+        inner.watches.insert(
+            "A".into(),
+            TouchWatch {
+                epoch: 5,
+                healthy: true,
+                dead_reason: None,
+            },
+        );
+        inner.watches.insert(
+            "B".into(),
+            TouchWatch {
+                epoch: 0,
+                healthy: false,
+                dead_reason: Some("getevent stream ended".into()),
+            },
+        );
+        assert!(watch_state(&inner, "A").healthy);
+        assert_eq!(watch_state(&inner, "A").epoch, 5);
+        // A's live watch must not make B usable.
+        assert!(!watch_state(&inner, "B").healthy);
+    }
 }

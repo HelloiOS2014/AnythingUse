@@ -136,8 +136,11 @@ current gaps before relying on it.
 
 Two limitations to keep in mind today: a high-risk effect stops at a **Mac**
 dialog (`lau approve <task-id>` only reopens it — there is no human-takeover
-path yet), and a task paused by real device touch (`taken_over`) can only be
-cancelled, because `lau resume` does not exist yet.
+path yet), and the device touch watch is mandatory: if `getevent` is not live,
+`lau run` refuses to start a task and a running task is paused until
+`lau resume <task-id>` rebuilds the watch. `lau decide --wait` polls through such
+a pause (timeout `LAU_DECIDE_WAIT_SECS`, default 600s) so an agent can wait for
+the human instead of failing.
 
 ## Privacy defaults
 
