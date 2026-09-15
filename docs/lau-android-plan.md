@@ -1,14 +1,48 @@
 # LAU — Android 端完整方案规划（v2）
 
-> **状态：待批准（Draft v2）**。v1 经双模型并行审查（自审 + GPT-5.6 Sol，结论 BLOCK）后返工；Phase 2 起任何实现以本文为准，修改需先改文档。
+> **状态：已按本文推进中**（v2 之后未再改版）。v1 经双模型并行审查（自审 + GPT-5.6 Sol，结论 BLOCK）后返工；Phase 2 起任何实现以本文为准，修改需先改文档。**当前实现进度与差距见 §0。**
 > 产品名 **AnythingUse**；`lcu` = Local Computer Use（只管本地电脑）；`lau` = **Local Android Use**（Android 端独立 CLI）。
+
+## 0. 实现现状与差距（截至 2026-09-15，源码级核对）
+
+本节只记录**代码里已经存在什么**，不构成真机验收结论（Phase 1 的真机验收见 §8）。
+
+**已实现（源码级）**
+
+- CLI：`doctor` / `screenshot` / `dump` / `invoke` / `set-value` / `scroll` / `foreground` / `launch`，daemon 侧 `run` / `decide` / `act` / `status` / `result` / `cancel` / `approve`；全局 `--serial`（env `LAU_SERIAL`）。退出码 `0` / `2`(waiting_user) / `3` / `64` / `69` / `70`。
+- daemon：按需拉起、空闲 60s 退出（`LAU_IDLE_EXIT_SECS`）、socket `~/.local/share/AnythingUse/lau/lau.sock`、**任务状态仅存内存**（daemon 重启即失）。
+- helper：Kotlin AccessibilityService，`localabstract:dev.anythinguse.lau.helper`（ADB 只做 `forward`），op = `ping` / `dump` / `foreground` / `invoke` / `set_value` / `scroll` / `launch`；每次 dump 递增代次并在动作时校验 → `stale_observation`；`set_value` 执行后重读比对；拒绝对自身包名自动化；灭屏/锁屏 → `screen_off` / `device_locked`；节点上限 400。
+- 接管检测：`run` 时启动 `adb shell getevent -lt`，捕获 `BTN_TOUCH` / `ABS_MT_TRACKING_ID` 递增触摸纪元；`decide` / `act` 前比对，不一致 → `paused` + `wait_reason=taken_over`。
+- 后果门：`act` 的 `effect` 属 `Destructive` / `ExternalCommunication` / `ExternalSubmit` / `PermissionChange` / `Financial` / `Credential` / `Unknown` 时停为 `wait_reason=consequence`，弹 **Mac** osascript 对话框（默认 Deny），CLI 返回 `waiting_user`（exit 2）；`lau approve <task-id>` 只重新打开该对话框。
+- 语义优先：坐标动作（`Targeted`）在 `act` 一律被拒（`semantic_action_required`）；`Navigate` 声明为 Chrome-only。
+
+**未实现 / 与计划的差距（按严重度）**
+
+| # | 差距 | 位置 | 影响 |
+|---|---|---|---|
+| 1 | `getevent_ok` **只写不读**：getevent 起不来或中途断流时没有任何后果 | `daemon.rs` | 与 §6「断流 fail-closed、不宣称共存」相反，当前是 **fail-open** |
+| 2 | 触摸纪元是**全局**的（`Inner.touch_epoch`），非 per-serial / per-task | `daemon.rs` | 多设备时 A 机触摸会暂停 B 机任务；Phase 3 验收第 8 条不成立 |
+| 3 | 无 `resume` / `pause` / `watch`；`taken_over` 的任务只能 `cancel` | `main.rs` | 接管后无法恢复 |
+| 4 | `decide --wait` 参数被解析后丢弃 | `main.rs` | Agent 侧只能自行轮询 |
+| 5 | 无 app_access 门（首次控制某包没有 allow_once / always_allow / deny） | `daemon.rs` | 审批模型少一层 |
+| 6 | 无 Android 证据层 guard（§7）：role 规范化 / `isPassword` / 包签名身份 / 敏感页 / 截图可用性 / 树完整性 | `daemon.rs` | 风险只按 Actor 声明的 `EffectKind` 分流，没有独立证据下限 |
+| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | 与 §5.4 / D6 的高危定义不符 |
+| 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
+| 9 | 无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误 | `daemon.rs` | 计划要求的「不确定不重放」语义缺失 |
+| 10 | 无 per-serial 队列 / forward 隔离 | `daemon.rs` | 双设备场景不成立 |
+| 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
+| 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
+| 13 | 分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill | `scripts/` | 未产品化 |
+| 14 | `lau-cli` / `android-helper` **零测试** | 全仓 | 无回归保护 |
+
+**口径澄清（2026-09-15，已由项目所有者确认）**：审批**只在 Mac**、**禁止任何手机弹窗**（手机弹窗会误触发 getevent 接管，操作者也不在看手机）。§5.4 与 D6 从始至终如此规定；Phase 3 验收第 5 条原先误写为「设备对话框」，已统一为 Mac 对话框。实现 app_access 门时必须遵守这一点。
 
 ## 1. 目标与非目标
 
 **目标**
 - Agent 通过 `lau` 操作**真实 Android 手机**：观察（截图 + 节点树 + 屏幕状态）、语义执行、任务闭环（run/decide/act/result）。
 - 与 mac 端同一设计哲学：语义优先、目标严格、诚实完成、本地优先、人机共存。
-- 复用 `lcu-core` 的**类型与机制**（Action/EffectKind/授权机制），不复用其 mac 特化逻辑（见 §7）。
+- 复用共享**类型与机制**（Action/EffectKind；授权 grant 机制待复用），不复用 mac 特化逻辑——这些类型现已抽到平台中立的 `anything-core`（见 §7 与 §0 #8）。
 
 **非目标**
 - ❌ Android 走 `lcu`（无 `lcu --app android`、无 `lcu-android`）
@@ -39,11 +73,11 @@
 | 通道 | 私有 unix socket | 设备 `localabstract:dev.anythinguse.lau.helper` + `adb forward`（仅 127.0.0.1） |
 | 观察 | 窗口截图 + AX 树 + Input Monitoring | `adb screencap` + Accessibility dump + `getevent` 硬件触摸纪元 |
 | 语义执行 | AXPress/AXSelect/AXSetValue | `performAction`：CLICK / SET_TEXT / SCROLL / FOCUS |
-| 坐标兜底 | DirectedInput（需前台） | helper `dispatchGesture`（`canPerformGestures`，API 24+；**不经 ADB**） |
-| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分） |
+| 坐标兜底 | DirectedInput（需前台） | helper `dispatchGesture`（`canPerformGestures`，API 24+；**不经 ADB**）—— **尚未实现**；当前 `lau act` 直接拒绝坐标动作 |
+| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分）—— 已实现，但**断流不 fail-closed**、纪元是全局的（§0 #1/#2） |
 | 审批 | lcu-desktop 菜单栏 GUI | **Mac 对话框**（osascript，人在电脑前点；**不在手机弹**） |
 
-**关键映射**（复用 `lcu-core` 类型的依据）：
+**关键映射**（复用 `anything-core` 类型的依据）：
 
 | `lcu` semantic | AccessibilityNodeInfo | 备注 |
 |---|---|---|
@@ -86,7 +120,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - 人在 **Mac** 前操作，审批也在 Mac。**禁止手机弹窗**（会误触发 getevent 接管，操作者也不在看手机）。
 - consequence 门 → daemon 弹出 **osascript 对话框**（Allow / Deny，默认 Deny）。CLI `lau act` 立即返回 `waiting_user` / exit 2，Agent 停下；人点 Mac 对话框。`lau approve <task-id>` 只负责再次打开该对话框，不能代点 Allow。
 - Allow：执行**这一次**已停住的动作（grant 消费），然后重观察、交回 Actor。Deny：任务 failed。
-- R4（不可逆高危）→ **人工接管**，不是普通审批。
+- R4（不可逆高危）→ **人工接管**，不是普通审批。**当前实现差距**：R4 与 R3 同走 consequence 对话框，人工接管未实现（§0 #7）。
 
 ### 5.5 构建与分发
 - Gradle + Kotlin，`minSdk 24`（dispatchGesture/SCROLL_* 均满足）。`scripts/install-android-helper.sh`（`adb install -r`；含 HyperOS「USB 安装」失败指引）。
@@ -96,22 +130,22 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 
 - **生命周期**：首个 `lau run` 拉起；`LAU_IDLE_EXIT_SECS`（默认 60）无活动退出。不写 launchd。不用时进程不存在，零消耗；任务期间一个小 Rust 进程（socket + 单任务队列 + getevent 读进程，内存几 MB，空闲 0 CPU）。
 - **职责**（跨 CLI 进程持有）：任务状态与队列（**每 serial 一条串行队列**）、app_access/consequence 门、观察代次、forward 会话管理、`getevent -lt` 触摸纪元（getepoch）。
-- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。
+- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现差距**：断流未 fail-closed，纪元为全局而非 per-serial（§0 #1/#2）。
 - CLI 前缀进程（`lau run/decide/act/result/status/resume/cancel`）都是 daemon 的薄客户端；`doctor`/`screenshot`/`dump` 等无状态命令 Phase 2 起即单进程直连。
 
 ## 7. 与 mac 端共用/不复用
 
-**复用**：`Action`/`SemanticAction`/`TargetedInput` 类型、`EffectKind`/`EffectClaim`、授权 grant 机制、`semantic_action_required` 语义、exit code 约定（0/2/3/64/69/70）。
+**复用**：`Action`/`SemanticAction`/`TargetedInput` 类型、`EffectKind`/`EffectClaim`、`semantic_action_required` 语义、exit code 约定（0/2/3/64/69/70）。这些类型现已抽到**平台中立**的 `crates/anything-core`（`lcu-core` 退化为 macOS 层：再导出 + `StaticEffectGuard`），**`lau-cli` 直接依赖 `anything-core`，不依赖 `lcu-core`**。授权 grant 机制尚未复用（§0 #8）。
 **不复用、需 Android 化**：`effect_guard` **本体**（内含 mac 硬编码：AXConfirm、桌面 role 大小写、坐标点击 R0 地板）→ 新建 Android 证据层：Android role 规范化、`isPassword`/editable、包/签名身份、全页敏感标签、截图可用性、树完整性；坐标动作在不可达/安全/敏感面上禁止或抬高地板。
 **不复用**：`lcu-runtime`（SQLite 持久化）、`lcu-platform-macos`、`apps/lcu-desktop`、`lcu` CLI。
 
 ## 8. 分期计划
 
-### Phase 1 — 观察骨架（✅ 完成 + 本轮修复）
+### Phase 1 — 观察骨架（✅ 完成 + 本轮修复；真机验收已过）
 - `lau doctor` / `lau screenshot`（真机验收过：Xiaomi 2211133C / Android 16）。
 - **本轮修复（审查 #13）**：doctor 吞掉 serial 解析错误 → 多设备/无效 serial 现为 blocker（`target_unresolved`），显式 `--serial` 校验存在与授权状态。
 
-### Phase 2 — Helper APK（语义执行；无 Mac daemon）
+### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— 源码已交付，验收与 `dispatchGesture` 待补（§0）
 - 交付：`native/android-helper/` + 安装脚本 + `lau dump / invoke / set_value / scroll / foreground`（CLI 单进程直连；**观察代次状态由 helper 持有**——AccessibilityService 本身设备侧长活）。
 - **验收（确定性断言，非元素计数）**：
   1. doctor 四态 + 未启用时的引导 blocker
@@ -122,14 +156,14 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒
   7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）
 
-### Phase 3 — `lau` daemon + 任务闭环 + 安全模型
+### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / 后果门已有；安全模型主要缺口见 §0）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded`
   2. 中文搜索 + `global_back` 回退（两步）
   3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）
   4. getevent 断流 → fail closed（暂停并报告，不装共存）
-  5. app_access 首次 → 设备对话框；批准 → 重观察继续；helper 自动化触不到对话框
+  5. app_access 首次 → **Mac 对话框**（与 §5.4 / D6 一致；**不是**手机弹窗，避免误触发 getevent 接管）；批准 → 重观察继续；helper 自动化触不到对话框
   6. 破坏性效果声明 → `waiting_user`（CLI exit 2，Agent 停）；**把删除/支付标签谎报为 navigate → 仍要到达正确的门**（证据覆盖低报）
   7. 有语义能力时提交坐标 → `semantic_action_required`
   8. 双设备接入：per-serial 队列与 forward 各自独立
@@ -148,23 +182,25 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 | SET_TEXT 场景局限（WebView/自定义 View/IME 校验） | 能力探测 + 重 dump 验证 + 显式错误码；验收覆盖 CJK/emoji/Compose |
 | dump 时视图滞后（动画中） | 新鲜 dump + 代次 + `stale_observation` |
 | forward 失效 / 响应不确定 | 每会话重建 + `indeterminate` 强制重观察，绝不重放 |
-| 本机其他进程可触 forward 端口 | 包名 socket + peer credential 校验 + 可选 session token（如实声明威胁模型） |
+| 本机其他进程可触 forward 端口 | 包名 socket + peer credential 校验 + 可选 session token（如实声明威胁模型）；**peer 校验尚未实现（§0 #12）** |
+| getevent 断流时静默 fail-open | **未修**：当前断流不会暂停任务（§0 #1）。修好前不得对外宣称「与用户共存」 |
 | 灭屏/锁屏/FLAG_SECURE 假成功 | 观察带屏幕态 + 显式错误码；不自动唤醒 |
 | 多设备 | per-serial 队列/forward/权限；doctor 不再吞歧义 |
 
 ## 10. 决策点
 
-- **D1** `lau-cli` 依赖 `lcu-core` 类型（推荐：是；guard 本体不复用，另建 Android 证据层）
+- **D1** `lau-cli` 依赖共享契约类型（**已落地**：依赖平台中立的 `anything-core`，不依赖 `lcu-core`；guard 本体不复用，Android 证据层待建）
 - **D2** helper 包名 `dev.anythinguse.lau.helper`（socket 名同前缀）
 - **D3** ~~进程内单任务~~ → **按需 daemon + 空闲退出**（已并入 §6）
 - **D5** 坐标兜底 = helper `dispatchGesture`（不经 ADB，受 `semantic_action_required` 约束）（推荐：是；替代项：完全禁止坐标）
-- **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。禁止手机弹窗。
+- **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（Phase 3 末定）
 
 ## 11. 仓库布局（完成后）
 
 ```
-crates/lau-cli/                 # lau CLI + daemon（已有 CLI）
+crates/anything-core/           # 共享平台中立契约（lau 与 lcu 共用；已抽取）
+crates/lau-cli/                 # lau CLI + daemon
 native/android-helper/          # Gradle Kotlin APK
 scripts/install-android-helper.sh
 docs/lau-android-plan.md        # 本文档

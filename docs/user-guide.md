@@ -108,6 +108,37 @@ with `--effect '{"kind":"navigate","summary":"Open example.com"}'` through
 
 Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).
 
+## Android (`lau`) — source-level work in progress
+
+Android is a **separate** CLI (`lau`, never `lcu`) and is **not productized
+yet**: `./scripts/install-cli.sh` does not install it, `package-release.sh`
+does not package it, and there is no Android Skill. Run it from the checkout
+(`./target/release/lau`) and read the [LAU plan](lau-android-plan.md) §0 for the
+current gaps before relying on it.
+
+```bash
+# helper APK: build + install (then enable it on the phone:
+#   Settings → Accessibility → "AnythingUse LAU")
+./scripts/install-android-helper.sh
+./target/release/lau doctor --json
+
+# observation — ADB is transport only, never input injection
+./target/release/lau screenshot --json
+./target/release/lau dump --json
+
+# agent task loop through the on-demand lau daemon (separate from the macOS Runtime)
+./target/release/lau run "在设置中打开深色模式" --app com.android.settings --actor agent --json
+./target/release/lau decide <task-id> --json
+./target/release/lau act <task-id> --observation-id <obs> \
+  --action '{"kind":"semantic","type":"invoke","element_id":"e1"}' \
+  --effect '{"kind":"navigate","summary":"open the item"}'
+```
+
+Two limitations to keep in mind today: a high-risk effect stops at a **Mac**
+dialog (`lau approve <task-id>` only reopens it — there is no human-takeover
+path yet), and a task paused by real device touch (`taken_over`) can only be
+cancelled, because `lau resume` does not exist yet.
+
 ## Privacy defaults
 
 - Screenshots are not stored in SQLite and are not printed to stdout.

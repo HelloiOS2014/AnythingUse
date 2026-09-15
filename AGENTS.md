@@ -8,6 +8,10 @@ operating real macOS applications and Chrome through one command surface.
 - Use the **`local-computer-use`** skill (`skills/local-computer-use/SKILL.md`). (Codex ships its own Computer Use and does not need this skill.)
   It is the only supported way to operate the desktop — never touch the
   private sockets or invent new protocols.
+- **Android (`lau`) is not an Agent surface yet.** It is a separate CLI
+  (`crates/lau-cli`) whose safety model is still incomplete (no app-access gate,
+  no Android evidence layer, `getevent` touch-watch fails open). Do not drive it
+  from this skill; see `docs/lau-android-plan.md` §0.
 - The skill ships from this repo for each harness:
   - **Pi:** `pi install git:github.com/HelloiOS2014/AnythingUse` (or `./scripts/install-pi.sh`).
     Global user settings must **not** point at this checkout. The git clone lives

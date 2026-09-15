@@ -117,3 +117,17 @@ Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered
 - App access already disclosed this capability fallback. After activation
   Runtime takes a fresh observation and asks the same Actor to propose again.
   It never restores the previous app or emits global HID.
+
+## Android (`lau`)
+
+`lau` is a **separate, not-yet-productized** CLI (never `lcu`); `docs/lau-android-plan.md` §0 lists every current gap. Common failures:
+
+- **`adb` not found** — set `LAU_ADB_BIN`, or install Android platform-tools.
+- **`target_unresolved`** — more than one authorized device (pass `--serial` / `LAU_SERIAL`), or the given serial matches no connected device.
+- **`device_unavailable`** — the device is `unauthorized` / `offline`: accept the USB-debugging prompt on the phone, or check the cable.
+- **helper blockers** — `lau doctor --json` reports `installed` / `enabled` / `bound` / `ping`. Not installed → `./scripts/install-android-helper.sh`. Not enabled → Settings → Accessibility → “AnythingUse LAU”. HyperOS also needs autostart + unrestricted battery, otherwise the service is not revived after a kill.
+- **HyperOS install failure** (`INSTALL_FAILED_USER_RESTRICTED`) — enable “Install via USB” (needs a Xiaomi account) and retry.
+- **helper socket not responding** — toggle the accessibility service off/on. The CLI re-creates `adb forward` on every RPC, so a stale forward is not the usual cause.
+- **task parked in `waiting_actor` with `wait_reason=consequence`** — a Mac dialog is open, or `lau approve <task-id>` reopens it. The CLI cannot approve.
+- **task `paused` with `wait_reason=taken_over`** — real touch on the device paused it. There is **no `lau resume` yet**; only `lau cancel`.
+- **known gap** — if `getevent` dies, tasks are **not** paused today (fail-open). Do not treat that as verified coexistence.

@@ -4,7 +4,7 @@
 
 **中文版：[README.zh-CN.md](README.zh-CN.md)**
 
-AnythingUse is a local-first control layer for humans and Agents. **Today:** real macOS applications and the user's installed Chrome. **Future:** Windows and other endpoint types through the same command-oriented model.
+AnythingUse is a local-first control layer for humans and Agents. **Today:** real macOS applications and the user's installed Chrome. **In progress:** Android through the separate `lau` CLI. **Future:** Windows and other endpoint types through the same command-oriented model.
 
 **Naming:** product name is **AnythingUse**. The computer CLI is `lcu` (**Local Computer Use**); crates, sockets, and the CLI keep the historical **LCU** codename. **Android is not `lcu`**: its endpoint CLI is `lau` (**Local Android Use**), reserved for that surface. The data root is `~/Library/Application Support/AnythingUse`.
 
@@ -24,7 +24,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Window capture and AX/targeted actions on a strict PID + window target; background first, disclosed exact-target foreground fallback in `auto`, explicit failure in `background_only` |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
-| Android (`lau`) | Phase 1 scaffold — `lau doctor` (ADB presence, device, authorization) and `lau screenshot` (`adb exec-out screencap`); semantic control via a helper APK comes later |
+| Android (`lau`) | Source-level WIP on a **separate** CLI (`lau`, never `lcu`): ADB observation, an on-device AccessibilityService helper for semantic `dump`/`invoke`/`set_value`/`scroll`, and an on-demand daemon for `run`/`decide`/`act`. ADB stays transport-only. Not productized (no installer, no Android Skill) and the safety model is still incomplete — see the [LAU plan](docs/lau-android-plan.md) |
 | Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
 | Safety | Shared closed-set effect, independent Runtime risk floor, separate app-access and consequence gates, takeover detection |
@@ -141,8 +141,8 @@ One serial FIFO queue per macOS login user; `waiting_actor` and paused tasks rel
 ## Roadmap
 
 - **Now (v3.2, on `main`):** macOS window control, real Chrome control, pluggable decision maker, CLI, Agent Skill. See [Delivery status](docs/status.md).
-- **Next:** signed macOS packaging and Windows compatibility.
-- **Later:** additional computers, mobile devices, remote hosts, or other controllable endpoints with a strict target and safe action model.
+- **Next:** signed macOS packaging, Windows compatibility, and finishing the Android endpoint (`lau`: app-access gate, Android evidence layer, packaging). See the [LAU plan](docs/lau-android-plan.md).
+- **Later:** remote hosts and other controllable endpoints with a strict target and safe action model.
 
 MCP, Playwright, public TCP, and long Top100/soak gates are **not** current product surfaces or freeze blockers.
 
@@ -152,8 +152,10 @@ MCP, Playwright, public TCP, and long Top100/soak gates are **not** current prod
 apps/lcu-desktop/             Runtime host and approval UI
 package.json                  Pi package manifest (ships the Skill)
 .pi/settings.json             Project-local Pi package autoload
+crates/anything-core/         Platform-neutral contracts (actions, risk, task state, protocol)
+crates/lcu-core/              macOS layer: re-exports anything-core + the macOS evidence guard
 crates/lcu-cli/               Public command surface
-crates/lcu-core/              Shared contracts (actions, risk, task state, protocol)
+crates/lau-cli/               Android endpoint CLI + on-demand daemon (not productized)
 crates/lcu-platform/          PlatformBackend trait + null backend
 crates/lcu-runtime/           Queue, state, policy, and execution loop
 crates/lcu-model/             Decision actors (VLM subprocess / AgentActor) + validation
@@ -161,11 +163,12 @@ crates/lcu-platform-macos/    Rust adapter for macOS control
 crates/lcu-chrome/            Chrome backend adapter
 native/macos-window-service/  Swift window-targeted service
 native/chrome-control/        Extension and Native Messaging host
+native/android-helper/        Kotlin AccessibilityService helper APK (`lau`)
 skills/local-computer-use/    Agent-facing Skill (directory name historical)
 scripts/                      Model download and helper scripts
 ```
 
 ## Documentation
 
-- [Execution contract](docs/execution-contract.md) · [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
+- [Execution contract](docs/execution-contract.md) · [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [LAU Android plan](docs/lau-android-plan.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS window service](native/macos-window-service/README.md) · [Chrome control](native/chrome-control/README.md)

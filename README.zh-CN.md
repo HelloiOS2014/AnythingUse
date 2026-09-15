@@ -2,7 +2,7 @@
 
 > 一个本地控制平面，供 Agent 操作任何东西。
 
-AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** 真实的 macOS 应用和用户已安装的 Chrome。**未来：** Windows 及其他端点类型，通过同一套命令模型扩展。
+AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** 真实的 macOS 应用和用户已安装的 Chrome。**进行中：** Android，走独立的 `lau` CLI。**未来：** Windows 及其他端点类型，通过同一套命令模型扩展。
 
 **命名说明：** 产品名是 **AnythingUse**。电脑的公开 CLI 是 `lcu`（**Local Computer Use**）；crate 与 socket 沿用历史代号 **LCU**。**Android 不用 `lcu`：** 它的端点 CLI 是 `lau`（**Local Android Use**），为这个面预留。数据根目录为 `~/Library/Application Support/AnythingUse`。
 
@@ -22,7 +22,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 |---|---|
 | macOS 应用 | 对严格 PID + 窗口目标截图并执行 AX/定向动作；后台优先；按任务选择或需要时申请前台授权；否则明确失败 |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
-| Android（`lau`） | Phase 1 骨架：`lau doctor`（ADB、设备、授权）与 `lau screenshot`（`adb exec-out screencap`）；语义控制走 helper APK，后续阶段 |
+| Android（`lau`） | 源码级进行中，走**独立** CLI（`lau`，绝不并入 `lcu`）：ADB 观察 + 设备端 AccessibilityService helper 提供语义 `dump`/`invoke`/`set_value`/`scroll`，并有按需 `lau` daemon 支撑 `run`/`decide`/`act`。ADB 只做传输。尚未产品化（无安装脚本、无 Android Skill），安全模型仍不完整 —— 见 [LAU 规划](docs/lau-android-plan.md) |
 | 决策器 | `LCU_VISION_ACTOR` 未设置或为 `auto` 时默认由外部 Agent 决策；本地 Qwen3-VL 可按任务显式选择（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
 | 安全 | 双 Actor 共用闭集效果、Runtime 独立风险下限、应用/前台/后果三类独立门槛、接管检测 |
@@ -127,8 +127,8 @@ AnythingUse 不会激活其他窗口，也不会在完成后自动切回。
 ## 路线图
 
 - **现在（v3.2，`main` 分支）：** macOS 窗口控制、真实 Chrome 控制、可插拔决策器、CLI、Agent Skill。见[交付状态](docs/status.md)。
-- **下一步：** 签名 macOS 打包与 Windows 兼容。
-- **更远：** 其他计算机、移动设备、远程主机或任何能提供严格目标与安全动作模型的可控端点。
+- **下一步：** 签名 macOS 打包、Windows 兼容，以及收尾 Android 端点（`lau`：app access 门、Android 证据层、打包）。见 [LAU 规划](docs/lau-android-plan.md)。
+- **更远：** 远程主机或任何能提供严格目标与安全动作模型的可控端点。
 
 MCP、Playwright、公共 TCP 与长周期 Top100/soak 门槛**不是**当前产品表面或冻结阻塞项。
 
@@ -138,8 +138,10 @@ MCP、Playwright、公共 TCP 与长周期 Top100/soak 门槛**不是**当前产
 apps/lcu-desktop/             Runtime 宿主与审批 UI
 package.json                  Pi 包清单（发布 Skill）
 .pi/settings.json             项目级 Pi 包自动加载
+crates/anything-core/         平台中立契约（动作、风险、任务状态、协议）
+crates/lcu-core/              macOS 层：再导出 anything-core + macOS 证据守卫
 crates/lcu-cli/               公开命令面
-crates/lcu-core/              共享契约（动作、风险、任务状态、协议）
+crates/lau-cli/               Android 端点 CLI + 按需 daemon（尚未产品化）
 crates/lcu-platform/          PlatformBackend trait + 空后端
 crates/lcu-runtime/           队列、状态、策略与执行循环
 crates/lcu-model/             决策 actor（VLM 子进程 / AgentActor）+ 校验
@@ -147,11 +149,12 @@ crates/lcu-platform-macos/    macOS 控制的 Rust 适配器
 crates/lcu-chrome/            Chrome 后端适配器
 native/macos-window-service/  Swift 窗口定向服务
 native/chrome-control/        扩展与 Native Messaging 宿主
+native/android-helper/        Kotlin AccessibilityService helper APK（lau）
 skills/local-computer-use/    Agent 技能（目录名沿用历史）
 scripts/                      模型下载与辅助脚本
 ```
 
 ## 文档
 
-- [交付状态](docs/status.md) · [架构](docs/architecture.md) · [Computer Use 参考笔记](docs/computer-use-reference.md) · [用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md)
+- [交付状态](docs/status.md) · [架构](docs/architecture.md) · [Computer Use 参考笔记](docs/computer-use-reference.md) · [用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) · [LAU Android 规划](docs/lau-android-plan.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md)
 - [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS 窗口服务](native/macos-window-service/README.md) · [Chrome 控制](native/chrome-control/README.md)

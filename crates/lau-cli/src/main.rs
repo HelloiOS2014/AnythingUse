@@ -1,8 +1,10 @@
 //! `lau` — AnythingUse / Local Android Use.
 //!
-//! Phase 1 scaffold: device connectivity (`doctor`) and observation
-//! (`screenshot`) over ADB. Phase 2: semantic dump/invoke/set_value/scroll
-//! via the on-device AccessibilityService helper. ADB is transport only.
+//! Device connectivity (`doctor`) and observation (`screenshot`) over ADB;
+//! semantic `dump`/`invoke`/`set_value`/`scroll` through the on-device
+//! AccessibilityService helper; agent task loop (`run`/`decide`/`act`) through
+//! the on-demand daemon. ADB is transport/observation only — never input
+//! injection. Status and known gaps: `docs/lau-android-plan.md` §0.
 
 mod daemon;
 mod helper;
