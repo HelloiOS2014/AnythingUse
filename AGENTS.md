@@ -9,12 +9,12 @@ operating real macOS applications and Chrome through one command surface.
   It is the only supported way to operate the desktop — never touch the
   private sockets or invent new protocols.
 - The skill ships from this repo for each harness:
-  - **Pi:** `./scripts/install-pi.sh` (or `pi install /absolute/path/to/AnythingUse`).
-    GitHub: `pi install git:github.com/HelloiOS2014/AnythingUse`. This checkout
-    also autoloads the skill via `.pi/settings.json` after the project is trusted.
-    Use an absolute path for global `pi install`; relative sources resolve against
-    `~/.pi/agent/settings.json`, not the repo. `./scripts/install-pi.sh` also runs
-    `./scripts/install-cli.sh` so `lcu` and `lcu-desktop` land in `~/.local/bin`.
+  - **Pi:** `pi install git:github.com/HelloiOS2014/AnythingUse` (or `./scripts/install-pi.sh`).
+    Global user settings must **not** point at this checkout. The git clone lives
+    under `~/.pi/agent/git/`. This checkout autoloads the skill only as a **project**
+    package via `.pi/settings.json` after the project is trusted.
+    `./scripts/install-pi.sh` also runs `./scripts/install-cli.sh` so `lcu` and
+    `lcu-desktop` land in `~/.local/bin`.
   - **Claude Code:** `claude plugin marketplace add HelloiOS2014/AnythingUse` +
     `claude plugin install anythinguse`. Update with `claude plugin update anythinguse`.
   - **Grok Build:** `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust`.
