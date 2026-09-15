@@ -137,6 +137,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "anything-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1258,14 +1271,8 @@ dependencies = [
 name = "lcu-core"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "hex",
+ "anything-core",
  "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "uuid",
 ]
 
 [[package]]

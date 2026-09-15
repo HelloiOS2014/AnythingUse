@@ -1,0 +1,18 @@
+[package]
+name = "anything-core"
+description = "AnythingUse shared core: platform-neutral action/effect/task contracts for every endpoint (lcu, lau, future)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

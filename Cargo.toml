@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/anything-core",
     "crates/lcu-core",
     "crates/lcu-platform",
     "crates/lcu-platform-macos",
@@ -11,6 +12,7 @@ members = [
     "apps/lcu-desktop",
 ]
 default-members = [
+    "crates/anything-core",
     "crates/lcu-core",
     "crates/lcu-platform",
     "crates/lcu-platform-macos",
@@ -30,6 +32,7 @@ repository = "local"
 rust-version = "1.85"
 
 [workspace.dependencies]
+anything-core = { path = "crates/anything-core" }
 lcu-core = { path = "crates/lcu-core" }
 lcu-platform = { path = "crates/lcu-platform" }
 lcu-platform-macos = { path = "crates/lcu-platform-macos" }

@@ -1,48 +1,20 @@
-//! Independent side-effect re-evaluation (realignment §3.3).
+//! macOS evidence layer for the shared `EffectGuard`.
 //!
-//! Actor effect declarations are structured safety classifications, never
-//! authorization and never trusted as final risk. This guard computes the
-//! Runtime risk floor from the fresh observation and the action; the actor
-//! declaration can only raise it. Coordinates, elements, mouse and keyboard
-//! are action expression, not risk: a screenshot-only click classified
-//! `navigate` by a trusted decision actor runs without per-action approval,
-//! because Runtime has no evidence contradicting the closed-set classification.
-//! Evidence in the observation (send/delete/pay labels, credential text,
-//! sensitive URL parameters) always floors the risk.
+//! Scaffolding (context, judgement, trait, closed-set policy table) lives in
+//! `anything-core::effect_guard`. This module keeps the **macOS evidence
+//! implementation**: `StaticEffectGuard` classifies actions against AX
+//! observation evidence (`AXConfirm` action strings, AX role casing). Other
+//! endpoints (`lau` on Android) must not reuse this implementation; they
+//! define their own evidence layer over `anything_core::effect_policy`
+//! (see `docs/lau-android-plan.md` §7).
 
-use serde::{Deserialize, Serialize};
+pub use anything_core::effect_guard::{
+    effect_policy, is_executable, EffectContext, EffectGuard, EffectJudgement,
+};
 
-use crate::action::{Action, EffectClaim, EffectKind, SemanticAction, TargetedInput};
-use crate::observation::AppObservation;
-use crate::risk::RiskLevel;
-
-/// Inputs considered when re-scoring risk before execution.
-#[derive(Debug, Clone)]
-pub struct EffectContext<'a> {
-    pub observation: &'a AppObservation,
-    pub action: &'a Action,
-    /// Actor-declared closed-set consequence. `None` for control actions is
-    /// fine; `None` for executable actions fails closed as unknown.
-    pub effect: Option<&'a EffectClaim>,
-    pub task_authorized_max_risk: RiskLevel,
-}
-
-/// Result of independent re-evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectJudgement {
-    pub risk: RiskLevel,
-    pub rationale: String,
-    /// True when the actor claim was ignored or contradicted.
-    pub model_claim_overridden: bool,
-    /// Actor declared `unknown` (or executable action had no effect): stop and
-    /// ask the user; never auto-execute and never map to a hidden default.
-    pub unknown: bool,
-}
-
-/// Trait implemented by Runtime policy.
-pub trait EffectGuard: Send + Sync {
-    fn judge(&self, ctx: &EffectContext<'_>) -> EffectJudgement;
-}
+use anything_core::{
+    Action, EffectKind, RiskLevel, SemanticAction, TargetedInput,
+};
 
 /// Conservative default guard used until richer page semantics exist.
 #[derive(Debug, Default, Clone)]
@@ -94,28 +66,8 @@ impl EffectGuard for StaticEffectGuard {
     }
 }
 
-fn is_executable(action: &Action) -> bool {
-    matches!(action, Action::Semantic(_) | Action::Targeted(_))
-}
-
-/// Base policy risk of a closed-set consequence classification (§3.3 table).
-fn effect_policy(kind: EffectKind) -> Option<(RiskLevel, &'static str)> {
-    Some(match kind {
-        EffectKind::Observe => (RiskLevel::R0, "observe classification"),
-        EffectKind::Navigate => (RiskLevel::R1, "navigate classification"),
-        EffectKind::LocalEdit => (RiskLevel::R2, "local edit classification"),
-        EffectKind::ExternalCommunication
-        | EffectKind::ExternalSubmit
-        | EffectKind::Destructive => (RiskLevel::R3, "external or irreversible consequence"),
-        EffectKind::PermissionChange | EffectKind::Financial | EffectKind::Credential => {
-            (RiskLevel::R4, "permission/finance/credential consequence")
-        }
-        EffectKind::Unknown => return None,
-    })
-}
-
 /// Evidence-based classification of the action against the current observation.
-fn classify(action: &Action, observation: &AppObservation) -> (RiskLevel, String) {
+fn classify(action: &Action, observation: &anything_core::AppObservation) -> (RiskLevel, String) {
     match action {
         Action::Observe | Action::Wait { .. } => (RiskLevel::R0, "observation or wait".into()),
         Action::Done { .. } | Action::Fail { .. } | Action::RequestUser { .. } => {
@@ -297,11 +249,11 @@ fn looks_like_secret_value(value: &str) -> bool {
 mod tests {
 
     use super::*;
-    use crate::action::{EffectClaim, TargetedInput};
-    use crate::observation::{
+    use anything_core::action::{EffectClaim, TargetedInput};
+    use anything_core::observation::{
         AppObservation, AppTarget, ElementNode, ModelSize, ObservationId, Rect, TransformId,
     };
-    use crate::types::Frame;
+    use anything_core::types::Frame;
 
     fn obs_with_button(label: &str) -> AppObservation {
         AppObservation {
