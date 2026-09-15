@@ -3,11 +3,30 @@
 > **状态：已按本文推进中**（v2 之后未再改版）。v1 经双模型并行审查（自审 + GPT-5.6 Sol，结论 BLOCK）后返工；Phase 2 起任何实现以本文为准，修改需先改文档。**当前实现进度与差距见 §0。**
 > 产品名 **AnythingUse**；`lcu` = Local Computer Use（只管本地电脑）；`lau` = **Local Android Use**（Android 端独立 CLI）。
 
-## 0. 实现现状与差距（截至 2026-09-15，源码级核对）
+## 0. 实现现状与差距（2026-09-15：源码核对 + 真机验收）
 
-本节只记录**代码里已经存在什么**，不构成真机验收结论（Phase 1 的真机验收见 §8）。
+本节记录**代码里已经存在什么**，以及**真机上实测到了什么**。完整证据（逐条命令 + 原始输出）见
+[`evidence/lau/phase2-acceptance-2026-09-15.md`](../evidence/lau/phase2-acceptance-2026-09-15.md)。
 
-**已实现（源码级）**
+**真机验收结果（2026-09-15，Xiaomi 2211133C / Android 16 / serial `<device-serial>`）**
+
+| 断言 | 结果 |
+|---|---|
+| P2-1 doctor 四态 + 未启用时的引导 blocker | ✅ 两条路径均过（禁用时精确报出引导 blocker，exit 3） |
+| P2-2 dump：已知 label / 能力字段 / 包与窗口身份 | 🟡 包名、能力字段、真实 label 均过；**窗口身份取不到**（#22） |
+| P2-3 invoke 语义点开（全程无坐标） | ✅ 设置首页 →「我的设备」详情页，代次 15→16 |
+| P2-4 set_value 中文并重 dump 断言 | ✅ 重 dump 得到 `value == 你好LCU` |
+| P2-5 陈旧 observationId / 能力未声明 | ✅ `stale_observation`、`unsupported_capability`，均 exit 3 |
+| P2-6 锁屏/灭屏 + 不自动唤醒 | ✅ `screen_off` / `device_locked`；`mWakefulness` 保持 Asleep |
+| P2-7 杀 helper 自动恢复 / 重启手机 | 🟡 **进程会重启，但 HyperOS 把无障碍开关一起关掉**（#17）；重启手机未测 |
+| P3-3 getevent 真机双验 | ✅ 真手指 → `paused`(taken_over)；注入动作**不**触发 |
+| P3-9 daemon 空闲退出 | ✅ 60s 退出并清理 socket；无状态命令不经 daemon |
+
+**对原文两处结论的更正**：
+- P2-2 要求「包/窗口身份」：实测**只有包名可用**，`windowTitle` 恒空且无 `windowId`（#22）；
+- P2-7 的「系统自动重启服务（开关在）→ ping 恢复」**只对了一半**：进程确实被系统重启，但 HyperOS 会**自行关掉无障碍开关**，必须人工重开（#17）。
+
+**已实现（源码级 + 真机确认）**
 
 - CLI：`doctor` / `screenshot` / `dump` / `invoke` / `set-value` / `scroll` / `foreground` / `launch`，daemon 侧 `run` / `decide` / `act` / `status` / `result` / `cancel` / `approve`；全局 `--serial`（env `LAU_SERIAL`）。退出码 `0` / `2`(waiting_user) / `3` / `64` / `69` / `70`。
 - daemon：按需拉起、空闲 60s 退出（`LAU_IDLE_EXIT_SECS`）、socket `~/.local/share/AnythingUse/lau/lau.sock`、**任务状态仅存内存**（daemon 重启即失）。
@@ -37,6 +56,21 @@
 | 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
 | 13 | 分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill | `scripts/` | 未产品化 |
 | 14 | `android-helper` 无测试；`lau-cli` 已有 5 个单测（守卫/纪元）但无端到端 | 全仓 | 回归保护仍薄弱 |
+
+**真机验收新增的差距（2026-09-15，按严重度）**
+
+| # | 差距 | 位置 | 影响 |
+|---|---|---|---|
+| 15 | 🔴 **`observationId` 不持久、无会话身份**：`generation` 是服务实例内计数器，实例重建即归零（实测**同一进程** PID 32256 不变、代次 22→1） | helper | 旧观察在代次碰撞后会被当成"当前"，动作可能落到与观察无关的元素上 |
+| 16 | 🔴 helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**：只查代次、下标、`refresh()`、自身包名 | helper | 与 #15 叠加 ⇒ 动作可能落到别的元素 |
+| 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开 |
+| 18 | 🟠 **可点元素与 label 分离**：能 `invoke` 的容器无 label，带 label 的节点多数不可 `invoke` | helper / daemon | Agent 无法把"点开某条目"直接映射成一个 element id（mac 侧由 Runtime 解析，lau 无等价机制） |
+| 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
+| 20 | 🟠 doctor 判据不可靠：`bound` 恒为真（匹配到无障碍快捷按钮条目）、`ping` 有滞后窗口 | `main.rs` | 四态里**只有 `enabled` 可信**，其余只能当诊断 |
+| 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
+| 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
+| 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | Agent 若只看截图会拿到无意义画面 |
+| 24 | 🟡 服务被禁用后 socket 仍可连接但返回空响应（`helper returned an empty response`） | daemon / helper | 用户得不到可行动的指引 |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿）。
 
@@ -79,7 +113,7 @@
 | 观察 | 窗口截图 + AX 树 + Input Monitoring | `adb screencap` + Accessibility dump + `getevent` 硬件触摸纪元 |
 | 语义执行 | AXPress/AXSelect/AXSetValue | `performAction`：CLICK / SET_TEXT / SCROLL / FOCUS |
 | 坐标兜底 | DirectedInput（需前台） | helper `dispatchGesture`（`canPerformGestures`，API 24+；**不经 ADB**）—— **尚未实现**；当前 `lau act` 直接拒绝坐标动作 |
-| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分）—— 已实现，纪元按 serial 隔离；监听断流即 fail-closed（§0 #1/#2 已修） |
+| 接管检测 | UserInputMonitor（事件标记） | daemon 常听 `getevent -lt`（硬件层有事件、注入无 → 干净区分）—— 已实现，纪元按 serial 隔离；监听断流即 fail-closed；**2026-09-15 真机验证：真手指 → `taken_over`，注入 → 不触发** |
 | 审批 | lcu-desktop 菜单栏 GUI | **Mac 对话框**（osascript，人在电脑前点；**不在手机弹**） |
 
 **关键映射**（复用 `anything-core` 类型的依据）：
@@ -135,7 +169,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 
 - **生命周期**：首个 `lau run` 拉起；`LAU_IDLE_EXIT_SECS`（默认 60）无活动退出。不写 launchd。不用时进程不存在，零消耗；任务期间一个小 Rust 进程（socket + 单任务队列 + getevent 读进程，内存几 MB，空闲 0 CPU）。
 - **职责**（跨 CLI 进程持有）：任务状态与队列（**每 serial 一条串行队列**）、app_access/consequence 门、观察代次、forward 会话管理、`getevent -lt` 触摸纪元（getepoch）。
-- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现**：断流已 fail-closed（任务转 `paused` 并报告，`lau resume` 会重建监听）；纪元按 serial 隔离（§0 #1/#2 已修）。真机双验（真手指 vs 注入）仍待实测。
+- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现**：断流已 fail-closed（任务转 `paused` 并报告，`lau resume` 会重建监听）；纪元按 serial 隔离（§0 #1/#2 已修）。**真机双验已于 2026-09-15 通过**：真手指触摸 → `paused(taken_over)`；注入动作（helper `performAction`）→ 不触发。注意 helper 侧仍未按 §5.2 复核节点身份（§0 #15/#16）。
 - CLI 前缀进程（`lau run/decide/act/result/status/resume/cancel`）都是 daemon 的薄客户端；`doctor`/`screenshot`/`dump` 等无状态命令 Phase 2 起即单进程直连。
 
 ## 7. 与 mac 端共用/不复用
@@ -150,7 +184,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - `lau doctor` / `lau screenshot`（真机验收过：Xiaomi 2211133C / Android 16）。
 - **本轮修复（审查 #13）**：doctor 吞掉 serial 解析错误 → 多设备/无效 serial 现为 blocker（`target_unresolved`），显式 `--serial` 校验存在与授权状态。
 
-### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— 源码已交付，验收与 `dispatchGesture` 待补（§0）
+### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— 验收已执行：5 通过 / 2 部分；`dispatchGesture` 仍未实现（§0）
 - 交付：`native/android-helper/` + 安装脚本 + `lau dump / invoke / set_value / scroll / foreground`（CLI 单进程直连；**观察代次状态由 helper 持有**——AccessibilityService 本身设备侧长活）。
 - **验收（确定性断言，非元素计数）**：
   1. doctor 四态 + 未启用时的引导 blocker
@@ -161,12 +195,12 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒
   7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）
 
-### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；安全模型主要缺口见 §0）
+### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；验收第 3、9 条真机通过；安全模型主要缺口见 §0）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded`
   2. 中文搜索 + `global_back` 回退（两步）
-  3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）
+  3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）—— ✅ 2026-09-15 通过
   4. getevent 断流 → fail closed（暂停并报告，不装共存）
   5. app_access 首次 → **Mac 对话框**（与 §5.4 / D6 一致；**不是**手机弹窗，避免误触发 getevent 接管）；批准 → 重观察继续；helper 自动化触不到对话框
   6. 破坏性效果声明 → `waiting_user`（CLI exit 2，Agent 停）；**把删除/支付标签谎报为 navigate → 仍要到达正确的门**（证据覆盖低报）
