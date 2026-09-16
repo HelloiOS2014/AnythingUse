@@ -86,7 +86,7 @@ default above). Do not load the repository source directory into Chrome.
 2. `lcu doctor --json` — check permissions (`screen_recording`/`accessibility`/`input_monitoring`) and surface connectivity in `notes` (`mac_window` / `chrome_tab`).
 3. Choose one explicit decision path:
    - Local model installed: `lcu run "Open Downloads in Finder" --app com.apple.finder --actor vlm --wait --json`.
-   - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`. Pi: `pi install git:github.com/HelloiOS2014/AnythingUse` (or `./scripts/install-pi.sh`). Do not put this checkout in global user packages. Claude Code / Grok: see the README plugin section.
+   - External Agent: ask the Agent to use the AnythingUse Skill; it submits with `--actor agent` and drives `lcu decide` / `lcu act`. Pi: `pi install git:github.com/HelloiOS2014/AnythingUse` (or `./scripts/install-pi.sh`). Do not put this checkout in global user packages. Claude Code / Grok / DSH: see the README plugin section (DSH installs with `./scripts/install-dsh.sh [profile]`).
 4. If a gate is required, use the menu-bar / desktop UI (not the CLI). App access discloses that `auto` may bring the exact target forward; consequence confirmation/takeover remains separate. Activation or approval discards the old proposal and the same Actor receives a fresh observation.
 
 Persistent app access can be removed from the menu-bar item **Revoke app access…**.

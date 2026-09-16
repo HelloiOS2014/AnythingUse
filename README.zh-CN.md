@@ -80,7 +80,7 @@
 - **绝对凭证隔离**：密码框与敏感输入字段在系统底层自动打标，其明文绝不被读取、绝不进入截图、绝不上送模型。遇到凭证填写自动触发 R4 人工接管。
 
 ### 🤝 一流的 Agent 原生集成
-开箱支持 **Claude Code**、**Pi**、**Grok Build** 等主流 Agent CLI 工具，并为自定义 Agent 框架提供机器友好的标准化 CLI 接口。
+开箱支持 **Claude Code**、**Pi**、**Grok Build**、**DeepSeek Harness（DSH）** 等主流 Agent CLI 工具，并为自定义 Agent 框架提供机器友好的标准化 CLI 接口。
 
 ---
 
@@ -213,6 +213,7 @@ AnythingUse 为主流 Agent CLI 提供了官方原生 Skill 插件：
 | **Claude Code** | `claude plugin marketplace add HelloiOS2014/AnythingUse && claude plugin install anythinguse` |
 | **Pi** | `pi install git:github.com/HelloiOS2014/AnythingUse` *(或执行 `./scripts/install-pi.sh`)* |
 | **Grok Build** | `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust` |
+| **DeepSeek Harness（DSH）** | `./scripts/install-dsh.sh` *（或 `./scripts/install-dsh.sh <profile>`；见 [`dsh/README.md`](dsh/README.md)）* |
 
 ### 标准化 Agent 执行循环
 

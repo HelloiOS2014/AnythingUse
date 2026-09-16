@@ -1,6 +1,6 @@
 ---
 name: local-computer-use
-description: Operate AnythingUse (`lcu`) computer use on the user's real macOS apps and installed Chrome. Use when the user asks to control the desktop, click UI, drive Finder/Chrome/apps, run lcu, or do local Computer Use. Pi, Claude Code, Grok Build, and other CLI agents share this skill. Only the lcu CLI; no Playwright, DOM, MCP, or private sockets.
+description: Operate AnythingUse (`lcu`) computer use on the user's real macOS apps and installed Chrome. Use when the user asks to control the desktop, click UI, drive Finder/Chrome/apps, run lcu, or do local Computer Use. Pi, Claude Code, Grok Build, DeepSeek Harness, and other CLI agents share this skill. Only the lcu CLI; no Playwright, DOM, MCP, or private sockets.
 ---
 
 # AnythingUse Skill (`lcu`)
