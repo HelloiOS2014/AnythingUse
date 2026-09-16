@@ -92,6 +92,11 @@ struct Task {
     observation_id: Option<String>,
     /// R4 gate: the human performs the action; nothing is stored for replay.
     takeover: bool,
+    /// App access (plan §5.4 / D8): stable identity of the controlled package,
+    /// its display label, and whether this task may proceed.
+    app_key: Option<String>,
+    app_label: Option<String>,
+    app_allowed: bool,
     /// Parked consequence gate: only what the human is being asked about is kept.
     /// The proposal itself is deliberately NOT stored — approval never replays it
     /// (plan §5.4 / D9).
@@ -193,6 +198,59 @@ struct Grant {
     expires: Instant,
 }
 
+/// A persisted `always_allow` app-access decision, keyed by identity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PermissionEntry {
+    label: String,
+    decided_at: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PermissionFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    permissions: HashMap<String, PermissionEntry>,
+}
+
+fn permissions_path() -> PathBuf {
+    sock_path().with_file_name("app_permissions.json")
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Load persisted app-access decisions. A missing or unreadable file is simply
+/// "nothing is allowed yet" — never an error that could be mistaken for a grant.
+fn load_permissions() -> HashMap<String, PermissionEntry> {
+    let Ok(raw) = std::fs::read_to_string(permissions_path()) else {
+        return HashMap::new();
+    };
+    serde_json::from_str::<PermissionFile>(&raw)
+        .map(|f| f.permissions)
+        .unwrap_or_default()
+}
+
+/// Persist decisions with 0600 (they are a security boundary, not user data).
+fn save_permissions(permissions: &HashMap<String, PermissionEntry>) {
+    let file = PermissionFile {
+        version: 1,
+        permissions: permissions.clone(),
+    };
+    let Ok(raw) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    let path = permissions_path();
+    if std::fs::write(&path, raw).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// How long an approval stays usable for a matching fresh proposal.
 const GRANT_TTL_SECS: u64 = 300;
 
@@ -210,6 +268,8 @@ struct Inner {
     last_activity: Instant,
     /// One hardware-touch watch per device serial.
     watches: HashMap<String, TouchWatch>,
+    /// Persisted `always_allow` app-access decisions (plan §5.4).
+    permissions: HashMap<String, PermissionEntry>,
 }
 
 pub fn daemon_main() -> Result<()> {
@@ -225,6 +285,7 @@ pub fn daemon_main() -> Result<()> {
         tasks: HashMap::new(),
         last_activity: Instant::now(),
         watches: HashMap::new(),
+        permissions: load_permissions(),
     }));
     let idle = Duration::from_secs(idle_secs());
     loop {
@@ -268,6 +329,8 @@ fn handle_client(mut stream: UnixStream, inner: &Arc<Mutex<Inner>>) -> Result<()
         "result" => op_result(&req, inner),
         "cancel" => op_cancel(&req, inner),
         "resume" => op_resume(&req, inner),
+        "permissions_list" => op_permissions_list(inner),
+        "permissions_revoke" => op_permissions_revoke(&req, inner),
         "approve" => op_approve(&req, inner),
         _ => json!({"ok": false, "error": "unknown op"}),
     };
@@ -369,6 +432,9 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         step: 0,
         observation_id: None,
         takeover: false,
+        app_key: None,
+        app_label: None,
+        app_allowed: false,
         pending_identity: None,
         pending_brief: None,
         grant: None,
@@ -417,6 +483,9 @@ fn task_view(t: &Task) -> Value {
         "state": t.state,
         "wait_reason": t.wait_reason,
         "takeover": t.takeover,
+        "app_key": t.app_key,
+        "app_label": t.app_label,
+        "app_allowed": t.app_allowed,
         "actor": t.actor,
         "app": t.app,
         "serial": t.serial,
@@ -447,6 +516,10 @@ fn decide_view(t: &Task) -> Value {
 
 fn op_decide(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    // App access comes first: without it nothing about the package is touched.
+    if let Some(resp) = ensure_app_access(id, inner) {
+        return resp;
+    }
     let mut g = inner.lock().expect("inner");
     let serial = match g.tasks.get(id) {
         Some(t) => t.serial.clone(),
@@ -478,6 +551,10 @@ fn op_decide(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
 
 fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    // App access comes first: without it nothing about the package is touched.
+    if let Some(resp) = ensure_app_access(id, inner) {
+        return resp;
+    }
     let obs = req.get("observation_id").and_then(|v| v.as_str()).unwrap_or("");
     let action_v = req.get("action").cloned().unwrap_or(json!({}));
     let action: Action = match serde_json::from_value(action_v) {
@@ -720,6 +797,38 @@ fn op_result(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     op_status(req, inner)
 }
 
+/// Persisted app-access decisions (plan §5.4). Read/revoke only — the CLI has no
+/// approve path.
+fn op_permissions_list(inner: &Arc<Mutex<Inner>>) -> Value {
+    let g = inner.lock().expect("inner");
+    let mut list: Vec<Value> = g
+        .permissions
+        .iter()
+        .map(|(key, entry)| {
+            json!({
+                "key": key,
+                "label": entry.label,
+                "decided_at": entry.decided_at,
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    json!({"ok": true, "data": {"permissions": list}})
+}
+
+fn op_permissions_revoke(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
+    let key = req.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    if key.is_empty() {
+        return json!({"ok": false, "error": "key is required"});
+    }
+    let mut g = inner.lock().expect("inner");
+    let removed = g.permissions.remove(key).is_some();
+    if removed {
+        save_permissions(&g.permissions);
+    }
+    json!({"ok": true, "data": {"revoked": removed, "key": key}})
+}
+
 fn op_cancel(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     let id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
     let mut g = inner.lock().expect("inner");
@@ -847,6 +956,208 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
         t.last_action_summary =
             Some("approved; re-observe and re-propose (one-time grant)".into());
     });
+}
+
+/// App access gate (plan §5.4, D8): the first control of a package needs a human
+/// decision on the Mac. Returns `Some(response)` when the caller must stop.
+fn ensure_app_access(id: &str, inner: &Arc<Mutex<Inner>>) -> Option<Value> {
+    let (app, serial, allowed, parked, cached) = {
+        let g = inner.lock().ok()?;
+        let t = g.tasks.get(id)?;
+        (
+            t.app.clone(),
+            t.serial.clone(),
+            t.app_allowed,
+            t.wait_reason.as_deref() == Some("app_access"),
+            t.app_key.clone(),
+        )
+    };
+    if allowed {
+        return None;
+    }
+    if parked {
+        let g = inner.lock().ok()?;
+        let t = g.tasks.get(id)?;
+        return Some(json!({
+            "ok": false,
+            "error": "waiting_user",
+            "wait_reason": "app_access",
+            "data": task_view(t)
+        }));
+    }
+    // Establish the stable identity once per task (helper RPC; no lock held).
+    let key = match cached {
+        Some(key) => key,
+        None => {
+            let identity = helper_rpc(
+                &serial,
+                helper::wrap_op("app_identity", json!({"packageName": app})),
+            )
+            .and_then(helper::unwrap_ok);
+            match identity {
+                Ok(v) => {
+                    let cert = v.get("certSha256").and_then(|x| x.as_str()).unwrap_or("");
+                    let label = v
+                        .get("label")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(&app)
+                        .to_string();
+                    let key = if cert.is_empty() {
+                        format!("{app}#unsigned")
+                    } else {
+                        format!("{app}#{cert}")
+                    };
+                    let mut g = inner.lock().ok()?;
+                    if let Some(t) = g.tasks.get_mut(id) {
+                        t.app_key = Some(key.clone());
+                        t.app_label = Some(label);
+                    }
+                    key
+                }
+                Err(e) => {
+                    // No identity → no control. Fail closed, and say why.
+                    let mut g = inner.lock().ok()?;
+                    if let Some(t) = g.tasks.get_mut(id) {
+                        t.state = "failed".into();
+                        t.wait_reason = None;
+                        t.error = Some(format!("cannot establish app identity: {e:#}"));
+                    }
+                    let t = g.tasks.get(id)?;
+                    return Some(json!({
+                        "ok": false,
+                        "error": "app_identity_unavailable",
+                        "data": task_view(t)
+                    }));
+                }
+            }
+        }
+    };
+    let persisted = {
+        let g = inner.lock().ok()?;
+        g.permissions.contains_key(&key)
+    };
+    if persisted {
+        let mut g = inner.lock().ok()?;
+        if let Some(t) = g.tasks.get_mut(id) {
+            t.app_allowed = true;
+            t.last_action_summary = Some("app access: always_allow (persisted)".into());
+        }
+        return None;
+    }
+    let (label, view) = {
+        let mut g = inner.lock().ok()?;
+        let t = g.tasks.get_mut(id)?;
+        t.state = "waiting_actor".into();
+        t.wait_reason = Some("app_access".into());
+        let label = t.app_label.clone().unwrap_or_else(|| app.clone());
+        (label, task_view(t))
+    };
+    spawn_mac_app_access(inner.clone(), id.to_string(), app, label, key);
+    Some(json!({
+        "ok": false,
+        "error": "waiting_user",
+        "wait_reason": "app_access",
+        "data": view
+    }))
+}
+
+/// Ask the human for app access. `always_allow` is persisted; `allow_once` lives
+/// only for this task; anything else (including a failed dialog) fails the task.
+fn spawn_mac_app_access(
+    inner: Arc<Mutex<Inner>>,
+    task_id: String,
+    app: String,
+    label: String,
+    key: String,
+) {
+    thread::spawn(move || {
+        let body = format!(
+            "AnythingUse wants to control:\n\n{label}  ({app})\n\nIdentity:\n{key}\n\n\
+             It prefers semantic actions and never restores your previous app.\n\
+             This permission does NOT authorise sending, deleting, paying or any other\n\
+             consequence — those are confirmed separately, one action at a time.\n\nAllow?"
+        );
+        let answer = mac_dialog_app_access(&body);
+        let mut g = match inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        {
+            let Some(t) = g.tasks.get_mut(&task_id) else {
+                return;
+            };
+            if t.wait_reason.as_deref() != Some("app_access") {
+                return;
+            }
+        }
+        if answer == AppAccessAnswer::Always {
+            g.permissions.insert(
+                key.clone(),
+                PermissionEntry {
+                    label: label.clone(),
+                    decided_at: now_secs(),
+                },
+            );
+            save_permissions(&g.permissions);
+        }
+        if let Some(t) = g.tasks.get_mut(&task_id) {
+            match answer {
+                AppAccessAnswer::Once | AppAccessAnswer::Always => {
+                    t.app_allowed = true;
+                    t.wait_reason = Some("agent_decision".into());
+                    // Any proposal made before the gate is discarded.
+                    t.observation_id = None;
+                    t.last_action_summary = Some(
+                        match answer {
+                            AppAccessAnswer::Always => "app access: always_allow",
+                            _ => "app access: allow_once",
+                        }
+                        .into(),
+                    );
+                }
+                AppAccessAnswer::Deny => {
+                    t.state = "failed".into();
+                    t.error = Some("app access denied by the user".into());
+                    t.wait_reason = None;
+                }
+            }
+        }
+    });
+}
+
+/// Which button the human pressed on a three-way app-access dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppAccessAnswer {
+    Once,
+    Always,
+    Deny,
+}
+
+/// Three-button osascript dialog. Anything other than a clean "Allow once" /
+/// "Always allow" answer (cancel, error, no GUI) is a deny — fail closed.
+fn mac_dialog_app_access(body: &str) -> AppAccessAnswer {
+    let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"try
+  set r to display dialog "{escaped}" with title "AnythingUse LAU — app access" buttons {{"Deny", "Always allow", "Allow once"}} default button "Allow once" cancel button "Deny" with icon caution
+  return button returned of r
+on error number -128
+  return "Deny"
+end try"#
+    );
+    match Command::new("osascript").arg("-e").arg(&script).output() {
+        Ok(o) if o.status.success() => {
+            let out = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            if out.contains("allow once") {
+                AppAccessAnswer::Once
+            } else if out.contains("always allow") {
+                AppAccessAnswer::Always
+            } else {
+                AppAccessAnswer::Deny
+            }
+        }
+        _ => AppAccessAnswer::Deny,
+    }
 }
 
 fn mac_dialog_choice(body: &str, title: &str, deny_label: &str, ok_label: &str) -> bool {
@@ -1053,6 +1364,9 @@ mod tests {
             pending_brief: None,
             grant: None,
             takeover: false,
+            app_key: Some("com.android.settings#deadbeef".into()),
+            app_label: Some("设置".into()),
+            app_allowed: true,
             elements: json!([]),
             image_path: None,
             last_action_summary: None,
@@ -1117,10 +1431,12 @@ mod tests {
         );
     }
 
-    fn empty_inner() -> Inner {        Inner {
+    fn empty_inner() -> Inner {
+        Inner {
             tasks: HashMap::new(),
             last_activity: Instant::now(),
             watches: HashMap::new(),
+            permissions: HashMap::new(),
         }
     }
 

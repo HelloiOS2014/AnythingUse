@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.PowerManager
@@ -18,6 +19,7 @@ import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -145,6 +147,7 @@ class LauAccessibilityService : AccessibilityService() {
                 )
                 "dump" -> dump(req)
                 "foreground" -> foreground(req)
+                "app_identity" -> appIdentity(req)
                 "invoke" -> invoke(req)
                 "set_value" -> setValue(req)
                 "scroll" -> scroll(req)
@@ -386,6 +389,45 @@ class LauAccessibilityService : AccessibilityService() {
         val ok = node.performAction(action)
         if (!ok) throw HelperException("verification_failed", "scroll returned false")
         return ok(req, JSONObject().put("performed", "scroll"))
+    }
+
+    /**
+     * Plan §5.4: stable identity of an installed package — package name plus the
+     * SHA-256 of its signing certificate. Survives app updates; changing the
+     * signer changes the identity (and therefore invalidates a persisted grant).
+     */
+    private fun appIdentity(req: JSONObject): JSONObject {
+        val pkg = req.optString("packageName", "")
+        if (pkg.isEmpty()) throw HelperException("protocol_error", "packageName required")
+        val info = try {
+            packageManager.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+        } catch (_: Exception) {
+            throw HelperException("target_lost", "package $pkg is not installed")
+        }
+        val certSha256 = try {
+            val signer = info.signingInfo?.apkContentsSigners?.firstOrNull()
+            val bytes = signer?.toByteArray()
+            if (bytes == null) {
+                ""
+            } else {
+                MessageDigest.getInstance("SHA-256").digest(bytes)
+                    .joinToString("") { "%02x".format(it) }
+            }
+        } catch (_: Exception) {
+            ""
+        }
+        val label = try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (_: Exception) {
+            pkg
+        }
+        return ok(
+            req,
+            JSONObject()
+                .put("packageName", pkg)
+                .put("label", label)
+                .put("certSha256", certSha256)
+        )
     }
 
     private fun foreground(req: JSONObject): JSONObject {

@@ -157,6 +157,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// List or revoke persisted app-access decisions (this CLI can never approve)
+    Permissions {
+        #[arg(long)]
+        json: bool,
+        /// Revoke this identity key instead of listing
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Internal: on-demand daemon (do not invoke by hand)
     #[command(hide = true)]
     Daemon,
@@ -830,6 +838,10 @@ fn main() {
         Commands::Approve { task_id, json } => {
             daemon_cmd(json!({"op": "approve", "task_id": task_id}), *json)
         }
+        Commands::Permissions { json, revoke } => match revoke {
+            Some(key) => daemon_cmd(json!({"op": "permissions_revoke", "key": key}), *json),
+            None => daemon_cmd(json!({"op": "permissions_list"}), *json),
+        },
         Commands::Daemon => daemon::daemon_main().map(|_| 0),
     };
     match code {
