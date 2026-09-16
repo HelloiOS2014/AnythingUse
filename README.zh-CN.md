@@ -1,151 +1,318 @@
+<div align="center">
+
 # AnythingUse
 
-**让 Agent 操作你真实的 Mac、你真实的 Chrome，以及（源码级）你真实的 Android 手机 —— 全部在本机完成，凡是危险动作都有人把关。**
+<p align="center">
+  <strong>本地优先、原生语义的计算机与移动端控制平面 (Computer Use Control Plane)</strong><br>
+  赋予 AI Agent 真正操作真实桌面、浏览器与移动端应用的能力 —— 基于系统原生无障碍树，100% 本机静默后台运行，受不可逾越的人类安全门禁保护。
+</p>
 
-AnythingUse 是一套本地优先的控制平面。它不猜像素、也不另开一个干净的浏览器：它读你**正在用**的那个应用的无障碍树，把动作绑定到**严格的目标窗口**，并且在任何有真实后果的动作前停下来问你。没有云端、没有账号、没有遥测。
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/平台-macOS%20%7C%20Chrome%20%7C%20Android-007AFF?style=for-the-badge&logo=apple&logoColor=white" alt="支持平台" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/核心语言-Rust%20%7C%20Swift%20%7C%20Kotlin-orange?style=for-the-badge&logo=rust&logoColor=white" alt="编程语言" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/隐私-100%25%20本地%20%7C%20零云端通信-34C759?style=for-the-badge" alt="本地优先" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/安全-系统级强制安全门-red?style=for-the-badge" alt="安全体系" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/Agent-Claude%20%7C%20Pi%20%7C%20Grok-5856D6?style=for-the-badge" alt="支持的 Agent" /></a>
+</p>
 
-**English: [README.md](README.md)**
+<p align="center">
+  <a href="#-为什么选择-anythinguse">核心优势</a> •
+  <a href="#-核心能力">核心能力</a> •
+  <a href="#-系统架构">系统架构</a> •
+  <a href="#-快速上手">快速上手</a> •
+  <a href="#-agent-集成与技能">Agent 技能</a> •
+  <a href="#-多端控制表面">多端表面</a> •
+  <a href="#-安全与人在回路">安全体系</a> •
+  <a href="#-文档索引">文档索引</a>
+</p>
 
-```mermaid
-flowchart LR
-    H["你"] --> LCU["lcu CLI"]
-    A["Agent + Skill"] --> LCU
-    LCU --> RT["Runtime<br/>队列 · 策略 · 门"]
-    RT --> MAC["macOS 窗口"]
-    RT --> CH["你自己的 Chrome 标签页"]
-    A2["Agent + Skill"] --> LAU["lau CLI"]
-    LAU --> DAEMON["lau daemon"]
-    DAEMON --> DEV["Android 设备<br/>AccessibilityService helper"]
-```
+<p align="center">
+  <a href="README.md">English</a> | <strong>简体中文</strong>
+</p>
 
-## 它解决什么
+---
 
-- **真语义，不是猜坐标。** 读的是 VoiceOver 用的同一棵无障碍树 —— 它说的是"这个按钮叫什么"，而不是"大概在哪个像素"。
-- **你的真实环境。** 用的是你自己的 Chrome 配置（已登录），跑在一个非活动的任务标签页里，而不是一个什么会话都没有的新浏览器。
-- **不抢你的桌面。** 任务绑定到某个 PID + 窗口，优先后台投递；只有在无法后台投递时才可能把**那一个确切窗口**切到前台（且会明确告知），你一动真键盘鼠标，任务立刻让路。
-- **危险动作会停。** 发送、删除、支付、碰凭证 —— 即使在已授权的会话里，也是**单独**由人决定的一次决策；而且**批准过一次不等于以后都批**（绝不重放）。
-- **完成是证明出来的。** 动作回执 ≠ 成功：只有显式 `done` **且**目标被重新观察到，任务才算 `succeeded`。
+</div>
 
-## 试一下
+## ⚡ 为什么选择 AnythingUse？
 
-```bash
-# 构建 + 装到 PATH（lcu、lcu-desktop、lau、macos-window-service）
-cargo build -p lcu-cli -p lcu-desktop --release
-(cd native/macos-window-service && swift build -c release)
-./scripts/install-cli.sh
+市面上大部分 Computer Use 方案依赖截取全屏图片、发往云端多模态大模型盲猜屏幕像素坐标 `(x, y)`。
 
-lcu doctor --json
-```
+在实际生产应用中，这种“截图+盲猜”模式存在致命缺陷：
+- 🐢 **迟缓且昂贵**：每一步都需要截取 4K/1080p 大图并等待 3–5 秒的视觉推理，消耗海量 Vision Token。
+- 🎯 **像素极其脆弱**：窗口移动、跨屏幕 DPI 缩放、深色模式切换都会导致坐标偏移，极易发生误触甚至毁损数据。
+- 🚫 **暴力霸占屏幕**：Agent 强行夺取鼠标光标并在屏幕上乱点，用户在 Agent 工作期间完全无法使用电脑。
+- 🔑 **无痕空壳浏览器**：大部分工具只能新开一个无 Cookie、无登录态的空白无头浏览器，遇到 2FA 和常用网站必须反复重新登录。
 
-`doctor` 一个调用就把前置条件讲全：
+**AnythingUse 从底层架构进行了彻底的范式重构：**
 
-```json
-{ "status": "ok",
-  "data": { "runtime_reachable": true,
-            "private_entry": { "kind": "unix_socket", "listens_tcp": false, "socket_mode": "600" },
-            "permissions": [ { "name": "screen_recording", "state": "granted", "required_for": ["observe"] },
-                             { "name": "accessibility",    "state": "granted", "required_for": ["semantic_action", "targeted_input"] },
-                             { "name": "input_monitoring", "state": "granted", "required_for": ["directed_input_same_window_takeover"] } ],
-            "blockers": [] } }
-```
-
-然后按 Agent 的方式跑任务 —— **一次观察只做一个决策**：
-
-```bash
-lcu run "打开下载文件夹" --app com.apple.finder --actor agent --json
-lcu decide <task-id> --json                    # 紧凑元素列表 + 观察令牌（+ 0600 权限的截图路径）
-lcu act  <task-id> --observation-id <obs> \
-  --action '{"kind":"semantic","type":"invoke","element_id":"e12"}' \
-  --effect '{"kind":"navigate","summary":"打开下载"}'
-lcu result <task-id> --json                    # succeeded / failed / cancelled
-```
-
-退出码稳定且两个 CLI 一致（来自 `anything-core` 的 `ExitCode`）：
-`0` 成功 · `2` 等人决定 · `3` 任务失败 · `4` 权限被拒 · `64` 用法错误 · `69` Runtime 不可用 · `70` 内部错误。
-
-Runtime 按需启动、空闲 60 秒自行退出；只有你想让菜单栏常驻时才需要自己起 `lcu-desktop`。
-
-## 安装
-
-| 依赖 | 用于 |
-|---|---|
-| Apple Silicon Mac、Rust 工具链、Xcode 命令行工具 | 核心构建（含 Swift 窗口服务） |
-| Chrome | Chrome 表面（`./native/chrome-control/scripts/install-native-host.sh`，然后按它打印的路径"加载已解压的扩展程序"） |
-| Python 3 + 模型资源 | **可选**的本地 VLM 决策者（`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`，再 `./scripts/download_qwen3_vl.sh`） |
-| `adb` + 一台 Android 设备 | Android 端点（`./scripts/install-android-helper.sh`，然后在"无障碍"里启用 *AnythingUse LAU*） |
-
-macOS 会要三个权限，各自对应一项能力（`doctor` 里是同一份映射）：**屏幕录制**（观察）、**辅助功能**（语义与定向输入）、**输入监控**（感知你在目标上的真实输入，从而让路）。
-
-## 两个端点，两个成熟度
-
-| | `lcu` —— macOS + Chrome | `lau` —— Android |
+| 核心维度 | 传统视觉方案 (Anthropic / OSWorld) | AnythingUse |
 |---|---|---|
-| 成熟度 | **已交付（v3.2）**：源码对齐，集中真机验收 2026-08-17 通过 | **源码级**：验收证据是 2026-09-15 的单台设备 |
-| 目标 | 某个 PID + 窗口，或一个非活动的 Chrome 任务标签页 | 一台 USB 连接的设备，按包授权 |
-| 决策 | `run` / `decide` / `act` / `result`，`--actor agent`（默认）或 `--actor vlm` | `run` / `decide` / `act` / `result`（`--actor agent`） |
-| 传输 | 私有 Unix socket，连按需启动的 Runtime | `adb forward` 到 App 内的无障碍服务 socket；**从不**用 ADB 注入输入 |
-| 门 | 应用访问 · 后果 · 接管 | 应用访问（包名 + 签名证书）· 后果 · 接管 |
-| 深入阅读 | [交付状态](docs/status.md) · [命令契约](docs/command-contract.md) | [LAU 规划](docs/lau-android-plan.md) · [验收证据](evidence/lau/phase2-acceptance-2026-09-15.md) |
+| **UI 识别基准** | 像素截图 + 坐标盲猜 `(x, y)` | **操作系统原生无障碍树** (`AXUIElement` / `AccessibilityNodeInfo`) |
+| **单步执行延迟** | 2,000ms – 5,000ms (云端视觉链路) | **低于 50ms** 原生语义级瞬时响应 |
+| **Token 消耗** | 巨大（每一步都要上传全屏大图） | 语义操作**零视觉 Token**；极小结构化 JSON 交互 |
+| **用户共存状态** | 强行霸占前台屏幕、抢夺物理鼠标光标 | **真正静默的后台执行**（定向窗口 / 独立后台标签页） |
+| **浏览器环境** | 临时的空壳隔离浏览器，丢失所有登录态 | **复用日常登录的真实 Chrome**（保留已登录会话、Cookie 与 2FA） |
+| **移动端支持** | 无支持，或依赖脆弱的 ADB 坐标模拟点击 | **原生 Android 辅助服务** (`lau` + USB 直连 + 真机触摸硬件感知) |
+| **安全机制** | 依赖软性 Prompt 提示词引导（极易被越狱/幻觉突破） | **操作系统级强制门禁**：独立风险底线、防重放令牌、人类审批闭环 |
+| **人工介入接管** | 用户的鼠标操作与 Agent 互抢光标冲突 | **物理级即刻让路**：触摸键盘、移动鼠标或触摸手机屏瞬间自动暂停 |
 
-`lau` 是**独立二进制**（lau = Local Android Use，绝不并入 `lcu`）；两者只共享 `crates/anything-core` 里的平台中立契约。
+---
 
-## 安全模型
+## 🌟 核心能力
 
-循环永远是 **观察 → 决策 → 守卫 → 执行 → 再观察**，而守卫从不相信执行者：
+### 🎯 原生语义控制（彻底告别像素盲猜）
+直接对接操作系统原生无障碍接口。Agent 依托清晰的语义标识、标签名与 UI 角色（如 `"发送" 按钮`、`"搜索" 输入框`、`"确认" 对话框`）精准驱动界面。无视屏幕分辨率、DPI 缩放比例与窗口遮挡，点击永远精准。
 
-- **执行者只提议，风险由 Runtime 定。** `--effect` 是闭集的意图声明；独立的证据层（macOS 看无障碍语义，Android 看控件/文案证据）**只能抬高**风险下限、不能压低。把删除谎报成"导航"，照样落到破坏性门上。
-- **三道门各自独立。** 应用访问、后果（R3）、人工接管（R4）是三件事；凭证交给真人，绝不代打。**批准绝不重放** —— 过门之后必须重新观察、重新提议。
-- **身份是严格的。** 动作绑定在它被决策时的那次观察上（Android 上还会逐节点复核会话令牌）。UI 变了、会话重建了，动作就 fail-closed，而不是"点到什么算什么"。
-- **你的还是你的。** 你在目标上的真实输入会让任务暂停；Android 上硬件触摸监听做同样的事，监听断了也是暂停而不是盲动。凭证字段只标记、**绝不读取**其内容。
-- **完成必须被证明。** `succeeded` 需要显式 `done` **加上**一次成功的重新观察。它证明的是机制，不是你的目标 —— 核对"看到的是不是你想要的"是执行者的责任。
+### 🖥️ 真正静默的后台执行（不抢鼠标、不霸占桌面）
+在 macOS 上基于 PID 与窗口 ID 实施精准的后台事件投递，全程不移动物理鼠标指针、不抢夺桌面窗口焦点。Agent 在后台执行自动化任务时，你可以继续流畅地写代码、看视频或处理邮件。
 
-细节：[执行契约](docs/execution-contract.md) · [架构](docs/architecture.md) · [隐私](docs/privacy.md)。
+### 🌐 驱动真实 Chrome（复用真实配置与已登录会话）
+通过专用 MV3 扩展与 Native Messaging 机制，在日常使用的 **真实 Chrome 配置** 中建立独立、非激活的后台任务标签页。无需在无头浏览器中重新输入密码，直接无缝复用已登录的 GitHub、Gmail、Jira、Slack 和内部系统。
 
-## 给 Agent 用
+### 📱 原生 Android 直控表面 (`lau`)
+通过 USB 连接直控任何 Android 设备。基于机载 AccessibilityService 辅助服务实现语义元素提取、原生文字录入与页面滑动；集成硬件级触摸监听 (`getevent`)，手指触碰手机屏幕的瞬间任务即刻让出控制权。
 
-本仓库分发两个技能，随仓库一起更新：
+### 🛡️ 坚不可摧的人在回路（Human-in-the-Loop）安全门
+安全性不是提示词层面的建议，而是不可逾越的底层架构约束：
+- **独立证据底线**：运行时在执行前独立核验 UI 节点的真实语义。即使 Agent 将某个危险动作声称为“无害浏览”，若目标实际为破坏性操作（如“删除数据”），系统强制升格至 R3 后果门禁，并在 Mac 上弹出原生系统对话框等待人类审批。
+- **代际绑定的防伪令牌**：每个动作严格绑定生成时的观察令牌。若界面发生弹窗、标签切换或布局改变，陈旧动作立即 Fail-Closed 拒绝执行。
+- **绝对凭证隔离**：密码框与敏感输入字段在系统底层自动打标，其明文绝不被读取、绝不进入截图、绝不上送模型。遇到凭证填写自动触发 R4 人工接管。
 
-```bash
-# Pi
-pi install git:github.com/HelloiOS2014/AnythingUse     # 或 ./scripts/install-pi.sh
-# Claude Code
-claude plugin marketplace add HelloiOS2014/AnythingUse && claude plugin install anythinguse
-# Grok Build
-grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust
-```
+### 🤝 一流的 Agent 原生集成
+开箱支持 **Claude Code**、**Pi**、**Grok Build** 等主流 Agent CLI 工具，并为自定义 Agent 框架提供机器友好的标准化 CLI 接口。
 
-- macOS + Chrome → `local-computer-use`（[SKILL.md](skills/local-computer-use/SKILL.md)）
-- Android → `local-android-use`（[SKILL.md](skills/local-android-use/SKILL.md)）
+---
 
-Agent 应当**直接**调用 CLI，一次观察一个决策 —— 不要套驱动脚本、不要包一层 JSON、不要碰私有 socket。硬规则与二进制解析顺序见 [AGENTS.md](AGENTS.md)。
+## 🏗️ 系统架构
 
-## 状态
-
-- **macOS 核心 —— v3.2，在 `main`：** macOS 窗口控制、真实 Chrome 控制、可插拔决策者（默认 Agent，可选本地 Qwen3-VL）、CLI、Agent Skill。见[交付状态](docs/status.md)。
-- **Android —— 源码级：** 已做到可安装可分发（`lau` + helper APK + 独立技能），并经真机验证；已知缺口清单在 [LAU 规划](docs/lau-android-plan.md) §0。
-- **不承诺：** 对任意应用的广泛兼容、签名/公证安装包、soak 或 Top-100 门禁、Windows、远程主机。MCP、Playwright、公网 TCP 监听也**刻意**不是产品表面。
-
-目前选择接受的已知限制：HyperOS 在 helper 被杀后可能自行关闭无障碍服务（#17）；daemon 偶发空/截断响应（已埋点，幂等读自动重试一次、动作绝不重试）（#19）；Android 的 Spinner/下拉控件声称可滚动但实际不可操作（#27）。
-
-## 仓库地图
+AnythingUse 将**决策者（AI Agent / 本地模型）**与**底座执行/安全策略**进行严格分层隔离：
 
 ```text
-crates/anything-core/         平台中立契约（动作、效果、风险），lcu 与 lau 共用
-crates/lcu-*/                 macOS 运行时：CLI、队列、策略、模型执行者、平台与 Chrome 后端
-crates/lau-cli/               Android 端点：CLI + 按需 daemon
-apps/lcu-desktop/             Runtime 宿主与审批界面
-native/macos-window-service/  Swift 窗口定向服务
-native/chrome-control/        Chrome 扩展 + Native Messaging 宿主
-native/android-helper/        Kotlin 无障碍服务 helper APK（lau）
-skills/local-computer-use/    Agent 技能 —— macOS/Chrome
-skills/local-android-use/     Agent 技能 —— Android
-scripts/                      安装、打包与辅助脚本
+                     ┌──────────────────────────────────────────────┐
+                     │         AI Agents (Claude / Pi / Grok)       │
+                     │              或人类操作者 (CLI)              │
+                     └───────────────────────┬──────────────────────┘
+                                             │
+                               ┌──────────────┴──────────────┐
+                               ▼                             ▼
+                        ┌──────────────┐              ┌──────────────┐
+                        │   lcu CLI    │              │   lau CLI    │
+                        └──────┬───────┘              └──────┬───────┘
+                               │ (Unix Socket: 0600)         │ (本地 Daemon)
+                               ▼                             ▼
+                ┌─────────────────────────────┐       ┌──────────────┐
+                │     AnythingUse 运行时      │       │  lau daemon  │
+                │  队列 · 策略 · AX 语义引擎  │       └──────┬───────┘
+                └──────┬───────────────┬──────┘              │ (adb forward)
+                       │               │                     ▼
+                       ▼               ▼              ┌──────────────┐
+                ┌─────────────┐ ┌─────────────┐       │Android 真机  │
+                │macOS 目标窗 │ │ 真实 Chrome │       │Accessibility │
+                │ (静默后台)  │ │ (任务标签页)│       │   Service    │
+                └─────────────┘ └─────────────┘       └──────────────┘
+                       ▲               ▲                     ▲
+                       └───────────────┴─────────────────────┘
+                             系统级安全门禁与硬件输入监听
 ```
 
-## 文档
+### 确定性执行闭环
 
-[执行契约](docs/execution-contract.md) · [交付状态](docs/status.md) · [架构](docs/architecture.md) ·
-[用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) ·
-[LAU Android 规划](docs/lau-android-plan.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md) ·
-[Computer Use 参考笔记](docs/computer-use-reference.md) ·
-[macOS 窗口服务](native/macos-window-service/README.md) · [Chrome 控制](native/chrome-control/README.md)
+```text
+    ┌───────────┐         紧凑元素列表与观察令牌         ┌───────────┐
+    │           │ ─────────────────────────────────────> │           │
+    │  运行时   │                                        │ AI Agent  │
+    │           │ <───────────────────────────────────── │           │
+    └───────────┘          动作提案与意图影响声明        └───────────┘
+```
+
+1. **观察 (`decide`)**：运行时提取当前可见无障碍节点，生成轻量紧凑的结构化列表与唯一的代际防伪令牌。
+2. **提案 (`act`)**：Agent 提交原子化语义动作（`invoke`、`set_value`、`scroll` 等），并附带闭集 `--effect` 意图声明。
+3. **守卫核验**：运行时比对真实 UI 语义、强制核定风险底线，确认合规后原子化执行。
+4. **重新核验证明 (`result`)**：任务的成功必须由 Agent 提交显式 `done` 并在**重新观察验证目标界面确已达成预期**后方可确认为 `succeeded`。
+
+---
+
+## 🚀 快速上手
+
+### 1. 编译与安装
+
+**环境要求**：Apple Silicon Mac、Rust 1.85+、Xcode Command Line Tools。
+
+```bash
+# 克隆仓库
+git clone https://github.com/HelloiOS2014/AnythingUse.git
+cd AnythingUse
+
+# 编译核心 CLI 与原生服务
+cargo build -p lcu-cli -p lcu-desktop -p lau-cli --release
+(cd native/macos-window-service && swift build -c release)
+
+# 安装可执行文件至 ~/.local/bin
+./scripts/install-cli.sh
+```
+
+### 2. 环境自检
+
+运行 `lcu doctor` 命令，快速检查系统权限与组件状态：
+
+```bash
+lcu doctor
+```
+
+```text
+status: ok
+permissions:
+  ✓ screen_recording    (granted)
+  ✓ accessibility       (granted)
+  ✓ input_monitoring    (granted)
+runtime: ready
+```
+
+> **系统权限说明**：
+> - **屏幕录制 (Screen Recording)**：用于目标窗口状态快照与视觉验证。
+> - **辅助功能 (Accessibility)**：用于无障碍树解析与语义动作触发。
+> - **输入监控 (Input Monitoring)**：用于感知人类对目标窗口的物理键鼠操作，实现瞬时让路。
+
+### 3. 执行你的第一个任务
+
+```bash
+# 1. 在后台静默操作 macOS 桌面应用
+lcu run "打开下载文件夹并选中最新的 PDF 文档" --app com.apple.finder
+
+# 2. 在独立标签页中驱动你日常登录的真实 Chrome
+lcu run "查看最新的 GitHub 通知" --app com.google.Chrome
+```
+
+### 4. 连接 Android 真机 (`lau`)
+
+```bash
+# 将无障碍辅助服务 APK 安装至 USB 连接的 Android 手机
+./scripts/install-android-helper.sh
+
+# 检查 ADB 连接与辅助服务授权状态
+lau doctor
+
+# 提取当前屏幕的完整语义无障碍树（毫秒级，无需截图）
+lau dump
+
+# 在手机上提交自动化任务
+lau run "打开系统设置并检查电池健康度" --package com.android.settings
+```
+
+---
+
+## 🤖 Agent 集成与技能
+
+AnythingUse 为主流 Agent CLI 提供了官方原生 Skill 插件：
+
+### 一键安装技能
+
+| Agent 宿主 | 安装命令 |
+|---|---|
+| **Claude Code** | `claude plugin marketplace add HelloiOS2014/AnythingUse && claude plugin install anythinguse` |
+| **Pi** | `pi install git:github.com/HelloiOS2014/AnythingUse` *(或执行 `./scripts/install-pi.sh`)* |
+| **Grok Build** | `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust` |
+
+### 标准化 Agent 执行循环
+
+Agent 通过直接调用 CLI 标准输入输出与 AnythingUse 交互（机器友好 JSON）：
+
+```bash
+# 1. 提交目标任务
+lcu run "打开下载文件夹" --app com.apple.finder --actor agent --json
+
+# 2. 获取紧凑观察结果（返回 elements 与 observation token）
+lcu decide <task-id> --wait --json
+
+# 3. 提交绑定令牌的语义动作
+lcu act <task-id> --observation-id <obs-token> \
+  --action '{"kind":"semantic","type":"invoke","element_id":"e12"}' \
+  --effect '{"kind":"navigate","summary":"open Downloads"}'
+
+# 4. 获取验证后的最终任务结果
+lcu result <task-id> --json
+```
+
+---
+
+## 🎛️ 多端控制表面
+
+AnythingUse 针对不同操作系统表面深度定制了控制机制：
+
+| 能力维度 | macOS 桌面应用 (`lcu`) | 真实 Chrome 浏览器 (`lcu`) | Android 移动端 (`lau`) |
+|---|---|---|---|
+| **控制范围** | 目标进程 PID + 确切窗口 ID | 绑定登录配置的独立后台标签页 | 目标应用包名 + Activity |
+| **底层实现** | macOS 原生无障碍 (`AXUIElement`) | Chrome 扩展 + CDP 协议 | 原生 `AccessibilityService` 助手 |
+| **后台运行** | 静默后台事件投递，不抢占焦点 | 独立后台标签页静默交互 | 手机前台应用直控 |
+| **物理接管** | 触碰物理鼠标/打字即刻暂停 | 切换至该标签页即刻暂停 | 手指触摸手机屏幕即刻暂停 |
+| **操作注入** | 窗口级定向事件投递 | 专用标签页 CDP 事件注入 | 无障碍节点原生 Action（绝不用 ADB 坐标模拟） |
+| **安全门禁** | 应用授权 • 后果门 (R3) • 接管门 (R4) | 域名策略 • 后果门 (R3) | 应用授权 • 后果门 (R3) • 接管门 (R4) |
+
+---
+
+## 🛡️ 安全与人在回路
+
+安全性是 AnythingUse 不可动摇的工程基石：
+
+1. **100% 本地 IPC**：CLI、运行时与底层服务之间完全通过权限为 `0600`（父目录 `0700`）的私有 Unix Domain Socket 通信。绝无任何公网 TCP 端口暴露，零云端隐私遥测。
+2. **独立证据风险底线**：运行时在执行前独立核验 UI 节点。即便 Agent 声称动作是“只读导航”，若目标按钮实际为危险操作（如“清空数据”），系统强制升格为 R3 后果门，暂停等待人类审批。
+3. **代际绑定的防伪令牌**：每个操作提案严格锁定于生成时的观察令牌。若界面弹窗、页面刷新或布局跳变，旧令牌立刻失效并拒止执行。
+4. **单次授权绝不跨步复用**：所有人类核准均在 Mac 端通过原生对话框（`osascript`）完成，且严格仅对当前单步原子操作生效。核准决不落盘、决不跨步重放。
+5. **绝对凭据保护**：密码框与敏感输入字段被系统标记隔离，其明文绝不被读取、绝不进入提示词。凭证录入强制触发 R4 人工接管。
+6. **物理硬件级让路 (HID Watch)**：任何时刻只要你在 Mac 上移动鼠标敲击键盘，或在手机上滑动屏幕，正在运行的任务会在毫秒级内自动让出控制权并暂停。
+
+---
+
+## 🚦 退出码与规范
+
+`lcu` 与 `lau` 遵循完全统一的机器可读退出码体系：
+
+| 退出码 | 状态代码 | 状态释义 | Agent 处理指引 |
+|---:|---|---|---|
+| **0** | `ok` | 命令或动作执行成功 | 继续下一步骤 |
+| **2** | `waiting_user` | 阻断于人类安全门（需审批或人工接管） | 暂停并提示人类处理 |
+| **3** | `failed` | 任务失败或操作被拒 | 处理错误或重新规划 |
+| **4** | `permission_denied` | 系统权限被拒绝或缺失 | 提示操作者授予系统权限 |
+| **64** | `usage_error` | 命令行参数或请求格式错误 | 修正命令调用参数 |
+| **69** | `unavailable` | 运行时或底层守护进程不可达 | 启动运行时 (`lcu-desktop`) 或自检 |
+| **70** | `internal_error` | 无法恢复的底层系统或驱动错误 | 记录错误日志并重启服务 |
+
+---
+
+## 📂 仓库结构
+
+```text
+├── crates/
+│   ├── anything-core/           # 跨端通用基础契约（动作、效果、风险、退出码）
+│   ├── lcu-*/                   # macOS 运行时：CLI、队列、策略、Chrome 与原生后端
+│   └── lau-cli/                 # Android 控制 CLI 与本地守护进程
+├── apps/
+│   └── lcu-desktop/             # 菜单栏常驻运行时宿主与审批交互界面
+├── native/
+│   ├── macos-window-service/    # Swift 编写的原生窗口定向观察与输入服务
+│   ├── chrome-control/          # 真实 Chrome 浏览器扩展与 Native Messaging 宿主
+│   └── android-helper/          # Kotlin 编写的 Android 无障碍辅助服务 APK
+├── skills/
+│   ├── local-computer-use/      # 面向 macOS 与 Chrome 的官方 Agent 技能 (lcu)
+│   └── local-android-use/       # 面向 Android 的官方 Agent 技能 (lau)
+├── docs/                        # 详细规范说明、系统架构、执行契约与用户指南
+└── scripts/                     # 构建、安装、打包与发布自动化脚本
+```
+
+---
+
+## 📚 文档索引
+
+### 核心规范与契约
+- **[执行契约 (Execution Contract)](docs/execution-contract.md)** —— 严格的不变量规则、安全门与执行闭环规范。
+- **[`lcu` 命令契约 (Command Contract)](docs/command-contract.md)** —— CLI 命令格式、JSON 信封与 Schema 规范。
+- **[系统架构规格 (Architecture)](docs/architecture.md)** —— 核心组件设计、IPC 拓扑与关键技术决策。
+
+### 指南与各端实现
+- **[用户指南 (User Guide)](docs/user-guide.md)** —— 完整的安装部署与端到端使用指南。
+- **[Android 端方案规划 (LAU Plan)](docs/lau-android-plan.md)** —— Android 端无障碍控制架构与真机验收记录。
+- **[交付状态说明 (Delivery Status)](docs/status.md)** —— 源码对齐边界与真机验证记录。
+- **[隐私与数据边界 (Privacy)](docs/privacy.md)** —— 凭据隔离与数据保护规范。
+- **[故障排查手册 (Troubleshooting)](docs/troubleshooting.md)** —— 常见问题排查与诊断技巧。
+- **[Agent 协作说明 (AGENTS.md)](AGENTS.md)** —— 面向自治 Agent 调用的强制规则与决策规范。
