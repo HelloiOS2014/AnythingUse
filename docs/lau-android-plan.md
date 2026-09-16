@@ -69,7 +69,7 @@
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
 | 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
-| 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | **已实现（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked`。**成功路径真机已验证；拒绝路径待一次关屏确认** |
+| 23 ✅ | ~~关屏时 `screenshot` 照常"成功"~~ **已修并验证（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked` | `main.rs` | 真机三条全过：亮屏解锁 → ok 带状态；关屏 → `screen_off`；亮屏锁屏 → `device_locked`（均未唤醒/解锁设备） |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。

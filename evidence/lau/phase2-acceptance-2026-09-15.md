@@ -328,6 +328,36 @@ APK 更新后的一个附带观察：安装新 APK 后 5 秒内 `ping` 曾为 fa
 
 （连接被拒/中断的另一条路径也带上了同一句指引。）**未做实机复现**：该错误只在"服务已禁用、旧实例 socket 尚未销毁"的窗口期出现，复现需要关掉无障碍开关。
 
+## 追加：#23 / #19 修复与验证（2026-09-15 晚）
+
+**#23 `screenshot` 屏幕状态门禁**（`crates/lau-cli/src/main.rs`）—— 三条路径真机全过：
+
+```
+亮屏解锁：lau screenshot → {"status":"ok","data":{"bytes":183661,"isInteractive":true,"keyguardLocked":false}}   exit=0  ✅
+关屏    ：lau screenshot → {"error":"screen_off: display is not interactive"}                                  exit=3  ✅
+          同时 adb dumpsys power → mWakefulness=Asleep（未被唤醒）
+亮屏锁屏：lau screenshot → {"error":"device_locked: device is locked"}                                        exit=3  ✅
+          同时 foreground → {isInteractive:true, keyguardLocked:true}（未被自动解锁）
+对照    ：同一状态下 lau dump 返回相同的 screen_off / device_locked，行为一致
+```
+
+修复前：关屏时 `screenshot` 会返回一张锁屏 PNG 并报 `ok`（exit 0）。
+
+**#19 daemon 诊断埋点**（`crates/lau-cli/src/daemon.rs`）
+
+```
+$ rm -f ~/.local/share/AnythingUse/lau/daemon.log   # 并杀掉旧 daemon 以确保用新二进制
+$ lau run … ; lau status … ; lau decide … ; lau cancel …
+$ cat ~/.local/share/AnythingUse/lau/daemon.log
+1789530125 op=ping   bytes=33
+1789530125 op=run    bytes=82
+1789530126 op=status bytes=331
+1789530126 op=decide bytes=6660      ← 距出事阈值 8192 只差约 1.5 KB
+1789530127 op=cancel bytes=279
+```
+
+只记录 `op + bytes`，**不含负载**；启动时若超过 64 KiB 即截断（`rotate_log`）。等 8192 截断复发时，这条日志能直接给出"出事那次响应多大"。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
