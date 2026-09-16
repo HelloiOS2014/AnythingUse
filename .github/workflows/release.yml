@@ -6,7 +6,8 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  # Creating the release needs write; nothing else in this workflow does.
+  contents: write
 
 jobs:
   build:
@@ -57,3 +58,16 @@ jobs:
             dist/*.dmg
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish the release
+        # Idempotent: a re-run uploads over the existing release instead of
+        # failing, so retrying a broken tag build stays safe.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.dmg --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.dmg \
+              --title "AnythingUse $GITHUB_REF_NAME" --generate-notes
+          fi
