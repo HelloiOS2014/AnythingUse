@@ -32,9 +32,24 @@ verification commands:
 ./scripts/install-dsh.sh --remove web # uninstall
 ```
 
-**Update:** re-run the same `add` (or the script) so pnpm re-fetches the ref and
-moves the pin to the newest commit; a git dependency is a snapshot of the commit
-it was installed from, not a moving branch.
+**Update:** a git dependency is a snapshot of the commit it was installed from,
+so the pin does not move on its own — and re-running the same `add` does **not**
+move it either (pnpm treats the recorded resolution as satisfying the spec).
+The pnpm-native way is:
+
+```bash
+dsh plugin --profile web update anythinguse
+```
+
+That is a graph operation, so it also needs every *other* dependency in the
+profile to resolve. A profile with a `file:`/`link:` dependency whose target no
+longer exists (or a range only prereleases satisfy) fails here for reasons
+unrelated to this bundle; fix those, or re-add with an explicit ref, which forces
+a fresh resolution:
+
+```bash
+dsh plugin --profile web add -w "github:HelloiOS2014/AnythingUse#<sha-or-branch>"
+```
 
 A profile that is already running picks a newly added bundle up on its next boot.
 
