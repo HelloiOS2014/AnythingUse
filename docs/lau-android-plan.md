@@ -55,7 +55,7 @@
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 ✅ | ~~无 helper peer 凭据校验（§4 威胁模型承诺项）~~ **已实现（2026-09-15）**：`handleClient` 读取 `LocalSocket.peerCredentials`，只接受 uid 0（root）与 2000（shell，`adb forward` 的身份），其余直接以 `forbidden_peer` 拒绝 | helper | 真机验证：加校验后 `dump`/`doctor` 等正常路径不受影响。**注意**：平台若拒绝报告凭据则放行（不因此破坏可用路径），因此这是纵深防御而非硬边界，§4 的威胁模型描述不变 |
 | 13 ✅ | ~~分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill~~ **已完成（2026-09-15）**：`install-cli.sh` 安装 `lau`（缺构建时给出提示）；`package-release.sh` 打包 `bin/lau` + `android/anythinguse-lau-helper.apk` + `install-android-helper.sh` + 两个 skill；**Android skill 定名 `local-android-use`（D4）** 并随 Pi 包/release 包分发 | `scripts/` `skills/` | 实测：`~/.local/bin/lau` 可运行、release zip 含全部 Android 产物（5.0 MB） |
-| 14 | `android-helper` 仍无测试（Kotlin 侧需要 instrumentation 或可测的纯函数抽取）；`lau-cli` 已有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类），但**无端到端自动化** | 全仓 | 回归保护以 Rust 单测 + 真机验收清单为主 |
+| 14 | `android-helper` 现有 **3 个 JVM 单测**（纯规则：peer uid 白名单、role 归一化、滚动轴/符号映射 —— 抽到 `PureRules.kt`，跑 `./scripts/test-android-helper.sh`）；**涉及 framework 状态的逻辑（dump/派生 label/节点校验）仍无自动化**，靠真机验收清单。`lau-cli` 有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类） | 全仓 | 回归保护 = Rust 单测 + Kotlin 纯规则单测 + 真机验收清单；端到端自动化仍缺 |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | **由会话令牌 + fail-closed 消化**：过期即 `stale_observation` 并要求重取（不会再误执行）。对 Agent 的操作要求是"拿到即用"，已写入 skill |
 
 **真机验收新增的差距（2026-09-15，按严重度）**

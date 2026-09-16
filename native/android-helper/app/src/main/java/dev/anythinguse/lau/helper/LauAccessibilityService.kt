@@ -128,7 +128,7 @@ class LauAccessibilityService : AccessibilityService() {
         } catch (_: Exception) {
             null
         }
-        if (peerUid != null && peerUid != 0 && peerUid != 2000) {
+        if (!PureRules.peerUidAllowed(peerUid)) {
             write(
                 writer,
                 error(JSONObject(), "forbidden_peer", "peer uid $peerUid is not allowed")
@@ -371,11 +371,7 @@ class LauAccessibilityService : AccessibilityService() {
         return parts.joinToString(" ").take(200)
     }
 
-    private fun shortRole(className: String?): String {
-        if (className.isNullOrBlank()) return "View"
-        val i = className.lastIndexOf('.')
-        return if (i >= 0) className.substring(i + 1) else className
-    }
+    private fun shortRole(className: String?): String = PureRules.shortRole(className)
 
     private fun invoke(req: JSONObject): JSONObject {
         val node = resolveNode(req, "invoke")
@@ -412,15 +408,8 @@ class LauAccessibilityService : AccessibilityService() {
         val node = resolveNode(req, "scroll")
         val dx = req.optDouble("dx", 0.0)
         val dy = req.optDouble("dy", 0.0)
-        val action = when {
-            kotlin.math.abs(dy) >= kotlin.math.abs(dx) && dy > 0 ->
-                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            kotlin.math.abs(dy) >= kotlin.math.abs(dx) && dy < 0 ->
-                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            dx > 0 -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            dx < 0 -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            else -> throw HelperException("unsupported_capability", "scroll delta is zero")
-        }
+        val action = PureRules.scrollAction(dx, dy)
+            ?: throw HelperException("unsupported_capability", "scroll delta is zero")
         if (!node.isScrollable && !hasAction(node, action)) {
             throw HelperException("unsupported_capability", "${req.optString("elementId")} has no scroll")
         }
