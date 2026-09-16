@@ -213,7 +213,7 @@ AnythingUse 为主流 Agent CLI 提供了官方原生 Skill 插件：
 | **Claude Code** | `claude plugin marketplace add HelloiOS2014/AnythingUse && claude plugin install anythinguse` |
 | **Pi** | `pi install git:github.com/HelloiOS2014/AnythingUse` *(或执行 `./scripts/install-pi.sh`)* |
 | **Grok Build** | `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust` |
-| **DeepSeek Harness（DSH）** | `./scripts/install-dsh.sh` *（或 `./scripts/install-dsh.sh <profile>`；见 [`dsh/README.md`](dsh/README.md)）* |
+| **DeepSeek Harness（DSH）** | `dsh plugin --profile <profile> add -w <repo>` *（或 `./scripts/install-dsh.sh [profile]`；见 [`dsh/README.md`](dsh/README.md)）* |
 
 ### 标准化 Agent 执行循环
 

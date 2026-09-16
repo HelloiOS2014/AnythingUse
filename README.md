@@ -213,7 +213,7 @@ AnythingUse provides first-party skills for leading agent CLI environments:
 | **Claude Code** | `claude plugin marketplace add HelloiOS2014/AnythingUse && claude plugin install anythinguse` |
 | **Pi** | `pi install git:github.com/HelloiOS2014/AnythingUse` *(or `./scripts/install-pi.sh`)* |
 | **Grok Build** | `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust` |
-| **DeepSeek Harness (DSH)** | `./scripts/install-dsh.sh` *(or `./scripts/install-dsh.sh <profile>`; see [`dsh/README.md`](dsh/README.md))* |
+| **DeepSeek Harness (DSH)** | `dsh plugin --profile <profile> add -w <repo>` *(or `./scripts/install-dsh.sh [profile]`; see [`dsh/README.md`](dsh/README.md))* |
 
 ### Standardized Agent Loop
 

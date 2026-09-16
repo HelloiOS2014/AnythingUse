@@ -8,17 +8,28 @@ that scans this repository's `skills/` directory.
 
 ## Install
 
-```bash
-# into the `web` profile (default)
-./scripts/install-dsh.sh
+The documented path is the harness's own command — it forwards to pnpm in the
+profile directory and registers the bundle itself:
 
-# into another profile
-./scripts/install-dsh.sh headless
+```bash
+# profile directories are their own pnpm workspace roots, so -w is required
+dsh plugin --profile web add -w /path/to/this/repo
+
+# if pnpm cannot re-resolve an unrelated dependency range in that profile,
+# resolve from the local store instead:
+dsh plugin --profile web add -w --offline /path/to/this/repo
 ```
 
-The script adds `anythinguse` to the profile's dependencies, lists it in
-`dsh.profile.bundles`, and prints the verification command. A profile that is
-already running picks the bundle up on its next boot.
+`./scripts/install-dsh.sh [profile]` wraps exactly that ladder — the standard
+command, then `--offline`, then (only if pnpm cannot run at all in that profile)
+a plain `link:` dependency plus symlink — and prints the verification command:
+
+```bash
+./scripts/install-dsh.sh            # the `web` profile
+./scripts/install-dsh.sh headless   # another profile
+```
+
+A profile that is already running picks the bundle up on its next boot.
 
 ## Verify
 

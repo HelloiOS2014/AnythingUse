@@ -57,17 +57,23 @@ PY
 fi
 
 echo "==> Adding $root to profile '$profile'"
-# A profile is its own pnpm workspace root, so the dependency must be declared
-# explicitly with -w; `dsh plugin` forwards these args to pnpm verbatim.
-if ! dsh plugin --profile "$profile" add -w "$root"; then
-  # pnpm resolves the whole graph on every add, so a profile whose other
-  # dependencies no longer resolve (e.g. a range that only prereleases satisfy)
-  # fails here for reasons unrelated to this bundle. A `link:` dependency plus a
-  # symlink is exactly what pnpm would have written, without touching the rest of
-  # the graph.
+# The documented path is `dsh plugin --profile <p> <pnpm args>`, which forwards to
+# pnpm in the profile directory and registers the bundle in dsh.profile.bundles
+# itself. A profile is its own pnpm workspace root, so the dependency needs -w.
+installed=0
+if dsh plugin --profile "$profile" add -w "$root"; then
+  installed=1
+elif dsh plugin --profile "$profile" add -w --offline "$root"; then
+  # pnpm re-resolves the whole graph on every add. A profile whose other
+  # dependencies no longer resolve from the registry (peer ranges such as
+  # `^0.1.5-rc.1` against published versions) fails there for reasons unrelated
+  # to this bundle; --offline resolves from the local store and lockfile instead.
+  echo "note: resolved the profile from the local store (--offline)" >&2
+  installed=1
+else
   echo "note: pnpm could not update the profile; wiring the bundle directly instead" >&2
   python3 - "$profile_dir/package.json" "$root" <<'PY'
-import json, os, pathlib, sys
+import json, pathlib, sys
 manifest_path = pathlib.Path(sys.argv[1])
 root = sys.argv[2]
 manifest = json.loads(manifest_path.read_text())
@@ -81,9 +87,13 @@ if link.is_symlink() or link.exists():
 link.symlink_to(root)
 print(f"linked {link} -> {root}")
 PY
+  installed=1
 fi
+[[ "$installed" == "1" ]] || exit 1
 
-echo "==> Listing the bundle in $profile_dir/package.json"
+echo "==> Ensuring the bundle is listed in $profile_dir/package.json"
+# `dsh plugin add` usually does this already; this keeps the step explicit and
+# idempotent for the fallback paths.
 python3 - "$profile_dir/package.json" <<'PY'
 import json, sys
 path = sys.argv[1]

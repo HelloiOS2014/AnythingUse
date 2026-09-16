@@ -21,10 +21,13 @@ operating real macOS applications and Chrome through one command surface.
     `claude plugin install anythinguse`. Update with `claude plugin update anythinguse`.
   - **Grok Build:** `grok plugin install https://github.com/HelloiOS2014/AnythingUse --trust`.
     Update with `grok plugin update`.
-  - **DeepSeek Harness (DSH):** `./scripts/install-dsh.sh [profile]` — this repository is a DSH
-    plugin bundle (`dsh/cordis.patch.yml` + `dsh/index.mjs`) that registers both skills with the
-    harness's own filesystem provider. Verify with `node scripts/test-dsh-plugin.mjs [profile]`;
-    remove with `./scripts/install-dsh.sh --remove [profile]`. See `dsh/README.md`.
+  - **DeepSeek Harness (DSH):** `dsh plugin --profile <profile> add -w <this repo>` (add `--offline`
+    when that profile's other dependencies no longer resolve from the registry), or
+    `./scripts/install-dsh.sh [profile]` for the same ladder plus verification hints. This repository
+    is a DSH plugin bundle (`dsh/cordis.patch.yml` + `dsh/index.mjs`) that registers both skills with
+    the harness's own filesystem provider, and `dsh plugin add` also lists it in
+    `dsh.profile.bundles`. Verify with `node scripts/test-dsh-plugin.mjs [profile]`; remove with
+    `./scripts/install-dsh.sh --remove [profile]`. See `dsh/README.md`.
   If the skill is missing from your toolset, read the SKILL.md directly.
 - Resolve the `lcu` binary as `$LCU_BIN`, then `lcu` on `PATH` (product:
   `./scripts/install-cli.sh` puts sibling `lcu` + `lcu-desktop` in `~/.local/bin`),
