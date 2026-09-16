@@ -90,18 +90,22 @@ struct Task {
     wait_reason: Option<String>,
     step: u32,
     observation_id: Option<String>,
-    /// Observation token the parked consequence action was bound to.
-    pending_observation: Option<String>,
     /// R4 gate: the human performs the action; nothing is stored for replay.
     takeover: bool,
+    /// Parked consequence gate: only what the human is being asked about is kept.
+    /// The proposal itself is deliberately NOT stored — approval never replays it
+    /// (plan §5.4 / D9).
+    pending_identity: Option<String>,
+    pending_brief: Option<String>,
+    /// One-time grant produced by an approval; consumed by a matching, freshly
+    /// observed proposal.
+    grant: Option<Grant>,
     elements: Value,
     image_path: Option<String>,
     last_action_summary: Option<String>,
     summary: Option<String>,
     error: Option<String>,
     touch_epoch: u64,
-    pending_action: Option<Action>,
-    pending_effect: Option<EffectClaim>,
 }
 
 /// Per-device hardware-touch watch. The epoch is keyed by serial (never one
@@ -181,6 +185,24 @@ fn watch_gate(t: &mut Task, watch: &WatchState) -> Option<&'static str> {
         return Some("taken_over");
     }
     None
+}
+
+/// One-time approval for an exact consequence (plan §5.4 / D9).
+struct Grant {
+    identity: String,
+    expires: Instant,
+}
+
+/// How long an approval stays usable for a matching fresh proposal.
+const GRANT_TTL_SECS: u64 = 300;
+
+/// Readable, credential-free identity of one consequence. A grant matches only
+/// the same app + action shape + declared effect.
+fn consequence_identity(app: &str, action: &Action, effect: Option<&EffectClaim>) -> String {
+    let kind = effect
+        .map(|e| format!("{:?}", e.kind))
+        .unwrap_or_else(|| "none".into());
+    format!("{app}|{}|{kind}", action_brief(action))
 }
 
 struct Inner {
@@ -346,16 +368,16 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         wait_reason: Some("agent_decision".into()),
         step: 0,
         observation_id: None,
-        pending_observation: None,
         takeover: false,
+        pending_identity: None,
+        pending_brief: None,
+        grant: None,
         elements: json!([]),
         image_path: None,
         last_action_summary: None,
         summary: None,
         error: None,
         touch_epoch: epoch,
-        pending_action: None,
-        pending_effect: None,
     };
     inner.lock().expect("inner").tasks.insert(id.clone(), task);
     json!({"ok": true, "data": {"task_id": id, "state": "waiting_actor"}})
@@ -538,9 +560,8 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                 t.state = "waiting_actor".into();
                 t.wait_reason = Some("takeover".into());
                 t.takeover = true;
-                t.pending_action = None;
-                t.pending_effect = None;
-                t.pending_observation = None;
+                t.pending_identity = None;
+                t.pending_brief = None;
                 let body = format!(
                     "LAU judged this action R4: {}\n\nApp: {}\nAction: {}",
                     judged.rationale,
@@ -563,32 +584,43 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                     .as_ref()
                     .map(|e| e.kind)
                     .unwrap_or(EffectKind::Unknown);
-                t.state = "waiting_actor".into();
-                t.wait_reason = Some("consequence".into());
-                t.pending_action = Some(action.clone());
-                t.pending_effect = effect.clone();
-                t.pending_observation = Some(token.clone());
-                let summary = effect
-                    .as_ref()
-                    .and_then(|e| e.summary.clone())
-                    .unwrap_or_else(|| format!("{kind:?}"));
-                let body = format!(
-                    "LAU wants to run a {} action on {}\n\n{}\n\nRisk: {}\n\nAllow? (Mac dialog — not the phone)",
-                    format!("{kind:?}").to_lowercase(),
-                    t.app,
-                    summary,
-                    judged.rationale
-                );
-                let view = task_view(t);
-                let tid = t.id.clone();
-                drop(g);
-                spawn_mac_approval(inner.clone(), tid, body);
-                return json!({
-                    "ok": false,
-                    "error": "waiting_user",
-                    "wait_reason": "consequence",
-                    "data": view
-                });
+                let identity = consequence_identity(&t.app, &action, effect.as_ref());
+                // Plan §5.4 / D9: an approval is a one-time grant for exactly this
+                // consequence, consumed by a *fresh* matching proposal. The parked
+                // proposal is never stored for replay.
+                let approved = match t.grant.take() {
+                    Some(g) if g.identity == identity && g.expires > Instant::now() => true,
+                    _ => false,
+                };
+                if !approved {
+                    t.state = "waiting_actor".into();
+                    t.wait_reason = Some("consequence".into());
+                    t.pending_identity = Some(identity);
+                    t.pending_brief = Some(action_brief(&action));
+                    let summary = effect
+                        .as_ref()
+                        .and_then(|e| e.summary.clone())
+                        .unwrap_or_else(|| format!("{kind:?}"));
+                    let body = format!(
+                        "LAU wants to run a {} action on {}\n\n{}\n\nRisk: {}\n\nAllow? (Mac dialog — not the phone)",
+                        format!("{kind:?}").to_lowercase(),
+                        t.app,
+                        summary,
+                        judged.rationale
+                    );
+                    let view = task_view(t);
+                    let tid = t.id.clone();
+                    drop(g);
+                    spawn_mac_approval(inner.clone(), tid, body);
+                    return json!({
+                        "ok": false,
+                        "error": "waiting_user",
+                        "wait_reason": "consequence",
+                        "data": view
+                    });
+                }
+                t.last_action_summary =
+                    Some("executing the approved consequence (one-time grant)".into());
             }
         }
         _ => {}
@@ -695,8 +727,9 @@ fn op_cancel(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         Some(t) => {
             t.state = "cancelled".into();
             t.wait_reason = None;
-            t.pending_action = None;
-            t.pending_effect = None;
+            t.pending_identity = None;
+            t.pending_brief = None;
+            t.grant = None;
             json!({"ok": true, "data": task_view(t)})
         }
         None => json!({"ok": false, "error": format!("unknown task {id}")}),
@@ -736,9 +769,9 @@ fn op_resume(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     t.touch_epoch = epoch;
     // Resume never continues a stored action or a pre-pause frame.
     t.observation_id = None;
-    t.pending_action = None;
-    t.pending_effect = None;
-    t.pending_observation = None;
+    t.pending_identity = None;
+    t.pending_brief = None;
+    t.grant = None;
     t.takeover = false;
     t.error = None;
     t.last_action_summary = Some("resumed; re-observe with the next decide".into());
@@ -758,19 +791,16 @@ fn op_approve(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
             "error": "takeover in progress — do it on the phone; the Mac dialog is the only control"
         });
     }
-    if t.wait_reason.as_deref() != Some("consequence") || t.pending_action.is_none() {
+    if t.wait_reason.as_deref() != Some("consequence") || t.pending_identity.is_none() {
         return json!({"ok": false, "error": "no pending consequence grant"});
     }
-    let summary = t
-        .pending_effect
-        .as_ref()
-        .and_then(|e| e.summary.clone())
+    let brief = t
+        .pending_brief
+        .clone()
         .unwrap_or_else(|| "pending action".into());
     let body = format!(
-        "LAU pending {} on {}\n\n{}\n\nAllow? (Mac dialog — not the phone)",
-        t.app,
-        t.id,
-        summary
+        "LAU pending on {}\n\n{}\n\nAllow? (Mac dialog — not the phone)",
+        t.app, brief
     );
     let tid = t.id.clone();
     drop(g);
@@ -778,57 +808,44 @@ fn op_approve(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     json!({"ok": true, "data": {"opened": "mac_dialog"}})
 }
 
+/// Consequence gate (plan §5.4 / D9). Approving produces a one-time grant for
+/// exactly that consequence and forces a fresh observation; the parked proposal
+/// is **never** executed here.
 fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
     thread::spawn(move || {
         let allowed = mac_dialog_allow(&body);
-        let (serial, token, action) = {
-            let mut g = inner.lock().expect("inner");
-            let Some(t) = g.tasks.get_mut(&task_id) else {
-                return;
-            };
-            if t.wait_reason.as_deref() != Some("consequence") {
-                return;
-            }
-            if !allowed {
-                t.state = "failed".into();
-                t.error = Some("user denied on Mac dialog".into());
-                t.wait_reason = None;
-                t.pending_action = None;
-                t.pending_effect = None;
-                return;
-            }
-            let action = match t.pending_action.take() {
-                Some(a) => a,
-                None => return,
-            };
-            t.pending_effect = None;
-            let token = match t.pending_observation.take() {
-                Some(token) => token,
-                None => return,
-            };
-            (t.serial.clone(), token, action)
+        let mut g = match inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
         };
-        match helper_call(&serial, &token, &action) {
-            Ok(op) => {
-                let mut g = inner.lock().expect("inner");
-                let epoch = watch_state(&g, &serial).epoch;
-                if let Some(t) = g.tasks.get_mut(&task_id) {
-                    t.step += 1;
-                    t.last_action_summary = Some(format!("{op} ok (approved on Mac)"));
-                    t.state = "waiting_actor".into();
-                    t.wait_reason = Some("agent_decision".into());
-                    t.touch_epoch = epoch;
-                }
-            }
-            Err(e) => {
-                let mut g = inner.lock().expect("inner");
-                if let Some(t) = g.tasks.get_mut(&task_id) {
-                    t.state = "failed".into();
-                    t.error = Some(format!("{e:#}"));
-                    t.wait_reason = None;
-                }
-            }
+        let Some(t) = g.tasks.get_mut(&task_id) else {
+            return;
+        };
+        if t.wait_reason.as_deref() != Some("consequence") {
+            return;
         }
+        if !allowed {
+            t.state = "failed".into();
+            t.error = Some("user denied on Mac dialog".into());
+            t.wait_reason = None;
+            t.pending_identity = None;
+            t.pending_brief = None;
+            return;
+        }
+        let identity = match t.pending_identity.take() {
+            Some(identity) => identity,
+            None => return,
+        };
+        t.pending_brief = None;
+        t.grant = Some(Grant {
+            identity,
+            expires: Instant::now() + Duration::from_secs(GRANT_TTL_SECS),
+        });
+        t.observation_id = None;
+        t.state = "waiting_actor".into();
+        t.wait_reason = Some("agent_decision".into());
+        t.last_action_summary =
+            Some("approved; re-observe and re-propose (one-time grant)".into());
     });
 }
 
@@ -918,9 +935,8 @@ fn spawn_mac_takeover(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
             t.takeover = false;
             t.state = "waiting_actor".into();
             t.wait_reason = Some("agent_decision".into());
-            t.pending_action = None;
-            t.pending_effect = None;
-            t.pending_observation = None;
+            t.pending_identity = None;
+            t.pending_brief = None;
             t.observation_id = None;
             t.touch_epoch = epoch;
             t.last_action_summary = Some("takeover done by the human; re-observe".into());
@@ -928,33 +944,6 @@ fn spawn_mac_takeover(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
     });
 }
 
-fn helper_call(serial: &str, token: &str, action: &Action) -> Result<&'static str> {
-    let (op, extra) = match action {
-        Action::Semantic(SemanticAction::Invoke { element_id }) => (
-            "invoke",
-            json!({"elementId": element_id, "observationId": token}),
-        ),
-        Action::Semantic(SemanticAction::SetValue { element_id, value }) => (
-            "set_value",
-            json!({"elementId": element_id, "observationId": token, "text": value}),
-        ),
-        Action::Semantic(SemanticAction::Scroll {
-            element_id: Some(eid),
-            delta_x,
-            delta_y,
-        }) => (
-            "scroll",
-            json!({"elementId": eid, "observationId": token, "dx": delta_x, "dy": delta_y}),
-        ),
-        Action::Semantic(SemanticAction::Focus { element_id }) => (
-            "invoke",
-            json!({"elementId": element_id, "observationId": token}),
-        ),
-        _ => bail!("action cannot be approved for helper execution"),
-    };
-    helper_rpc(serial, helper::wrap_op(op, extra)).and_then(helper::unwrap_ok)?;
-    Ok(op)
-}
 
 /// Start (or restart) the per-device `getevent` watch and wait until it is
 /// actually attached. Fail closed: while the watch is not live, no agent task is
@@ -1060,7 +1049,9 @@ mod tests {
             wait_reason: Some("agent_decision".into()),
             step: 0,
             observation_id: Some("abcd1234:1".into()),
-            pending_observation: None,
+            pending_identity: None,
+            pending_brief: None,
+            grant: None,
             takeover: false,
             elements: json!([]),
             image_path: None,
@@ -1068,8 +1059,6 @@ mod tests {
             summary: None,
             error: None,
             touch_epoch,
-            pending_action: None,
-            pending_effect: None,
         }
     }
 
@@ -1081,8 +1070,54 @@ mod tests {
         }
     }
 
-    fn empty_inner() -> Inner {
-        Inner {
+    #[test]
+    fn a_grant_matches_only_the_same_consequence() {
+        // Plan §5.4 / D9: an approval is bound to exactly one consequence.
+        let invoke_e1 = Action::Semantic(anything_core::SemanticAction::Invoke {
+            element_id: "e1".into(),
+        });
+        let invoke_e2 = Action::Semantic(anything_core::SemanticAction::Invoke {
+            element_id: "e2".into(),
+        });
+        let base = consequence_identity(
+            "com.android.settings",
+            &invoke_e1,
+            Some(&EffectClaim::new(EffectKind::ExternalSubmit, "send")),
+        );
+        // Same app, action and declared effect → same identity (the grant hits).
+        assert_eq!(
+            base,
+            consequence_identity(
+                "com.android.settings",
+                &invoke_e1,
+                Some(&EffectClaim::new(EffectKind::ExternalSubmit, "send")),
+            )
+        );
+        // A different element, or a different declared effect, is a different
+        // consequence and must be gated again.
+        assert_ne!(
+            base,
+            consequence_identity(
+                "com.android.settings",
+                &invoke_e2,
+                Some(&EffectClaim::new(EffectKind::ExternalSubmit, "send")),
+            )
+        );
+        assert_ne!(
+            base,
+            consequence_identity(
+                "com.android.settings",
+                &invoke_e1,
+                Some(&EffectClaim::new(EffectKind::Destructive, "send")),
+            )
+        );
+        assert_ne!(
+            base,
+            consequence_identity("com.other.app", &invoke_e1, None)
+        );
+    }
+
+    fn empty_inner() -> Inner {        Inner {
             tasks: HashMap::new(),
             last_activity: Instant::now(),
             watches: HashMap::new(),
