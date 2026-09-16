@@ -514,6 +514,44 @@ fn screenshot(json: bool, out: Option<PathBuf>, cli_serial: Option<&str>) -> Res
         }
     };
 
+    // Plan §5.3: never hand back a lock-screen frame as if it were a live view.
+    // `foreground` answers in every screen state and never wakes the device.
+    let state = match helper_rpc(&serial, helper::wrap_op("foreground", json!({})))
+        .and_then(helper::unwrap_ok)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if json {
+                println!("{}", json!({"status": "error", "error": msg}));
+            } else {
+                eprintln!("lau: {msg}");
+            }
+            return Ok(3);
+        }
+    };
+    let is_interactive = state
+        .get("isInteractive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let keyguard_locked = state
+        .get("keyguardLocked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    for (blocked, code) in [
+        (!is_interactive, "screen_off: display is not interactive"),
+        (keyguard_locked, "device_locked: device is locked"),
+    ] {
+        if blocked {
+            if json {
+                println!("{}", json!({"status": "error", "error": code}));
+            } else {
+                eprintln!("lau: {code}");
+            }
+            return Ok(3);
+        }
+    }
+
     let bytes = run_adb_bytes(Some(&serial), &["exec-out", "screencap", "-p"])?;
     if bytes.is_empty() || bytes.len() < 8 || &bytes[..4] != b"\x89PNG" {
         if json {
@@ -545,6 +583,8 @@ fn screenshot(json: bool, out: Option<PathBuf>, cli_serial: Option<&str>) -> Res
                     "image_path": path.display().to_string(),
                     "bytes": bytes.len(),
                     "sha256": sha,
+                    "isInteractive": is_interactive,
+                    "keyguardLocked": keyguard_locked,
                 }
             })
         );

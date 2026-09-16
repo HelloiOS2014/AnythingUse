@@ -20,6 +20,9 @@ use crate::{helper_rpc, parse_devices, resolve_target, run_adb, run_adb_bytes, T
 
 const IDLE_DEFAULT_SECS: u64 = 60;
 
+/// Diagnostic log bound (plan §6).
+const LOG_MAX_BYTES: u64 = 64 * 1024;
+
 pub fn sock_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home).join(".local/share/AnythingUse/lau/lau.sock")
@@ -190,6 +193,7 @@ pub fn daemon_main() -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
+    rotate_log();
     let _ = fs::remove_file(&path);
     let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
     listener.set_nonblocking(true)?;
@@ -243,8 +247,37 @@ fn handle_client(mut stream: UnixStream, inner: &Arc<Mutex<Inner>>) -> Result<()
         "approve" => op_approve(&req, inner),
         _ => json!({"ok": false, "error": "unknown op"}),
     };
-    stream.write_all(format!("{resp}\n").as_bytes())?;
+    let payload = format!("{resp}\n");
+    // Plan §6: op + byte length only (never the payload) so a recurrence of the
+    // 8192-byte truncation (§0 #19) leaves a trace.
+    log_response(op, payload.len());
+    stream.write_all(payload.as_bytes())?;
     Ok(())
+}
+
+/// Append one diagnostic line. Bounded: the file is truncated at daemon start
+/// once it grows past [`LOG_MAX_BYTES`].
+fn log_response(op: &str, bytes: usize) {
+    let path = sock_path().with_file_name("daemon.log");
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{secs} op={op} bytes={bytes}\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+}
+
+fn rotate_log() {
+    let path = sock_path().with_file_name("daemon.log");
+    if let Ok(md) = std::fs::metadata(&path) {
+        if md.len() > LOG_MAX_BYTES {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
