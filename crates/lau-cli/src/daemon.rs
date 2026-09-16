@@ -574,6 +574,8 @@ fn decide_view(t: &Task) -> Value {
         },
         "elements": t.elements,
         "image_path": t.image_path,
+        // Plan §5.3: observation must report screenshot availability.
+        "screenshot": t.image_path.is_some(),
         "last_action_summary": t.last_action_summary,
         "ui_state": "captured",
     })

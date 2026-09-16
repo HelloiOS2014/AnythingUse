@@ -6,8 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.PowerManager
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.net.LocalServerSocket
@@ -192,11 +194,19 @@ class LauAccessibilityService : AccessibilityService() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         val dm = resources.displayMetrics
+        val display = try {
+            (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+                .getDisplay(Display.DEFAULT_DISPLAY)
+        } catch (_: Exception) {
+            null
+        }
         return JSONObject()
             .put("isInteractive", pm.isInteractive)
             .put("keyguardLocked", km.isKeyguardLocked)
             .put("screenWidth", dm.widthPixels)
             .put("screenHeight", dm.heightPixels)
+            .put("rotation", display?.rotation ?: -1)
+            .put("displayId", display?.displayId ?: -1)
     }
 
     private fun dump(req: JSONObject): JSONObject {
@@ -213,6 +223,16 @@ class LauAccessibilityService : AccessibilityService() {
             throw HelperException("forbidden_package", "refusing to automate the helper itself")
         }
 
+        // Plan §5.3 / finding #22: the observation must carry real window identity.
+        // `AccessibilityWindowInfo.title` is the usable title; the root node's
+        // contentDescription is empty on this platform.
+        val rootWindowId = root.windowId
+        val windowTitle = try {
+            windows.firstOrNull { it.id == rootWindowId }?.title?.toString() ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+
         val dm = resources.displayMetrics
         val sw = dm.widthPixels.coerceAtLeast(1).toDouble()
         val sh = dm.heightPixels.coerceAtLeast(1).toDouble()
@@ -225,7 +245,9 @@ class LauAccessibilityService : AccessibilityService() {
         val data = screenState()
             .put("observationId", "$sessionId:$generation")
             .put("packageName", pkg)
-            .put("windowTitle", root.contentDescription?.toString() ?: "")
+            .put("windowId", rootWindowId)
+            .put("windowTitle", windowTitle)
+            .put("capturedAtMs", System.currentTimeMillis())
             .put("elements", collected)
         return ok(req, data)
     }
