@@ -48,15 +48,14 @@
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
 | 5 ✅ | ~~无 app_access 门~~ **已实现并全路径真机验证（2026-09-15）**：身份 = 包名 + 签名证书 SHA-256（helper `app_identity`）；按 D8② 拦 `decide`/`act`；三按钮 Mac 对话框；`always_allow` 持久化到 `<数据根>/app_permissions.json`（0600），`lau permissions` 列出、`--revoke <key>` 撤销 | daemon / helper | 门触发、真实身份、allow_once 不落盘、Deny→failed、always_allow 持久化 + 静默放行、revoke 幂等 —— 全部真机通过 |
 | 6 ✅ | ~~无 Android 证据层 guard（§7）~~ **已实现并真机验证（2026-09-15）** | `daemon.rs` | `crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降）；12 个单测 + 真机：密码框 → R4、谎报 `navigate` 的「卸载」仍到达 R3 门（验收 15） |
-| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
+| 7 ✅ | ~~R4 与 R3 同路：走普通 consequence 对话框~~ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 ✅ | ~~consequence 授权无绑定、无一次性消费与过期；批准后**重放**已存动作~~ **已修并真机验证（2026-09-15）**：提案**不再存储**（`pending_identity`/`pending_brief` 只留给人看的信息），Allow 只生成一次性 `Grant{identity,expires=300s}`；仅当**新观察**下的提案与身份完全匹配才消费并执行 | `daemon.rs` | 与 mac 端「批准不重放」一致：真机用旧令牌 act 被拒 `stale observation_id`；坐标那次误点 Allow 也未执行任何动作 |
 | 9 ✅ | ~~无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误~~ **已实现并真机验证（2026-09-15）**：helper 的语义错误码与传输类错误分离（`is_helper_semantic_error`）；传输类 → `indeterminate:true`、作废观察、保持可继续、**绝不重试** | `daemon.rs` | 真机：`am crash` 后立刻 `act` → `indeterminate: … do not resend it`，任务 `waiting_actor` + `observation_id:null`；helper 2s 后恢复、`decide` 立即可用 |
 | 10 ✅ | ~~无 per-serial 队列 / forward 隔离~~ **已实现（2026-09-15）**：`serial_is_busy` + `promote_next_for_serial`，每个请求入口做一次 `sweep_queues`；同设备第二个任务进 `queued`，终态后自动提升 | `daemon.rs` | 真机（单设备）验证通过；转发隔离本就按 serial 键控端口。**双设备并行未验**（只有一台设备） |
-| 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
+| 11 ⏸ | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 ✅ | ~~无 helper peer 凭据校验（§4 威胁模型承诺项）~~ **已实现（2026-09-15）**：`handleClient` 读取 `LocalSocket.peerCredentials`，只接受 uid 0（root）与 2000（shell，`adb forward` 的身份），其余直接以 `forbidden_peer` 拒绝 | helper | 真机验证：加校验后 `dump`/`doctor` 等正常路径不受影响。**注意**：平台若拒绝报告凭据则放行（不因此破坏可用路径），因此这是纵深防御而非硬边界，§4 的威胁模型描述不变 |
 | 13 ✅ | ~~分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill~~ **已完成（2026-09-15）**：`install-cli.sh` 安装 `lau`（缺构建时给出提示）；`package-release.sh` 打包 `bin/lau` + `android/anythinguse-lau-helper.apk` + `install-android-helper.sh` + 两个 skill；**Android skill 定名 `local-android-use`（D4）** 并随 Pi 包/release 包分发 | `scripts/` `skills/` | 实测：`~/.local/bin/lau` 可运行、release zip 含全部 Android 产物（5.0 MB） |
-| 14 | `android-helper` 现有 **3 个 JVM 单测**（纯规则：peer uid 白名单、role 归一化、滚动轴/符号映射 —— 抽到 `PureRules.kt`，跑 `./scripts/test-android-helper.sh`）；**涉及 framework 状态的逻辑（dump/派生 label/节点校验）仍无自动化**，靠真机验收清单。`lau-cli` 有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类） | 全仓 | 回归保护 = Rust 单测 + Kotlin 纯规则单测 + 真机验收清单；端到端自动化仍缺 |
-| 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | **由会话令牌 + fail-closed 消化**：过期即 `stale_observation` 并要求重取（不会再误执行）。对 Agent 的操作要求是"拿到即用"，已写入 skill |
+| 14 🟡 | `android-helper` 现有 **3 个 JVM 单测**（纯规则：peer uid 白名单、role 归一化、滚动轴/符号映射 —— 抽到 `PureRules.kt`，跑 `./scripts/test-android-helper.sh`）；**涉及 framework 状态的逻辑（dump/派生 label/节点校验）仍无自动化**，靠真机验收清单。`lau-cli` 有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类） | 全仓 | 回归保护 = Rust 单测 + Kotlin 纯规则单测 + 真机验收清单；端到端自动化仍缺 |
 
 **真机验收新增的差距（2026-09-15，按严重度）**
 
@@ -64,14 +63,15 @@
 |---|---|---|---|
 | 15 ✅ | ~~**`observationId` 不持久、无会话身份**~~ **已修（2026-09-15）**：观察令牌改为 `<sessionId>:<generation>`，实例重建即会话失效 | helper / daemon | 已按 §4 实现，验收第 10 条真机通过（数字撞车仍被拒） |
 | 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
-| 17 | 🟠 **HyperOS 曾在"杀进程之后"自行关闭无障碍服务**（机主确认未操作）；**触发条件仍未确证** | 系统 / 产品 | 两次对照实验：`am crash` 后**有时**自关、**有时**不自关；`adb reboot` 后**不自关**。可确定的是"重启后首次解锁前 helper 无法运行"（凭据加密存储）。对策见 §9：`enabled` 为唯一门禁 + 引导 blocker + 开机先解锁 |
+| 17 🟠 | **HyperOS 曾在"杀进程之后"自行关闭无障碍服务**（机主确认未操作）；**触发条件仍未确证** | 系统 / 产品 | 两次对照实验：`am crash` 后**有时**自关、**有时**不自关；`adb reboot` 后**不自关**。可确定的是"重启后首次解锁前 helper 无法运行"（凭据加密存储）。对策见 §9：`enabled` 为唯一门禁 + 引导 blocker + 开机先解锁 |
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
-| 19 | 🟡 **daemon 响应传输异常（已知限制）**：观测两次 —— 8192 字节截断、0 字节空响应（`EOF … column 0`），均"重试即成功" | daemon / CLI | **已缓解 + 已埋点（2026-09-15）**：① CLI 对**幂等**操作（`decide`/`status`/`result`/`cancel`/`permissions*`）在传输类错误上**自动重试一次**，**写路径（`act`/`run`）绝不重试**（§4）；② daemon 把每次响应的 `op + bytes` 写入 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）。根因未确证（0 字节那次削弱了"固定 8 KiB 边界"的假设），保留为**已知限制**继续观察 |
+| 19 🟡 | **daemon 响应传输异常（已知限制）**：观测两次 —— 8192 字节截断、0 字节空响应（`EOF … column 0`），均"重试即成功" | daemon / CLI | **已缓解 + 已埋点（2026-09-15）**：① CLI 对**幂等**操作（`decide`/`status`/`result`/`cancel`/`permissions*`）在传输类错误上**自动重试一次**，**写路径（`act`/`run`）绝不重试**（§4）；② daemon 把每次响应的 `op + bytes` 写入 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）。根因未确证（0 字节那次削弱了"固定 8 KiB 边界"的假设），保留为**已知限制**继续观察 |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
+| 21 🟡 | `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | **由会话令牌 + fail-closed 消化**：过期即 `stale_observation` 并要求重取（不会再误执行）。对 Agent 的操作要求是"拿到即用"，已写入 skill |
 | 22 ✅ | ~~dump 缺窗口身份~~ **已修并真机验证（2026-09-15）**：helper 改用 `AccessibilityWindowInfo.title` + `root.windowId`，并补 `capturedAtMs` / `rotation` / `displayId`；daemon 的 `decide` 增加 `screenshot: bool` | helper / daemon | 真机实测 `{"windowId":9381,"windowTitle":"应用信息","capturedAtMs":…,"rotation":0,"displayId":0}` —— 验收 P2-2 的「包/窗口身份」与 §5.3 字段清单现已齐全 |
 | 23 ✅ | ~~关屏时 `screenshot` 照常"成功"~~ **已修并验证（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked` | `main.rs` | 真机三条全过：亮屏解锁 → ok 带状态；关屏 → `screen_off`；亮屏锁屏 → `device_locked`（均未唤醒/解锁设备） |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
-| 25 | 🟡 **bounds 复核在列表动画期间会拒绝动作**（真机遇到一次：连续滚动时 `stale_observation: node e1 moved or resized since the dump`） | helper | 设计内的 fail-closed，但会带来"重试一次"的操作成本；已写入 troubleshooting。若实测过于频繁，再评估 D7 的容差或对可滚动容器放宽 |
+| 25 🟡 | **bounds 复核在列表动画期间会拒绝动作**（真机遇到一次：连续滚动时 `stale_observation: node e1 moved or resized since the dump`） | helper | 设计内的 fail-closed，但会带来"重试一次"的操作成本；已写入 troubleshooting。若实测过于频繁，再评估 D7 的容差或对可滚动容器放宽 |
 | 26 ✅ | ~~app access 被拒后，后续 `decide` 会把已 `failed` 的任务**复活**成新的门并再弹一次对话框~~ **已修（2026-09-15，真机发现）**：门在建立前先检查终态，终态任务一律不再产生新门；新增回归单测 | `daemon.rs` | 拒绝是终态，不会被下一次调用推翻 |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
