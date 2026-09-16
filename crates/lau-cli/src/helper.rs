@@ -44,12 +44,21 @@ pub fn rpc(
     stream.write_all(line.as_bytes())?;
     let mut reader = BufReader::new(stream);
     let mut resp = String::new();
-    reader.read_line(&mut resp).context("helper closed the connection")?;
+    reader.read_line(&mut resp).with_context(|| {
+        format!("helper closed the connection — {HELPER_DOWN_HINT}")
+    })?;
     if resp.trim().is_empty() {
-        bail!("helper returned an empty response");
+        // Plan §5.5: the socket can still be accepted by a stale instance after
+        // the accessibility service is disabled. Say what to do about it.
+        bail!("helper accepted the connection but sent no response — {HELPER_DOWN_HINT}");
     }
     serde_json::from_str(resp.trim()).context("helper response is not JSON")
 }
+
+/// Actionable guidance shared by the "helper is not really there" errors.
+const HELPER_DOWN_HINT: &str =
+    "the AccessibilityService is probably disabled or restarting; run `lau doctor --json` \
+     and re-enable Settings → Accessibility → AnythingUse LAU";
 
 pub fn request_id() -> String {
     let nanos = std::time::SystemTime::now()

@@ -319,7 +319,7 @@ fn helper_status(serial: &str) -> (Value, Vec<String>) {
     let enabled =
         enabled_raw.contains(helper::PACKAGE) || enabled_raw.contains(helper::SERVICE);
     let dumpsys = run_adb(Some(serial), &["shell", "dumpsys", "accessibility"]).unwrap_or_default();
-    let bound = dumpsys.contains("LauAccessibilityService");
+    let bound = bound_from_dumpsys(&dumpsys);
     let ping = helper_rpc(serial, helper::wrap_op("ping", json!({})))
         .ok()
         .and_then(|v| helper::unwrap_ok(v).ok())
@@ -335,15 +335,59 @@ fn helper_status(serial: &str) -> (Value, Vec<String>) {
     } else if !ping {
         blockers.push("helper socket not responding — toggle AnythingUse LAU off/on".into());
     }
+    // Plan §5.5: `enabled` gates; `bound`/`ping` are diagnostics. A live socket
+    // with the service disabled is a stale instance, not health.
+    let mut notes: Vec<String> = Vec::new();
+    if !enabled && ping {
+        notes.push(
+            "helper socket still answers while the service is disabled (stale instance) — \
+             `enabled` is authoritative"
+                .into(),
+        );
+    }
+    if enabled && !bound {
+        notes.push(
+            "service is enabled but does not appear in `dumpsys accessibility` Bound services \
+             (may still be binding)"
+                .into(),
+        );
+    }
     let value = json!({
         "installed": installed,
         "enabled": enabled,
         "bound": bound,
         "ping": ping,
+        "notes": notes,
         "blockers": blockers,
     });
     (value, blockers)
 }
+
+/// `bound` must come from the `Bound services:` block only: a whole-dumpsys
+/// substring match also hits the accessibility *button* entry, which survives
+/// the service being disabled (finding #20). The block is multi-line and lists
+/// services by `android:label`, so both the component id and the label count.
+fn bound_from_dumpsys(dumpsys: &str) -> bool {
+    let mut in_block = false;
+    for line in dumpsys.lines() {
+        let t = line.trim_start();
+        if t.starts_with("Bound services:") {
+            in_block = true;
+        } else if in_block
+            && (t.starts_with("Enabled services:") || t.starts_with("Binding services:"))
+        {
+            in_block = false;
+        }
+        if in_block && (t.contains(helper::PACKAGE) || t.contains(HELPER_SERVICE_LABEL)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The service's `android:label` (see `native/android-helper/.../strings.xml`);
+/// `dumpsys accessibility` prints bound services by label, not by component.
+const HELPER_SERVICE_LABEL: &str = "AnythingUse LAU";
 
 fn doctor(json: bool, cli_serial: Option<&str>) -> Result<i32> {
     let version_raw = match run_adb(None, &["version"]) {
@@ -754,5 +798,39 @@ fn main() {
             eprintln!("lau: {:#}", e);
             std::process::exit(EXIT_INTERNAL);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bound_comes_from_the_bound_services_block_only() {
+        // Verbatim shape of `dumpsys accessibility` on the test device
+        // (Xiaomi 2211133C / Android 16), with the service DISABLED: the button
+        // entry still names our component, the Bound services block does not.
+        let disabled = concat!(
+            "     button:{dev.anythinguse.lau.helper/dev.anythinguse.lau.helper.LauAccessibilityService, ",
+            "com.android.settings/com.android.settings.accessibility.accessibilitymenu.AccessibilityMenuService}\n",
+            "     Bound services:{Service[label=无障碍功能菜单, feedbackType[FEEDBACK_GENERIC], capabilities=8, eventTypes=, notificationTimeout=0, requestA11yBtn=true]}\n",
+            "     Enabled services:{{com.android.settings/com.android.settings.accessibility.accessibilitymenu.AccessibilityMenuService}}\n",
+            "     Binding services:{}\n",
+        );
+        assert!(!bound_from_dumpsys(disabled));
+
+        // Same tool, service ENABLED: the block is multi-line and names our
+        // service by its android:label.
+        let enabled = concat!(
+            "     button:{dev.anythinguse.lau.helper/dev.anythinguse.lau.helper.LauAccessibilityService}\n",
+            "     Bound services:{Service[label=无障碍功能菜单, feedbackType[FEEDBACK_GENERIC], capabilities=8, eventTypes=, notificationTimeout=0, requestA11yBtn=true], \n",
+            "                     Service[label=AnythingUse LAU, feedbackType[FEEDBACK_GENERIC], capabilities=33]}\n",
+            "     Enabled services:{{com.android.settings/com.android.settings.accessibility.accessibilitymenu.AccessibilityMenuService}, {dev.anythinguse.lau.helper/dev.anythinguse.lau.helper.LauAccessibilityService}}\n",
+            "     Binding services:{}\n",
+        );
+        assert!(bound_from_dumpsys(enabled));
+
+        assert!(!bound_from_dumpsys(""));
+        assert!(!bound_from_dumpsys("no bound services line at all\n"));
     }
 }
