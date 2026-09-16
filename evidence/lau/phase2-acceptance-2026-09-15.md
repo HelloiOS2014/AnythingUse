@@ -247,8 +247,33 @@ lau: daemon response is not JSON: EOF while parsing a string at line 1 column 81
 - 影响：Agent 的 `decide`/`act` 循环会偶发中断（exit 70 = 内部错误）；`decide --wait` **不会**重试该错误（它是硬错误，不是"暂停"）。
 - 建议（**待评审，未实施**）：传输改为显式分帧（长度前缀或读到 EOF）；或在 daemon 侧记录每次响应的字节数，便于下次复发时定位。
 
+## 追加：#15 / #16 修复后的真机验收（2026-09-15 晚）
+
+修复内容：helper 生成随机会话 + 观察令牌改为 `<sessionId>:<generation>`；`resolveNode` 落地 §5.2 的 7 步校验（含 bounds 容差 0.5%）。
+helper APK 重新构建并安装（`scripts/install-android-helper.sh` → Success），Rust 侧 `cargo test -p lau-cli` 5/5 通过。
+
+| 断言 | 关键操作 | 结果 |
+|---|---|---|
+| 10 会话隔离 | `am crash` 重建实例：PID 32256→19168、会话 `65a49aa8`→`185f2569`、**代次又是 1**；用旧令牌 `65a49aa8:1` 提交 | ✅ `stale_observation: observation belongs to session 65a49aa8, current is 185f2569`，exit 3 |
+| 10 对照 | 同一元素换新令牌 `185f2569:1` | ✅ `{"performed":"invoke"}` exit 0（证明拒绝确因会话，而非其他原因） |
+| 11 节点身份复核 | dump → `invoke` 改变 UI → 用同一旧令牌再对 `e2` 提交 | ✅ `stale_observation: node e2 failed refresh`，exit 3，且页面未被改动 |
+| 12 能力复核 | 对只声明 `focus` 的 `e2` 调 `set_value` | ✅ `unsupported_capability: e2 did not advertise set_value`，exit 3 |
+| 13 回归 | 正常 `invoke`（返回） | ✅ exit 0 |
+| 13 回归 | 搜索页 `set_value` 写入 `你好LCU` | ✅ exit 0；重 dump 得到 `value == 你好LCU` |
+| 附加 | 畸形令牌 `garbage` | ✅ `protocol_error: malformed observationId (want <session>:<generation>)`，exit 3 |
+
+### 过程事故（如实记录）
+
+- 寻找"设置搜索框"时，我按**位置**选了设置首页第一个可 `invoke` 的元素，实际打开的是**小米账号**登录页（`com.xiaomi.account`），紧接着 `set_value` 把测试文本 `你好LCU` 写进了**账号输入框**。
+- **未造成提交**：`下一步`（e8）与"已阅读并同意…"（e7）**从未被 invoke**（当时查找的"清空/取消"元素不存在，两次 invoke 都没有执行）；随后 `invoke 返回` 退出，页面已无残留输入，前台回到 `com.android.settings`。
+- 根因正是发现 #18（可点行没有 label，只能按位置猜）—— 这条发现由此获得一次真实事故佐证。
+
+### #17 复现尝试（未成功）
+
+- 本次 `am crash` 之后，无障碍服务**没有被系统关闭**（`enabled: true`，doctor 四态全绿，会话正常切换）。
+- 因此 #17 的触发条件**仍未确证**：之前那次"自行关闭"既可能由 `am crash` 引起，也可能由关屏/亮屏或设置页交互引起。要定论需要更可控的复现（或 logcat 权限）。
+
 ## 未完成项（需机主配合）
 
-1. #1 blocker 路径：在手机上临时关闭「AnythingUse LAU」无障碍开关 → 抓 doctor blocker → 再打开。
-2. #6 锁屏/灭屏：按电源键关屏 → 抓 `screen_off`；再按一次亮屏停在锁屏 → 抓 `device_locked`；并确认任务不会自动唤醒。
-3. #7 后半：`adb reboot` 后 doctor 全绿（重启会中断手机使用，需明确同意）。
+1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
+2. #7 后半：`adb reboot` 后 doctor 全绿（重启会中断手机使用，需明确同意）。

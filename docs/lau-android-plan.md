@@ -61,9 +61,9 @@
 
 | # | 差距 | 位置 | 影响 |
 |---|---|---|---|
-| 15 | 🔴 **`observationId` 不持久、无会话身份**：`generation` 是服务实例内计数器，实例重建即归零（实测**同一进程** PID 32256 不变、代次 22→1） | helper | 旧观察在代次碰撞后会被当成"当前"，动作可能落到与观察无关的元素上。**修复方案已定：§4 观察身份 + §5.2 校验顺序（待实现）** |
-| 16 | 🔴 helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**：只查代次、下标、`refresh()`、自身包名 | helper | 与 #15 叠加 ⇒ 动作可能落到别的元素。**修复方案已定：§5.2 第 4–6 步（待实现，容差待定 D7）** |
-| 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开 |
+| 15 ✅ | ~~**`observationId` 不持久、无会话身份**~~ **已修（2026-09-15）**：观察令牌改为 `<sessionId>:<generation>`，实例重建即会话失效 | helper / daemon | 已按 §4 实现，验收第 10 条真机通过（数字撞车仍被拒） |
+| 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
+| 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
 | 18 | 🟠 **可点元素与 label 分离**：能 `invoke` 的容器无 label，带 label 的节点多数不可 `invoke` | helper / daemon | Agent 无法把"点开某条目"直接映射成一个 element id（mac 侧由 Runtime 解析，lau 无等价机制） |
 | 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
 | 20 | 🟠 doctor 判据不可靠：`bound` 恒为真（匹配到无障碍快捷按钮条目）、`ping` 有滞后窗口 | `main.rs` | 四态里**只有 `enabled` 可信**，其余只能当诊断 |
@@ -72,7 +72,7 @@
 | 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | Agent 若只看截图会拿到无意义画面 |
 | 24 | 🟡 服务被禁用后 socket 仍可连接但返回空响应（`helper returned an empty response`） | daemon / helper | 用户得不到可行动的指引 |
 
-**✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿）。
+**✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
 
 **口径澄清（2026-09-15，已由项目所有者确认）**：审批**只在 Mac**、**禁止任何手机弹窗**（手机弹窗会误触发 getevent 接管，操作者也不在看手机）。§5.4 与 D6 从始至终如此规定；Phase 3 验收第 5 条原先误写为「设备对话框」，已统一为 Mac 对话框。实现 app_access 门时必须遵守这一点。
 
@@ -218,10 +218,10 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   7. 有语义能力时提交坐标 → `semantic_action_required`
   8. 双设备接入：per-serial 队列与 forward 各自独立
   9. daemon 空闲退出（60s）→ 下次 `run` 重新拉起，任务状态不丢（队列在 daemon 内存，任务跨 daemon 重启不承诺——单任务内完成）
-  10. **会话隔离**（2026-09-15 新增，§0 #15）：重建服务实例（关屏/亮屏，或 `am crash`）后，用**旧** `observationId` 提交动作 → 必须 `stale_observation`，**即使代次数值巧合相同**
-  11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素
-  12. **能力复核**（2026-09-15 新增）：对 dump 时声明 `set_value`、现已不可编辑的节点执行 `set_value` → `unsupported_capability` 或 `stale_observation`
-  13. **回归**：正常 `decide → act` 流程与 Phase 2 的 P2-3 / P2-4 不受影响
+  10. **会话隔离**（2026-09-15 新增，§0 #15）：重建服务实例（关屏/亮屏，或 `am crash`）后，用**旧** `observationId` 提交动作 → 必须 `stale_observation`，**即使代次数值巧合相同** —— ✅ 2026-09-15 通过（旧会话 `65a49aa8:1` vs 新会话 `185f2569:1`，数字相同仅会话不同，被拒；同元素换新令牌则成功）
+  11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素 —— ✅ 2026-09-15 通过（`node e2 failed refresh`，页面未被改动）
+  12. **能力复核**（2026-09-15 新增）：对 dump 时声明 `set_value`、现已不可编辑的节点执行 `set_value` → `unsupported_capability` 或 `stale_observation` —— ✅ 2026-09-15 通过（`e2 did not advertise set_value`）
+  13. **回归**：正常 `decide → act` 流程与 Phase 2 的 P2-3 / P2-4 不受影响 —— ✅ 2026-09-15 通过（`invoke` 与中文 `set_value` 均正常）
 
 ### Phase 4 — 并入共享 Runtime（评估，不承诺）
 - 触发条件：Phase 3 全过 + 真实跨端单队列需求。届时先补设计文档再动 `lcu-desktop`。
