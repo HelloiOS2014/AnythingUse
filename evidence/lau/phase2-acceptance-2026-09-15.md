@@ -1,6 +1,6 @@
 # LAU Phase 2 真机验收 — 2026-09-15
 
-- 设备：Xiaomi 2211133C（``）· Android 16 · serial `<device-serial>`（USB）
+- 设备：Xiaomi 2211133C· Android 16 · serial `<device-serial>`（USB）
 - 主机：macOS · adb 1.0.41 (35.0.2) · `lau` 由 `70ac8ce` 构建（debug，含本轮 P0 修复）
 - 依据：`docs/lau-android-plan.md` §8「Phase 2 验收（确定性断言，非元素计数）」
 - 纪律：**全程不使用 ADB 输入注入**（无 `input tap/text`、无 `am start`）；所有动作都经 helper 的 AccessibilityService
