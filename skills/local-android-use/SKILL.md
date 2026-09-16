@@ -65,6 +65,7 @@ lau result <task-id> --json                 # succeeded / failed / cancelled
 4. One action per observation: `decide` → `act` → `decide` …
 5. Claim completion only when `lau result` says `succeeded` **and** you verified the goal yourself.
 6. Do not reconfigure the device (accessibility toggle, settings, unlock, wake) — that is always the human's action.
+7. Never drive the device with the **stateless action commands** (`lau invoke` / `set-value` / `scroll` / `launch`). They have no task context, so no gate applies to them; they exist for the human operator. Your only action surface is `decide` → `act`, which is gated. (`lau dump` / `screenshot` / `foreground` are read-only and fine to look at, but the decision surface is still `decide`.)
 
 ## Troubleshooting (short)
 

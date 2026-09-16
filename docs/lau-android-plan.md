@@ -312,7 +312,8 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（**已定：`local-android-use`**，2026-09-15；与 `lau` = Local Android Use 对齐，目录 `skills/local-android-use/`，随 Pi 包与 release 包分发）
 - **D7**（**已定，2026-09-15**）bounds 复核取 ② 归一化容差 ≤0.5%（0.005），已实现并经真机验证；副作用是列表动画期间会 fail-closed 要求重试一次（§0 #25，已写入 troubleshooting）
-- **D8**（2026-09-15 新增，**已定：②**）app access 的触发点：**同时拦 `decide`**（读屏也是控制，与 mac 一致）；`dump` / `screenshot` 作为无状态调试命令不受门禁约束。备选 ① 只拦 `act`（更松）、③ 连 `dump` 也拦（会让调试命令不可用）
+- **D8**（2026-09-15 新增，**已定：②**）app access 的触发点：**同时拦 `decide`**（读屏也是控制，与 mac 一致）；备选 ① 只拦 `act`（更松）、③ 连 `dump` 也拦（会让调试命令不可用）。
+  **无状态命令的边界（同日补充）**：`dump` / `screenshot` / `foreground` 是**只读**调试命令，不受门禁；但 `invoke` / `set-value` / `scroll` / `launch` 是**动作类**无状态命令，**不经过 app access 门** —— 因此它们是**操作者/调试面，不是 Agent 表面**：Agent 只能走受门的 `decide`/`act` 循环（已写入 Android skill 的硬规则）。这条边界是刻意的：无状态命令没有任务上下文可绑定授权。
 - **D9**（2026-09-15 新增，**已定：不重放**）Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（§5.4 已按此写）；helper 的代次/会话校验作为第二道防线保留
 - **D10**（2026-09-15 新增，**已定：`lau-cli` 模块内**）Android 证据层先与 CLI/daemon 同 crate；Phase 4 并入共享 Runtime 时再抽独立 crate
 
