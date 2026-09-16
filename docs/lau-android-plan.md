@@ -176,10 +176,26 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **不承诺「安全页识别」**（v1 已删）：`isImportantForAccessibility` 与包名 denylist 只是纵深防御；敏感后果一律靠 app_access + effect guard（对齐 mac：mac 也不猜敏感页）。
 
 ### 5.4 审批（受信面）
+
 - 人在 **Mac** 前操作，审批也在 Mac。**禁止手机弹窗**（会误触发 getevent 接管，操作者也不在看手机）。
-- consequence 门 → daemon 弹出 **osascript 对话框**（Allow / Deny，默认 Deny）。CLI `lau act` 立即返回 `waiting_user` / exit 2，Agent 停下；人点 Mac 对话框。`lau approve <task-id>` 只负责再次打开该对话框，不能代点 Allow。
-- Allow：执行**这一次**已停住的动作（grant 消费），然后重观察、交回 Actor。Deny：任务 failed。
-- R4（不可逆高危）→ **人工接管**，不是普通审批。**当前实现差距**：R4 与 R3 同走 consequence 对话框，人工接管未实现（§0 #7）。
+- **三类门，语义互不替代**（2026-09-15 细化）：
+
+  | 门 | 何时 | 选项 | 是否记住 |
+  |---|---|---|---|
+  | **app access** | 首次控制某个包（触发点见 D8） | Allow once / Always allow / Deny | 只记 `always_allow` |
+  | **consequence**（R3） | 单个动作被证据层判为 R3 | Allow / Deny（默认 Deny） | **一次性**，消费即失效 |
+  | **takeover**（R4） | 单个动作被判为 R4 | Start takeover →（人自己在手机上做）→ Done / Cancel | 不适用 |
+
+- **app access 的身份** = `包名 + 签名证书摘要`（`GET_SIGNING_CERTIFICATES` 首证书 SHA-256）：应用升级不失效，**换签名即失效**。展示用"应用名（包名）"，判定只认身份串。
+- 对话框必须**披露**：将要控制哪个应用、身份、AnythingUse 优先语义动作、以及**该许可不授权任何后果类动作**。
+- consequence：CLI `lau act` 立即返回 `waiting_user` / exit 2，Agent 停下；`lau approve <task-id>` 只重新打开对话框，**不能代批**。
+- **批准不等于重放（2026-09-15 修订，取代原文"Allow：执行这一次已停住的动作"）**：Allow 只产生**一个一次性授权**；daemon **丢弃**已停住的提案，**强制重新观察**，由同一个 Actor 基于新观察重新提交。授权按"后果身份"（包 + 动作 + 元素身份）匹配并有有效期，**消费一次即失效**；不匹配则作废重来。理由：与 mac 执行契约 §4/§5 一致，并消除 §0 #8 的"批准后重放"分歧。
+- R4 走**人工接管**（不是普通审批）：
+  - 弹出"Start takeover" → 人**自己在手机上**完成该动作 → 回到 Mac 对话框点 **Done**（或 Cancel）；
+  - **Done**：**不执行**已停住的动作，丢弃提案 → 重新观察 → 交回同一个 Actor 继续；
+  - **Cancel**：任务 failed；
+  - 等待期间任务停在 `waiting_actor` + `wait_reason=consequence`，**不占用**设备执行资源。
+- app access 的持久决定可撤销：`lau permissions --json` 列出、`lau permissions revoke <key>` 撤销；**CLI 永远没有"批准"路径**。
 
 ### 5.5 构建与分发
 - Gradle + Kotlin，`minSdk 24`（dispatchGesture/SCROLL_* 均满足）。`scripts/install-android-helper.sh`（`adb install -r`；含 HyperOS「USB 安装」失败指引）。
@@ -190,6 +206,31 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   3. `ping` 仅作诊断，存在**滞后窗口**（服务已禁用、旧实例 socket 尚未销毁时仍能应答）；`enabled:false` 而 `ping:true` 时必须在报告里显式说明"这是陈旧实例，以 `enabled` 为准"；
   4. 服务禁用后 socket 可连接但返回空响应：CLI 必须给出**可行动的报错**（提示去 `lau doctor` 并重新打开无障碍开关），不得只报 `empty response`。
   5. `lau doctor` 只读已足够；CLI 只有在**能够**做到时才去切换开关（本章暂不允许 CLI 改设备设置）。
+
+### 5.6 Android 证据层（EffectGuard）—— 2026-09-15 新增设计
+
+**位置**：`crates/lau-cli` 内新模块（见 D10），实现 `anything_core::effect_guard::EffectGuard`。`lcu-core` 的 macOS 实现（AXConfirm、桌面 role）**不复用**（§7）。
+
+**输入**：本次观察的元素元数据（`role` / `label` / `value` / `capabilities` / `packageName` / `windowId`，**新增 `password` 标记**）、待执行动作、Actor 的 `EffectClaim`。
+**输出**：`EffectJudgement { risk, rationale, model_claim_overridden, unknown }`（复用 anything-core 类型）。
+
+判定规则（**证据下限，只抬不降**；Actor 声明只能抬高）：
+
+| 证据 | 最低风险 |
+|---|---|
+| 观察 / 等待 / `focus` | R0 |
+| 语义 `invoke` 导航类、`scroll` | R1 |
+| `set_value` 且非敏感 | R2 |
+| 标签/描述命中「发送 / 提交 / 删除 / 卸载 / 发布 / 确认 / 支付」等对外或不可逆语义 | **R3** |
+| 节点 `password=true`，或标签/值命中「密码 / 验证码 / OTP / 信用卡 / CVV / 支付密码」 | **R4** |
+| `set_value` 的文本本身像凭证（字母数字混合且 ≥12 位，或 6 位纯数字） | **R4** |
+| 元素不在本次观察内 / 能力未声明 / 树为空却要执行动作 | **R3**，或以 `unsupported_capability` 拒绝 |
+| 证据互相矛盾（话术像取消、动作像提交） | **unknown → 停下问人** |
+
+- **不按应用名/包名做策略**（对齐 mac 执行契约 §1）：包名只用于 app access 身份与审计，风险一律由**动作证据**判定。
+- 坐标动作继续一律拒绝（`semantic_action_required`），直到 D5 决定 `dispatchGesture`。
+- 证据层是 **Runtime 侧的下限**：Actor 声明 `navigate` 而证据是「发送」时取 R3，并记 `model_claim_overridden=true`。
+- 需要 helper 配合的一处 schema 增补：dump 的每个元素增加 `"password": true`（当 `AccessibilityNodeInfo.isPassword`），仅供证据层使用。
 
 ## 6. `lau` daemon（Phase 3，按需非常驻）
 
@@ -238,6 +279,10 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素 —— ✅ 2026-09-15 通过（`node e2 failed refresh`，页面未被改动）
   12. **能力复核**（2026-09-15 新增）：对 dump 时声明 `set_value`、现已不可编辑的节点执行 `set_value` → `unsupported_capability` 或 `stale_observation` —— ✅ 2026-09-15 通过（`e2 did not advertise set_value`）
   13. **回归**：正常 `decide → act` 流程与 Phase 2 的 P2-3 / P2-4 不受影响 —— ✅ 2026-09-15 通过（`invoke` 与中文 `set_value` 均正常）
+  14. **app access**（2026-09-15 新增，§0 #5）：首次控制一个未授权的包 → Mac 对话框；Deny → 任务 failed；Allow once → 继续且**同一任务内**不再问；Always allow → 新任务也不再问；`lau permissions revoke` 之后重新问
+  15. **证据覆盖低报**（§0 #6）：把「支付/删除」标签的动作谎报为 `navigate` → 仍到达正确的门，且 `model_claim_overridden=true`
+  16. **密码框**（§0 #6）：对 `password=true` 的输入框执行 `set_value` → 走 R4 人工接管，**绝不自动输入**
+  17. **不重放**（§0 #8 / D9）：Allow 之后若 UI 已变化，旧提案**不得**被执行；任务必须基于新观察重新决策
 
 ### Phase 4 — 并入共享 Runtime（评估，不承诺）
 - 触发条件：Phase 3 全过 + 真实跨端单队列需求。届时先补设计文档再动 `lcu-desktop`。
@@ -266,6 +311,9 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（Phase 3 末定）
 - **D7**（2026-09-15 新增，**待定**）bounds 复核的严格度：① 严格相等（最保守，可能因动画/微移把同一元素误判为 stale）；② 归一化容差（**推荐**，如 ≤0.5% 屏宽/高）；③ 只比 `packageName` + `windowId`、不比 bounds
+- **D8**（2026-09-15 新增，**待定**）app access 的触发点：① 只拦 `act`（首次改变状态前）；② **同时拦 `decide`**（读屏也是控制，与 mac 一致 —— **推荐**）；③ 连无状态的 `dump` / `screenshot` 也拦（最严，但会让 Phase 2 的调试命令不可用，不推荐）
+- **D9**（2026-09-15 新增，**建议采纳**）批准后**不重放**：Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（见 §5.4）。若坚持保留重放，必须保留 helper 的代次兜底并在验收中证明其安全
+- **D10**（2026-09-15 新增，**推荐**）Android 证据层放在 `crates/lau-cli` 的模块内（当前唯一消费者）；若 Phase 4 并入共享 Runtime，再抽成独立 crate
 
 ## 11. 仓库布局（完成后）
 
