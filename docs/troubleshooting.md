@@ -84,6 +84,16 @@ Older persisted rows may appear as `waiting_user` / `waiting_approval`.
 - Consequences still use separate one-time confirmation or takeover gates. Do
   not add an application-specific workaround or weaken Runtime's evidence floor.
 
+## A Chrome task's `decide` returns the same `observation_id` after an `act`
+
+The worker has not produced the next observation yet, so the call raced it. Compare
+`observation_id` across calls and issue `decide` again — never re-submit an action bound
+to an observation you already consumed. A ChromeTab observation returns DOM-derived
+elements with `el_N` ids (role / label / capabilities) plus a rendered task-tab
+screenshot; a blank task tab legitimately reports zero elements before the first
+navigation. Verified 2026-09-16: `com.google.Chrome` task → navigate to an https URL →
+new observation with one `link` element → `done` → `succeeded`.
+
 ## VLM slow or OOM on 16GB
 
 - Cold load ~2–3 minutes on MPS fp16 (warmup absorbs the first-inference compile; the first real propose is then fast).
