@@ -1,0 +1,59 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Rust binaries
+        # lau is the Android endpoint. Building it here keeps the package
+        # complete on every machine instead of only the one that happens to have
+        # it already built.
+        run: cargo build --locked --release -p lcu-cli -p lcu-desktop -p lau-cli
+
+      - name: Build macOS service
+        run: swift build -c release --package-path native/macos-window-service
+
+      - name: Build the Android helper (tests + APK)
+        # Best effort, and deliberately one step: the Android SDK/AGP pairing on
+        # a hosted runner changes independently of this repository.
+        # package-release.sh treats a missing APK as a warning, so a failure here
+        # still produces a usable macOS package.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gradle_version=9.2.0
+          if ! command -v gradle >/dev/null 2>&1; then
+            curl -fsSL "https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip" -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+            export PATH="/tmp/gradle-${gradle_version}/bin:$PATH"
+          fi
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+          if [ -x "$sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$sdk/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          fi
+          gradle -p native/android-helper :app:testDebugUnitTest :app:assembleDebug --console=plain
+
+      - name: Package
+        run: bash scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: AnythingUse-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14

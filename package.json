@@ -1,11 +1,16 @@
 {
   "name": "anythinguse",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
-  "description": "AnythingUse — local-first control plane for real macOS apps, Chrome, and (source-level) Android. Ships the local-computer-use (lcu) and local-android-use (lau) skills for Pi, DSH, and other CLI agents.",
-  "keywords": ["pi-package", "dsh-plugin"],
+  "description": "AnythingUse \u2014 local-first control plane for real macOS apps, Chrome, and (source-level) Android. Ships the local-computer-use (lcu) and local-android-use (lau) skills for Pi, DSH, and other CLI agents.",
+  "keywords": [
+    "pi-package",
+    "dsh-plugin"
+  ],
   "pi": {
-    "skills": ["./skills"]
+    "skills": [
+      "./skills"
+    ]
   },
   "dsh": {
     "bundle": {

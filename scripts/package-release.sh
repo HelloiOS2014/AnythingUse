@@ -6,7 +6,7 @@
 # Not code-signed: macOS will require right-click → Open on first launch.
 set -euo pipefail
 
-VERSION="${1:-0.1.1}"
+VERSION="${1:-0.2.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
