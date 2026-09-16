@@ -64,7 +64,7 @@
 | 15 ✅ | ~~**`observationId` 不持久、无会话身份**~~ **已修（2026-09-15）**：观察令牌改为 `<sessionId>:<generation>`，实例重建即会话失效 | helper / daemon | 已按 §4 实现，验收第 10 条真机通过（数字撞车仍被拒） |
 | 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
 | 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
-| 18 | 🟠 **可点元素与 label 分离**：能 `invoke` 的容器无 label，带 label 的节点多数不可 `invoke` | helper / daemon | Agent 无法把"点开某条目"直接映射成一个 element id（mac 侧由 Runtime 解析，lau 无等价机制） |
+| 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
 | 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
 | 20 | 🟠 doctor 判据不可靠：`bound` 恒为真（匹配到无障碍快捷按钮条目）、`ping` 有滞后窗口 | `main.rs` | 四态里**只有 `enabled` 可信**，其余只能当诊断 |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
@@ -127,6 +127,14 @@
 | （新增）`global_back` | `performGlobalAction(GLOBAL_ACTION_BACK)` | 系统级回退，Phase 3 |
 
 compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同构。
+
+**label 归属（2026-09-15 修订，针对 §0 #18）**：可点的容器常常自身没有文字，文字挂在其子节点上（实测：`e12 LinearLayout`（可点、无 label）与 `e13 TextView "蓝牙"`（有 label、不可点）是父子）。**dump 必须把 label 归到"能被点的那一行"上**：
+
+- 节点自身有 `text` / `contentDescription` → 用自身的；
+- 自身为空 → 从其**子树**（深度 ≤ 3）收集非空 `text` / `contentDescription`，去重后以空格拼接，最多 3 段、总计 200 字符（沿用既有长度上限）；
+- 只在 label **为空**时派生，绝不覆盖节点自身的文字。
+
+这样 `invoke` 的目标天然带名字，Agent 不必按坐标猜（对齐 mac 侧由 Runtime 解析 Finder 行的做法，但 lau 把它放在 helper：树就在设备侧，父子关系是精确的，Mac 端只有平铺坐标，只能几何猜测）。
 
 ## 4. 传输与协议
 

@@ -273,6 +273,32 @@ helper APK 重新构建并安装（`scripts/install-android-helper.sh` → Succe
 - 本次 `am crash` 之后，无障碍服务**没有被系统关闭**（`enabled: true`，doctor 四态全绿，会话正常切换）。
 - 因此 #17 的触发条件**仍未确证**：之前那次"自行关闭"既可能由 `am crash` 引起，也可能由关屏/亮屏或设置页交互引起。要定论需要更可控的复现（或 logcat 权限）。
 
+## 追加：#18 修复后的真机验证（2026-09-15 晚）
+
+修复：helper dump 时把子树文字归并到"能被点的那一行"（plan §3「label 归属」；深度 ≤3、≤3 段、≤200 字符；不覆盖节点自身的文字）。
+
+```
+$ lau dump --json | jq -r '.data.elements[]|select(.capabilities|index("invoke"))|"\(.id)\t\(.role)\t\(.label // "(无)")"'
+e2   LinearLayout   登录小米账号 享受更多小米服务
+e5   LinearLayout   我的设备
+e7   LinearLayout   WLAN <office-wifi>
+e10  LinearLayout   蓝牙 已开启            ← 修复前这里是 "(无 label)"
+e13  LinearLayout   移动网络
+e17  LinearLayout   个人热点 已关闭
+...
+```
+
+功能验证（**按名字点，不用坐标几何**）：
+
+```
+$ EID=$(jq -r '[.data.elements[]|select(.label|test("蓝牙"))]|.[0].id' dump.json)   # e10
+$ lau invoke e10 --observation-id 29947a87:1 --json
+{"data":{"performed":"invoke"},"status":"ok"}
+$ lau dump → 页面变为蓝牙设置：返回 | 蓝牙 | 设备名称 <phone-name> | 蓝牙版本 有新版本 …   ✅
+```
+
+APK 更新后的一个附带观察：安装新 APK 后 5 秒内 `ping` 曾为 false（服务尚未重新绑定），随后**自动恢复**（新 PID 21838），无需人工切换；doctor 当时给出的 blocker 文案（"toggle AnythingUse LAU off/on"）是准确的但偏保守。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
