@@ -47,8 +47,8 @@
 | 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
 | 5 | 无 app_access 门（首次控制某包没有 allow_once / always_allow / deny） | `daemon.rs` | 审批模型少一层 |
-| 6 | 无 Android 证据层 guard（§7）：role 规范化 / `isPassword` / 包签名身份 / 敏感页 / 截图可用性 / 树完整性 | `daemon.rs` | 风险只按 Actor 声明的 `EffectKind` 分流，没有独立证据下限 |
-| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | 与 §5.4 / D6 的高危定义不符 |
+| 6 | 无 Android 证据层 guard（§7）：role 规范化 / `isPassword` / 包签名身份 / 敏感页 / 截图可用性 / 树完整性 | `daemon.rs` | **证据层已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），10 个单测通过；helper 已补 `password` 标记。**待真机验收 15/16** |
+| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | **已实现（2026-09-15）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**；`lau approve` 对接管门直接拒绝。**待真机验收 16** |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
 | 9 | 无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误 | `daemon.rs` | 计划要求的「不确定不重放」语义缺失 |
 | 10 | 无 per-serial 队列 / forward 隔离 | `daemon.rs` | 双设备场景不成立 |
@@ -209,10 +209,9 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 
 ### 5.6 Android 证据层（EffectGuard）—— 2026-09-15 新增设计
 
-**位置**：`crates/lau-cli` 内新模块（见 D10），实现 `anything_core::effect_guard::EffectGuard`。`lcu-core` 的 macOS 实现（AXConfirm、桌面 role）**不复用**（§7）。
-
-**输入**：本次观察的元素元数据（`role` / `label` / `value` / `capabilities` / `packageName` / `windowId`，**新增 `password` 标记**）、待执行动作、Actor 的 `EffectClaim`。
-**输出**：`EffectJudgement { risk, rationale, model_claim_overridden, unknown }`（复用 anything-core 类型）。
+**位置**：`crates/lau-cli` 内新模块（见 D10）。**复用共享的类型与策略表**（`RiskLevel` / `EffectKind` / `EffectClaim` / `anything_core::effect_guard::effect_policy`），**证据分类自己实现**：`lcu-core` 的 macOS 实现（AXConfirm、桌面 role）不复用（§7），也不去改共享的 `ElementNode`（mac/Chrome 共用，为一个尚未承诺的 Phase 4 统一而耦合它不划算）。
+**接口形态**：`judge(elements: &[Value], action: &Action, effect: Option<&EffectClaim>) -> Judgement` —— 直接吃 daemon 手里那份 dump 原始元素 JSON（不构造 `AppObservation`）。
+**输出**：`Judgement { risk, rationale, model_claim_overridden, unknown }`（字段对齐 anything-core 的 `EffectJudgement`）。
 
 判定规则（**证据下限，只抬不降**；Actor 声明只能抬高）：
 
@@ -311,9 +310,9 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（Phase 3 末定）
 - **D7**（2026-09-15 新增，**待定**）bounds 复核的严格度：① 严格相等（最保守，可能因动画/微移把同一元素误判为 stale）；② 归一化容差（**推荐**，如 ≤0.5% 屏宽/高）；③ 只比 `packageName` + `windowId`、不比 bounds
-- **D8**（2026-09-15 新增，**待定**）app access 的触发点：① 只拦 `act`（首次改变状态前）；② **同时拦 `decide`**（读屏也是控制，与 mac 一致 —— **推荐**）；③ 连无状态的 `dump` / `screenshot` 也拦（最严，但会让 Phase 2 的调试命令不可用，不推荐）
-- **D9**（2026-09-15 新增，**建议采纳**）批准后**不重放**：Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（见 §5.4）。若坚持保留重放，必须保留 helper 的代次兜底并在验收中证明其安全
-- **D10**（2026-09-15 新增，**推荐**）Android 证据层放在 `crates/lau-cli` 的模块内（当前唯一消费者）；若 Phase 4 并入共享 Runtime，再抽成独立 crate
+- **D8**（2026-09-15 新增，**已定：②**）app access 的触发点：**同时拦 `decide`**（读屏也是控制，与 mac 一致）；`dump` / `screenshot` 作为无状态调试命令不受门禁约束。备选 ① 只拦 `act`（更松）、③ 连 `dump` 也拦（会让调试命令不可用）
+- **D9**（2026-09-15 新增，**已定：不重放**）Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（§5.4 已按此写）；helper 的代次/会话校验作为第二道防线保留
+- **D10**（2026-09-15 新增，**已定：`lau-cli` 模块内**）Android 证据层先与 CLI/daemon 同 crate；Phase 4 并入共享 Runtime 时再抽独立 crate
 
 ## 11. 仓库布局（完成后）
 
