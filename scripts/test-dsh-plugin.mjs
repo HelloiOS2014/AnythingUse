@@ -12,7 +12,12 @@
  *
  * Usage:
  *   node scripts/test-dsh-plugin.mjs [profile]     # default profile: web
+ *   DSH_PLUGIN_ROOT=/path/to/installed/anythinguse node scripts/test-dsh-plugin.mjs [profile]
  *   DSH_SKILL_ROOT=/path/to/dsh-skill node scripts/test-dsh-plugin.mjs
+ *
+ * `DSH_PLUGIN_ROOT` checks an installed copy (for example
+ * `~/.dsh/profiles/<profile>/node_modules/anythinguse`) instead of this
+ * checkout — that is how a git-installed bundle is verified.
  *
  * Exit code 0 means both skills are in the catalog AND their bodies load.
  */
@@ -23,7 +28,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, '..');
+const repoRoot = process.env.DSH_PLUGIN_ROOT
+  ? resolve(process.env.DSH_PLUGIN_ROOT)
+  : resolve(here, '..');
 const profile = process.argv[2] ?? 'web';
 const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh');
 const profileDir = join(dshHome, 'profiles', profile);

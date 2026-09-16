@@ -8,28 +8,35 @@ that scans this repository's `skills/` directory.
 
 ## Install
 
-The documented path is the harness's own command — it forwards to pnpm in the
-profile directory and registers the bundle itself:
+Install with the harness's own command. The bundle comes **from GitHub**, so it
+works on any machine and needs no checkout:
 
 ```bash
 # profile directories are their own pnpm workspace roots, so -w is required
-dsh plugin --profile web add -w /path/to/this/repo
+dsh plugin --profile web add -w github:HelloiOS2014/AnythingUse
 
-# if pnpm cannot re-resolve an unrelated dependency range in that profile,
+# if pnpm cannot re-resolve an unrelated dependency range in that profile
+# (a peer range such as ^0.1.5-rc.1 against only-prerelease publications),
 # resolve from the local store instead:
-dsh plugin --profile web add -w --offline /path/to/this/repo
+dsh plugin --profile web add -w --offline github:HelloiOS2014/AnythingUse
 ```
 
-`./scripts/install-dsh.sh [profile]` wraps exactly that ladder — the standard
-command, then `--offline`, then (only if pnpm cannot run at all in that profile)
-a plain `link:` dependency plus symlink — and prints the verification command:
+`dsh plugin add` also lists the bundle in `dsh.profile.bundles`, so nothing else
+is needed. `./scripts/install-dsh.sh [profile]` wraps that ladder and prints the
+verification commands:
 
 ```bash
-./scripts/install-dsh.sh            # the `web` profile
-./scripts/install-dsh.sh headless   # another profile
+./scripts/install-dsh.sh              # GitHub -> the `web` profile
+./scripts/install-dsh.sh headless     # GitHub -> another profile
+./scripts/install-dsh.sh --local      # this checkout (plugin development; live edits)
+./scripts/install-dsh.sh --remove web # uninstall
 ```
 
-A profile that is already running picks the bundle up on its next boot.
+**Update:** re-run the same `add` (or the script) so pnpm re-fetches the ref and
+moves the pin to the newest commit; a git dependency is a snapshot of the commit
+it was installed from, not a moving branch.
+
+A profile that is already running picks a newly added bundle up on its next boot.
 
 ## Verify
 
@@ -37,8 +44,9 @@ A profile that is already running picks the bundle up on its next boot.
 # the composed tree contains the adapter row (no boot)
 dsh --profile web --dump-config | grep -A2 anythinguse
 
-# the harness's own provider discovers and loads both skills (no model call)
-node scripts/test-dsh-plugin.mjs web
+# the installed copy registers and loads both skills (no model call)
+DSH_PLUGIN_ROOT=~/.dsh/profiles/web/node_modules/anythinguse \
+  node scripts/test-dsh-plugin.mjs web
 ```
 
 Expected:
