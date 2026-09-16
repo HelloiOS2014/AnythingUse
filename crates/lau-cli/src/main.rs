@@ -618,6 +618,38 @@ fn daemon_cmd(req: Value, json: bool) -> Result<i32> {
     Ok(emit_daemon_response(resp, json))
 }
 
+/// Same, but for **idempotent** operations only: a daemon response that arrives
+/// empty or truncated is retried once (plan §4 — "只重试幂等的 ping/dump").
+/// Never use this for `act`/`run`: retrying those could replay a side effect.
+fn daemon_cmd_idempotent(req: Value, json: bool) -> Result<i32> {
+    daemon::ensure_daemon()?;
+    let resp = rpc_idempotent(&req)?;
+    Ok(emit_daemon_response(resp, json))
+}
+
+/// One retry for the transport faults observed on 2026-09-15 (empty or truncated
+/// daemon responses). Callers must be idempotent.
+fn rpc_idempotent(req: &Value) -> Result<Value> {
+    match daemon::rpc(req) {
+        Ok(resp) => Ok(resp),
+        Err(err) if is_transport_error(&err) => {
+            std::thread::sleep(Duration::from_millis(200));
+            daemon::ensure_daemon()?;
+            daemon::rpc(req)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// True for the transport faults observed on 2026-09-15 (empty or truncated
+/// daemon responses), never for a semantic refusal from the daemon.
+fn is_transport_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("daemon response is not JSON")
+        || message.contains("connect ")
+        || message.contains("error sending request")
+}
+
 /// `lau decide --wait`: poll until a fresh observation is available. Waits
 /// through pauses (a human may `lau resume`) but returns immediately on a
 /// consequence gate, on a terminal task, or on an unknown task id.
@@ -625,7 +657,7 @@ fn decide_cmd(task_id: &str, wait: bool, json: bool) -> Result<i32> {
     let deadline = Instant::now() + Duration::from_secs(decide_wait_secs());
     loop {
         daemon::ensure_daemon()?;
-        let resp = daemon::rpc(&json!({"op": "decide", "task_id": task_id}))?;
+        let resp = rpc_idempotent(&json!({"op": "decide", "task_id": task_id}))?;
         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
         let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
         let retry = wait
@@ -831,13 +863,13 @@ fn main() {
             }
         }
         Commands::Status { task_id, json } => {
-            daemon_cmd(json!({"op": "status", "task_id": task_id}), *json)
+            daemon_cmd_idempotent(json!({"op": "status", "task_id": task_id}), *json)
         }
         Commands::Result { task_id, json } => {
-            daemon_cmd(json!({"op": "result", "task_id": task_id}), *json)
+            daemon_cmd_idempotent(json!({"op": "result", "task_id": task_id}), *json)
         }
         Commands::Cancel { task_id, json } => {
-            daemon_cmd(json!({"op": "cancel", "task_id": task_id}), *json)
+            daemon_cmd_idempotent(json!({"op": "cancel", "task_id": task_id}), *json)
         }
         Commands::Resume { task_id, json } => {
             daemon_cmd(json!({"op": "resume", "task_id": task_id}), *json)
@@ -846,8 +878,10 @@ fn main() {
             daemon_cmd(json!({"op": "approve", "task_id": task_id}), *json)
         }
         Commands::Permissions { json, revoke } => match revoke {
-            Some(key) => daemon_cmd(json!({"op": "permissions_revoke", "key": key}), *json),
-            None => daemon_cmd(json!({"op": "permissions_list"}), *json),
+            Some(key) => {
+                daemon_cmd_idempotent(json!({"op": "permissions_revoke", "key": key}), *json)
+            }
+            None => daemon_cmd_idempotent(json!({"op": "permissions_list"}), *json),
         },
         Commands::Daemon => daemon::daemon_main().map(|_| 0),
     };
