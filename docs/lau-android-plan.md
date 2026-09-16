@@ -65,11 +65,11 @@
 | 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
 | 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
-| 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
+| 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`）。**等复发抓现场** |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
 | 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
-| 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | Agent 若只看截图会拿到无意义画面 |
+| 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | **已实现（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked`。**成功路径真机已验证；拒绝路径待一次关屏确认** |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
@@ -172,6 +172,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 ### 5.3 屏幕与安全状态（诚实观察）
 - 观察输出必须携带：`isInteractive`、Keyguard 锁定态、前台包名/窗口、时间戳、方向/display ID、截图可用性。
 - 灭屏/锁屏/FLAG_SECURE → 显式 `screen_off` / `device_locked` / `secure_capture_unavailable`；**绝不自动唤醒/解锁**；锁屏画面不满足 app 目标 → `target_lost`。
+- **`screenshot` 命令遵循同一条规则（2026-09-15 修订，针对 §0 #23）**：屏幕非交互或已锁屏时**明确失败**（`screen_off` / `device_locked`，exit 3），**不得**返回一张锁屏图却报 `ok`；成功时 JSON 必须带上 `isInteractive` 与 `keyguardLocked`。屏幕状态取自 helper 的 `foreground`（它在任何屏幕状态下都能回答，且不需要唤醒）。
 - **不承诺「安全页识别」**（v1 已删）：`isImportantForAccessibility` 与包名 denylist 只是纵深防御；敏感后果一律靠 app_access + effect guard（对齐 mac：mac 也不猜敏感页）。
 
 ### 5.4 审批（受信面）
@@ -185,7 +186,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - `lau doctor` 四态区分：**installed / enabled / bound / ping-responsive**；验收含杀进程与**重启手机**后恢复。
   **判据与优先级（2026-09-15 修订，针对 §0 #20/#24）**：
   1. `enabled`（读 `settings get secure enabled_accessibility_services`）是**唯一门禁依据** —— 只有它能决定 blocker 与退出码；
-  2. `bound` 必须**只解析 `dumpsys accessibility` 的 `Bound services:` 那一行**，不得对整篇 dumpsys 做子串匹配（禁用后 `button:{…LauAccessibilityService…}` 条目仍在，会造成恒真的假阳性）；
+  2. `bound` 必须**只解析 `dumpsys accessibility` 的 `Bound services:` 块**（该块**跨多行**，且服务**按 `android:label` 列出**，不是组件名），不得对整篇 dumpsys 做子串匹配（禁用后 `button:{…LauAccessibilityService…}` 条目仍在，会造成恒真的假阳性）；
   3. `ping` 仅作诊断，存在**滞后窗口**（服务已禁用、旧实例 socket 尚未销毁时仍能应答）；`enabled:false` 而 `ping:true` 时必须在报告里显式说明"这是陈旧实例，以 `enabled` 为准"；
   4. 服务禁用后 socket 可连接但返回空响应：CLI 必须给出**可行动的报错**（提示去 `lau doctor` 并重新打开无障碍开关），不得只报 `empty response`。
   5. `lau doctor` 只读已足够；CLI 只有在**能够**做到时才去切换开关（本章暂不允许 CLI 改设备设置）。
@@ -194,7 +195,8 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 
 - **生命周期**：首个 `lau run` 拉起；`LAU_IDLE_EXIT_SECS`（默认 60）无活动退出。不写 launchd。不用时进程不存在，零消耗；任务期间一个小 Rust 进程（socket + 单任务队列 + getevent 读进程，内存几 MB，空闲 0 CPU）。
 - **职责**（跨 CLI 进程持有）：任务状态与队列（**每 serial 一条串行队列**）、app_access/consequence 门、观察代次、forward 会话管理、`getevent -lt` 触摸纪元（getepoch）。
-- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现**：断流已 fail-closed（任务转 `paused` 并报告，`lau resume` 会重建监听）；纪元按 serial 隔离（§0 #1/#2 已修）。**真机双验已于 2026-09-15 通过**：真手指触摸 → `paused(taken_over)`；注入动作（helper `performAction`）→ 不触发。注意 helper 侧仍未按 §5.2 复核节点身份（§0 #15/#16）。
+- **接管规则**：任务执行前查 getepoch；真实硬件触摸 → epoch+1 → `paused (taken_over)`。getevent 不可用/断流 → **fail closed**（暂停任务并报告），不宣称共存。注入（performAction/dispatchGesture/input）不产生 getevent —— 需在真机（小米）实测验证两种情形。**当前实现**：断流已 fail-closed（任务转 `paused` 并报告，`lau resume` 会重建监听）；纪元按 serial 隔离（§0 #1/#2 已修）。**真机双验已于 2026-09-15 通过**：真手指触摸 → `paused(taken_over)`；注入动作（helper `performAction`）→ 不触发。节点身份复核已按 §5.2 落地（§0 #15/#16 已修）。
+- **诊断日志（2026-09-15 新增，针对 §0 #19）**：daemon 在 `<数据根>/daemon.log` 追加**每次响应的操作名与字节数**（**不含任何负载**，避免泄露屏幕内容），用于定位那次"响应被截断在 8192 字节"的偶发故障；daemon 启动时轮转（超过 64 KiB 即截断，只保留最近一段）。
 - CLI 前缀进程（`lau run/decide/act/result/status/resume/cancel`）都是 daemon 的薄客户端；`doctor`/`screenshot`/`dump` 等无状态命令 Phase 2 起即单进程直连。
 
 ## 7. 与 mac 端共用/不复用
