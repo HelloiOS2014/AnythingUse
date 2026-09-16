@@ -40,6 +40,8 @@ cp "$ROOT/requirements.txt" "$STAGE/"
 cp "$ROOT/native/chrome-control/scripts/install-native-host.sh" "$STAGE/scripts/"
 cp "$ROOT/native/chrome-control/scripts/uninstall-native-host.sh" "$STAGE/scripts/"
 cp -R "$ROOT/skills/local-computer-use" "$STAGE/skills/"
+cp -R "$ROOT/skills/local-android-use" "$STAGE/skills/"
+cp "$ROOT/docs/lau-android-plan.md" "$STAGE/"
 cp "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/AGENTS.md" "$STAGE/"
 cp "$ROOT/docs/command-contract.md" "$ROOT/docs/troubleshooting.md" "$STAGE/"
 
