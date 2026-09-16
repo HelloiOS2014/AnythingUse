@@ -46,7 +46,7 @@
 | 2 ✅ | ~~触摸纪元是全局的~~ **已修**：改为 `watches: HashMap<serial, TouchWatch>`，纪元与健康状态按设备隔离 | `daemon.rs` | 双设备的接管判定互不干扰 |
 | 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
-| 5 ✅ | ~~无 app_access 门（首次控制某包没有 allow_once / always_allow / deny）~~ **已实现（2026-09-15）**：身份 = 包名 + 签名证书 SHA-256（helper 新增 `app_identity` op）；按 D8② 拦 `decide`/`act`；三按钮 Mac 对话框；`always_allow` 持久化到 `<数据根>/app_permissions.json`（0600），`lau permissions` 列出、`--revoke <key>` 撤销 | daemon / helper | 真机已验证：门触发、身份取到真实签名摘要、`allow_once` 生效且**不落盘**、放行后 `decide` 恢复。Deny 与 `always_allow` 路径待验 |
+| 5 ✅ | ~~无 app_access 门~~ **已实现并全路径真机验证（2026-09-15）**：身份 = 包名 + 签名证书 SHA-256（helper `app_identity`）；按 D8② 拦 `decide`/`act`；三按钮 Mac 对话框；`always_allow` 持久化到 `<数据根>/app_permissions.json`（0600），`lau permissions` 列出、`--revoke <key>` 撤销 | daemon / helper | 门触发、真实身份、allow_once 不落盘、Deny→failed、always_allow 持久化 + 静默放行、revoke 幂等 —— 全部真机通过 |
 | 6 | 无 Android 证据层 guard（§7） | `daemon.rs` | **已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），11 个单测通过；helper 已补 `password` 标记。**真机已验证密码框 → R4**（验收 16）；验收 15（谎报 navigate）目前只有单测覆盖 |
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
@@ -280,7 +280,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素 —— ✅ 2026-09-15 通过（`node e2 failed refresh`，页面未被改动）
   12. **能力复核**（2026-09-15 新增）：对 dump 时声明 `set_value`、现已不可编辑的节点执行 `set_value` → `unsupported_capability` 或 `stale_observation` —— ✅ 2026-09-15 通过（`e2 did not advertise set_value`）
   13. **回归**：正常 `decide → act` 流程与 Phase 2 的 P2-3 / P2-4 不受影响 —— ✅ 2026-09-15 通过（`invoke` 与中文 `set_value` 均正常）
-  14. **app access**（2026-09-15 新增，§0 #5）：首次控制一个未授权的包 → Mac 对话框；Deny → 任务 failed；Allow once → 继续且**同一任务内**不再问；Always allow → 新任务也不再问；`lau permissions revoke` 之后重新问
+  14. **app access**（2026-09-15 新增，§0 #5）：首次控制一个未授权的包 → Mac 对话框；Deny → 任务 failed；Allow once → 继续且**同一任务内**不再问；Always allow → 新任务也不再问；`lau permissions revoke` 之后重新问 —— ✅ **2026-09-15 全路径真机通过**：门触发并取到真实签名身份；`Allow once` 生效且**不落盘**、换任务再问；第二个任务 `Deny` → `failed`（并因此发现并修复 §0 #26）；`Always allow` → 落盘 `app_permissions.json`（0600）、新任务静默放行；`--revoke` → 删除并幂等
   15. **证据覆盖低报**（§0 #6）：把「支付/删除」标签的动作谎报为 `navigate` → 仍到达正确的门，且 `model_claim_overridden=true`
   16. **密码框**（§0 #6）：对 `password=true` 的输入框执行 `set_value` → 走 R4 人工接管，**绝不自动输入**
   17. **不重放**（§0 #8 / D9）：Allow 之后若 UI 已变化，旧提案**不得**被执行；任务必须基于新观察重新决策
