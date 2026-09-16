@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Package AnythingUse v0.1.0 for distribution: release binaries, Chrome
-# control installer, skill, and docs in one zip (and optional dmg).
+# Package AnythingUse for distribution: release binaries, Chrome control
+# installer, both Agent skills, and (when built) the Android endpoint plus the
+# helper APK, all in one zip (and optional dmg).
 #
 # Not code-signed: macOS will require right-click → Open on first launch.
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.1.1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
@@ -52,7 +53,7 @@ Components:
   bin/lcu                public CLI (macOS apps + Chrome)
   bin/lcu-desktop        Runtime host (started on demand by lcu)
   bin/macos-window-service  Swift window service (auto-spawned by desktop)
-  bin/lau                Android endpoint CLI (source-level WIP; not productized)
+  bin/lau                Android endpoint CLI (source-level; see the LAU plan)
   android/anythinguse-lau-helper.apk  AccessibilityService helper to sideload
   extension/             Chrome extension source (install via scripts/install-native-host.sh)
   skills/                agent skill (install via Claude/Grok plugin marketplace)

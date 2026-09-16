@@ -108,45 +108,82 @@ with `--effect '{"kind":"navigate","summary":"Open example.com"}'` through
 
 Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).
 
-## Android (`lau`) — source-level work in progress
+## Android (`lau`) — source-level endpoint
 
 Android is a **separate** CLI (`lau`, never `lcu`) with its own skill
 (`skills/local-android-use/`). `./scripts/install-cli.sh` installs it alongside
 `lcu` when it has been built, and `package-release.sh` ships it with the helper
-APK. It is still **source-level**: read the [LAU plan](lau-android-plan.md) §0 for
-the current gaps before relying on it.
+APK. It is **source-level**: the acceptance evidence is one device
+(2026-09-15), so read the [LAU plan](lau-android-plan.md) §0 before relying on it.
+
+### Setup
 
 ```bash
-# helper APK: build + install (then enable it on the phone:
-#   Settings → Accessibility → "AnythingUse LAU")
+# helper APK: build + install
 ./scripts/install-android-helper.sh
-./target/release/lau doctor --json
-
-# observation — ADB is transport only, never input injection
-./target/release/lau screenshot --json
-./target/release/lau dump --json
-
-# agent task loop through the on-demand lau daemon (separate from the macOS Runtime)
-./target/release/lau run "在设置中打开深色模式" --app com.android.settings --actor agent --json
-./target/release/lau decide <task-id> --json
-./target/release/lau act <task-id> --observation-id <obs> \
-  --action '{"kind":"semantic","type":"invoke","element_id":"e1"}' \
-  --effect '{"kind":"navigate","summary":"open the item"}'
+# then on the phone: Settings → Accessibility → "AnythingUse LAU"  (must be ON)
+lau doctor --json          # installed / enabled / bound / ping — `enabled` is the gate
 ```
 
-Two limitations to keep in mind today: a high-risk effect stops at a **Mac**
-dialog (`lau approve <task-id>` only reopens it — there is no human-takeover
-path yet), and the device touch watch is mandatory: if `getevent` is not live,
-`lau run` refuses to start a task and a running task is paused until
-`lau resume <task-id>` rebuilds the watch. `lau decide --wait` polls through such
-a pause (timeout `LAU_DECIDE_WAIT_SECS`, default 600s) so an agent can wait for
-the human instead of failing.
+HyperOS also needs autostart + unrestricted battery, otherwise the service is not
+revived after being killed. **After a reboot, unlock the phone once**: the helper
+lives in credential-encrypted storage, so until the first unlock its process
+cannot start and `doctor` reports `helper socket not responding`.
+
+### Observe and act
+
+```bash
+# operator surface (no task, no gates): read-only dump/screenshot + raw actions
+lau dump --json                 # compact elements + observation token
+lau screenshot --json           # 0600 temp PNG; refuses on a locked/off screen
+lau invoke e7 --observation-id <token> --json
+lau set-value --observation-id <token> e4 "你好" --json
+lau scroll e1 --observation-id <token> --dy 1 --json
+
+# agent surface (a task, gated): the daemon starts on demand and exits after 60s idle
+lau run "在设置中打开蓝牙页面" --app com.android.settings --actor agent --json
+lau decide <task-id> --json                                   # fresh observation + token
+lau act <task-id> --observation-id <obs> \
+  --action '{"kind":"semantic","type":"invoke","element_id":"e10"}' \
+  --effect '{"kind":"navigate","summary":"open Bluetooth settings"}'
+lau result <task-id> --json                                   # succeeded / failed / cancelled
+```
+
+`decide`/`act` are the Agent path and carry the gates; the stateless commands
+above are the operator path and are deliberately ungated — never drive the device
+with them from an agent.
+
+### The three gates
+
+| Gate | When | What happens |
+|---|---|---|
+| **app access** | first control of a package | a **Mac** dialog: Deny / Always allow / Allow once. `lau permissions --json` lists persisted grants; `lau permissions --revoke <key>` removes one. |
+| **consequence (R3)** | sending, deleting, submitting, paying | task parks as `waiting_user` (exit 2) and a Mac dialog decides. **An approval never replays the parked action** — re-observe and propose again. |
+| **takeover (R4)** | credentials, permission changes, financial actions | a two-step Mac dialog: **Start takeover** → do it yourself on the phone → **Done**. AnythingUse never performs that action. |
+
+Approvals are never stored for replay: after any gate the task re-observes.
+
+### Pauses and interruptions
+
+The device touch watch (`getevent`) is mandatory. Real finger input pauses the
+task (`taken_over`); a dead watch pauses it too (`watch_unavailable`). `lau
+resume <task-id>` rebuilds the watch and drops the stale observation, so the next
+`decide` re-observes. `lau decide --wait` polls through a pause (timeout
+`LAU_DECIDE_WAIT_SECS`, default 600s) so an agent can wait for the human instead
+of failing. One serial queue per device: a second task on the same phone reports
+`queued` and starts when the first ends.
+
+Coordinates are refused outright (`semantic_action_required`) — use the
+capability an element advertises. ADB is transport and observation only, never
+input injection.
 
 ## Privacy defaults
 
 - Screenshots are not stored in SQLite and are not printed to stdout.
 - Task metadata is local under the Runtime data root.
-- See `docs/privacy.md`.
+- The same rules, plus the Android specifics (credential fields are flagged and
+  never read, private 0600 screenshots, a payload-free daemon log), are in
+  `docs/privacy.md`.
 
 ## Stopping
 

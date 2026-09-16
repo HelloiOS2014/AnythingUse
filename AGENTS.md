@@ -25,6 +25,9 @@ operating real macOS applications and Chrome through one command surface.
 - Resolve the `lcu` binary as `$LCU_BIN`, then `lcu` on `PATH` (product:
   `./scripts/install-cli.sh` puts sibling `lcu` + `lcu-desktop` in `~/.local/bin`),
   then `./target/release/lcu` from this checkout (**debug fallback only**).
+- The Android endpoint is resolved the same way and independently: `$LAU_BIN`,
+  then `lau` on `PATH` (`install-cli.sh` installs it too), then
+  `./target/release/lau`. Never substitute one binary for the other.
 - For machines other than the dev box: copy this file to `~/.grok/AGENTS.md`
   and `~/.claude/CLAUDE.md`. Pi has no global AGENTS.md; install the Pi package
   so the skill is available from any working directory.

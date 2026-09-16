@@ -22,7 +22,7 @@ AnythingUse 是面向人类与 Agent 的本地优先控制层。**现在：** �
 |---|---|
 | macOS 应用 | 对严格 PID + 窗口目标截图并执行 AX/定向动作；后台优先；按任务选择或需要时申请前台授权；否则明确失败 |
 | Chrome | 通过扩展 + Native Messaging 在非激活任务标签页里使用用户真实 Chrome |
-| Android（`lau`） | 源码级进行中，走**独立** CLI（`lau`，绝不并入 `lcu`）：ADB 观察 + 设备端 AccessibilityService helper 提供语义 `dump`/`invoke`/`set_value`/`scroll`，并有按需 `lau` daemon 支撑 `run`/`decide`/`act`。ADB 只做传输。尚未产品化（无安装脚本、无 Android Skill），安全模型仍不完整 —— 见 [LAU 规划](docs/lau-android-plan.md) |
+| Android（`lau`） | **独立** CLI（`lau`，绝不并入 `lcu`），面向一台 USB 连接的设备：设备端 AccessibilityService helper 提供语义 `dump`/`invoke`/`set_value`/`scroll`/`global_back`，按需 daemon 支撑 `run`/`decide`/`act`/`result`/`cancel`/`resume`/`approve`/`permissions`。源码级：`install-cli.sh` 会安装它、`package-release.sh` 会连同 helper APK 一起打包，并有独立 skill；但**不承诺广泛兼容**——验收证据是 2026-09-15 的单台设备。重启手机后需**先解锁一次** helper 才能运行。见 [LAU 规划](docs/lau-android-plan.md) |
 | 决策器 | `LCU_VISION_ACTOR` 未设置或为 `auto` 时默认由外部 Agent 决策；本地 Qwen3-VL 可按任务显式选择（`--actor vlm`） |
 | 调度 | 全局串行 FIFO 队列，支持暂停、恢复、取消与崩溃恢复 |
 | 安全 | 双 Actor 共用闭集效果、Runtime 独立风险下限、应用/前台/后果三类独立门槛、接管检测 |
@@ -141,7 +141,7 @@ package.json                  Pi 包清单（发布 Skill）
 crates/anything-core/         平台中立契约（动作、风险、任务状态、协议）
 crates/lcu-core/              macOS 层：再导出 anything-core + macOS 证据守卫
 crates/lcu-cli/               公开命令面
-crates/lau-cli/               Android 端点 CLI + 按需 daemon（尚未产品化）
+crates/lau-cli/               Android 端点 CLI + 按需 daemon
 crates/lcu-platform/          PlatformBackend trait + 空后端
 crates/lcu-runtime/           队列、状态、策略与执行循环
 crates/lcu-model/             决策 actor（VLM 子进程 / AgentActor）+ 校验
@@ -158,4 +158,5 @@ scripts/                      模型下载与辅助脚本
 ## 文档
 
 - [交付状态](docs/status.md) · [架构](docs/architecture.md) · [Computer Use 参考笔记](docs/computer-use-reference.md) · [用户指南](docs/user-guide.md) · [`lcu` 命令契约](docs/command-contract.md) · [LAU Android 规划](docs/lau-android-plan.md) · [隐私](docs/privacy.md) · [故障排查](docs/troubleshooting.md)
-- [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS 窗口服务](native/macos-window-service/README.md) · [Chrome 控制](native/chrome-control/README.md)
+- [Agent Skill（macOS/Chrome）](skills/local-computer-use/SKILL.md) · [Agent Skill（Android）](skills/local-android-use/SKILL.md) · [macOS 窗口服务](native/macos-window-service/README.md) · [Chrome 控制](native/chrome-control/README.md)
+- Android 验收证据：[`evidence/lau/phase2-acceptance-2026-09-15.md`](evidence/lau/phase2-acceptance-2026-09-15.md)

@@ -120,7 +120,7 @@ Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered
 
 ## Android (`lau`)
 
-`lau` is a **separate, not-yet-productized** CLI (never `lcu`); `docs/lau-android-plan.md` §0 lists every current gap. Common failures:
+`lau` is a **separate, source-level** CLI (never `lcu`); `docs/lau-android-plan.md` §0 lists every current gap and known limitation. Common failures:
 
 - **`adb` not found** — set `LAU_ADB_BIN`, or install Android platform-tools.
 - **`target_unresolved`** — more than one authorized device (pass `--serial` / `LAU_SERIAL`), or the given serial matches no connected device.
@@ -135,3 +135,9 @@ Expected behavior: a task left non-terminal when `lcu-desktop` died is recovered
 - **`watch_unavailable`** — the device's `getevent` touch watch is not live (spawn failed, or the stream ended). `lau run` refuses to create a task, and a running task is paused rather than acting blind. Fix the ADB/device link, then `lau resume <task-id>`; if the watch still cannot attach, resume fails closed and the task stays paused. `lau status <task-id> --json` reports the watch's `healthy` / `dead_reason`.
 - **after a phone reboot: `helper socket not responding` while `enabled` is still true** — expected until the phone is **unlocked once**. The helper lives in credential-encrypted storage, so its process cannot start before the first unlock and the accessibility service cannot bind. Unlock the phone and re-check `lau doctor --json`; it recovers in a couple of seconds. (Verified 2026-09-15: HyperOS did **not** disable the service across a reboot.)
 - **`set_value` reports ok but the text does not stick** — you probably targeted a duplicate node (dumps can contain two elements with the same frame, e.g. a wrapper and the real field). Pick the element whose `role` is `EditText` and whose frame matches the visible field, then re-dump to confirm the value; the helper verifies by re-reading the node, so a wrong-but-editable node can pass verification without reaching the UI.
+- **task parked with `wait_reason=app_access`** — the first control of that package needs a decision in the **Mac** dialog (Deny / Always allow / Allow once). The CLI cannot answer it; nothing is persisted unless the human picks *Always allow*. `lau permissions --json` lists grants, `lau permissions --revoke <key>` removes one.
+- **`{"status":"queued"}` / `task is queued behind another task on this device`** — one serial queue per device. Wait for the current task to end (it is promoted automatically), or `lau cancel` the other task.
+- **`indeterminate: the action may or may not have been applied … do not resend it`** — the helper's response was lost or timed out, so the outcome is unknown. The observation was dropped and the task stays steerable: run `decide` for a fresh observation and decide from what you actually see. **Never resend the action.** `lau status --json` shows `indeterminate: true`.
+- **`semantic_action_required`** — coordinate input is refused by design (`invoke`/`set_value`/`scroll`/`focus`/`global_back` only). Use the capability the element advertises.
+- **`forbidden_peer`** — something other than root/shell tried to reach the helper socket on the device.
+- **a Spinner/dropdown cannot be operated** — known limitation (§0 #27): such nodes may advertise `scroll` while `performAction` returns false, and they are not `invoke`-able; with coordinates refused there is no fallback yet. Work around it by reaching the same state through another control (or ask the human to change it).

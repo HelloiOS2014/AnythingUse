@@ -3,7 +3,8 @@
 Version: **v3.2** (macOS core)  
 Branch: `main`  
 Product name: **AnythingUse**  
-Command codename: **LCU** (`lcu`, `lcu-*`); data root: `~/Library/Application Support/AnythingUse`
+Command codename: **LCU** (`lcu`, `lcu-*`); data root: `~/Library/Application Support/AnythingUse`  
+Android endpoint: **LAU** (`lau`, separate binary, never `lcu`); data root: `~/.local/share/AnythingUse/lau/` — source-level, device-verified 2026-09-15, **not** part of the v3.2 macOS-core claim (see below)
 
 Target contract: [AnythingUse Execution Contract](execution-contract.md),
 frozen 2026-08-14. The source is aligned; concentrated live acceptance passed

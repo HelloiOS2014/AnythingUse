@@ -16,7 +16,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 - **Local-first:** task state, screenshots, model inference, and approvals stay on the machine by default.
 - **Coexists with the user:** background work targets a strict window or inactive Chrome task tab. `auto` may bring the exact window forward when background delivery is unavailable; `background_only` never does. The app-access dialog discloses this fallback, the agent never switches back, and real user input on that target pauses automatically.
 - **Honest completion:** an action receipt is not success; a task succeeds only after explicit completion and target re-observation.
-- **Endpoint-oriented:** the Runtime routes goals to a platform backend, so future endpoints do not need a new public Agent protocol.
+- **Endpoint-oriented:** the Runtime routes goals to a platform backend, so new endpoints do not need a new public Agent protocol — the Android endpoint (`lau`) is a working example, and it shares only the platform-neutral contracts in `crates/anything-core`.
 
 ## What works today
 
@@ -24,7 +24,7 @@ Computer-use systems often take over the foreground desktop, move the real point
 |---|---|
 | macOS applications | Window capture and AX/targeted actions on a strict PID + window target; background first, disclosed exact-target foreground fallback in `auto`, explicit failure in `background_only` |
 | Chrome | The user's real Chrome profile via extension + Native Messaging on an inactive task tab |
-| Android (`lau`) | Source-level WIP on a **separate** CLI (`lau`, never `lcu`): ADB observation, an on-device AccessibilityService helper for semantic `dump`/`invoke`/`set_value`/`scroll`, and an on-demand daemon for `run`/`decide`/`act`. ADB stays transport-only. Not productized (no installer, no Android Skill) and the safety model is still incomplete — see the [LAU plan](docs/lau-android-plan.md) |
+| Android (`lau`) | A **separate** CLI (`lau`, never `lcu`) for one USB-connected device: an on-device AccessibilityService helper (semantic `dump`/`invoke`/`set_value`/`scroll`/`global_back`) behind an on-demand daemon (`run`/`decide`/`act`/`result`/`cancel`/`resume`/`approve`/`permissions`). Source-level: shipped by `install-cli.sh` and `package-release.sh` (with the helper APK) and covered by its own skill, but it makes no broad compatibility claim — the acceptance evidence is one device on 2026-09-15. After a reboot the phone must be unlocked once before the helper can run. See the [LAU plan](docs/lau-android-plan.md) |
 | Decision maker | External Agent by default when `LCU_VISION_ACTOR` is unset/`auto`; local Qwen3-VL is optional (`--actor vlm`) |
 | Scheduling | One serial FIFO queue with pause, resume, cancel, and crash recovery |
 | Safety | Shared closed-set effect, independent Runtime risk floor, separate app-access and consequence gates, takeover detection |
@@ -155,7 +155,7 @@ package.json                  Pi package manifest (ships the Skill)
 crates/anything-core/         Platform-neutral contracts (actions, risk, task state, protocol)
 crates/lcu-core/              macOS layer: re-exports anything-core + the macOS evidence guard
 crates/lcu-cli/               Public command surface
-crates/lau-cli/               Android endpoint CLI + on-demand daemon (not productized)
+crates/lau-cli/               Android endpoint CLI + on-demand daemon
 crates/lcu-platform/          PlatformBackend trait + null backend
 crates/lcu-runtime/           Queue, state, policy, and execution loop
 crates/lcu-model/             Decision actors (VLM subprocess / AgentActor) + validation
@@ -172,4 +172,5 @@ scripts/                      Model download and helper scripts
 ## Documentation
 
 - [Execution contract](docs/execution-contract.md) · [Delivery status](docs/status.md) · [Architecture](docs/architecture.md) · [Computer Use reference notes](docs/computer-use-reference.md) · [User guide](docs/user-guide.md) · [`lcu` command contract](docs/command-contract.md) · [LAU Android plan](docs/lau-android-plan.md) · [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md)
-- [Agent Skill](skills/local-computer-use/SKILL.md) · [macOS window service](native/macos-window-service/README.md) · [Chrome control](native/chrome-control/README.md)
+- [Agent Skill (macOS/Chrome)](skills/local-computer-use/SKILL.md) · [Agent Skill (Android)](skills/local-android-use/SKILL.md) · [macOS window service](native/macos-window-service/README.md) · [Chrome control](native/chrome-control/README.md)
+- Android acceptance evidence: [`evidence/lau/phase2-acceptance-2026-09-15.md`](evidence/lau/phase2-acceptance-2026-09-15.md)
