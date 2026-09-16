@@ -358,6 +358,50 @@ $ cat ~/.local/share/AnythingUse/lau/daemon.log
 
 只记录 `op + bytes`，**不含负载**；启动时若超过 64 KiB 即截断（`rotate_log`）。等 8192 截断复发时，这条日志能直接给出"出事那次响应多大"。
 
+## 追加：Phase 3 安全模型真机验收（2026-09-15 深夜）
+
+**验收 16（密码框 → R4 人工接管）— ✅ 通过**
+
+```
+# 手机停在「设置 → 指纹、面部与密码 → 设置锁屏密码」，页面上是密码输入框
+$ lau dump --json | jq -c '.data.elements[]|select(.password==true)'
+{"id":"e4","label":"6位数字密码","password":true,"role":"EditText","capabilities":["set_value","focus"]}
+        ↑ helper 新增的密码证据在真机上生效
+
+$ lau run "查看锁屏密码设置" --app com.android.settings --actor agent --json   → waiting_actor
+$ lau decide <task> --json                                                     → obs=e530b0da:12
+
+# 用**低声明**（local_edit）尝试输入，看证据层是否会把它抬到 R4
+$ lau act <task> --observation-id e530b0da:12 \
+    --action '{"kind":"semantic","type":"set_value","element_id":"e4","value":"123456"}' \
+    --effect '{"kind":"local_edit","summary":"输入一个数字"}' --json
+{"status":"waiting_user","error":"waiting_user"}                                 exit=2
+   task: state=waiting_actor, wait_reason=takeover, takeover=true
+        ↑ 没有被当成普通审批：走的是 R4 接管门
+
+# 关键断言：什么都没有被输入
+$ lau dump --json | jq -c '[.data.elements[]|select(.password==true)][0]'
+{"id":"e4","label":"6位数字密码","value":null}                                   ← 仍为空
+
+# 机主在 Mac 上点了 Start takeover → Done
+$ lau status <task> --json   → {state:waiting_actor, wait_reason:agent_decision,
+                                takeover:false, observation_id:null,
+                                last_action_summary:"takeover done by the human; re-observe"}
+
+# 不重放：拿旧令牌再提交一次
+$ lau act <task> --observation-id e530b0da:12 --action '…invoke e4…'
+{"error":"stale observation_id","status":"error"}                                exit=3   ✅
+```
+
+**回归（必须不受影响）**：普通导航动作（`invoke` 蓝牙行，R1）仍然直接执行成功。
+
+**过程新发现（已记为 §0 #25）**：连续滚动时有一次被拒为
+`stale_observation: node e1 moved or resized since the dump` —— 列表还在动，节点位移超过 0.5% 容差。
+这是设计内的 fail-closed；操作成本是"重新 dump 再试一次"，已写入 troubleshooting。
+
+**尚未真机验证**：验收 15（把「删除/支付」标签谎报为 navigate 仍要到达正确的门）目前只有单测覆盖；
+验收 14（app access 门）尚未实现。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。

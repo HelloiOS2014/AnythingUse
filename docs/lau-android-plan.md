@@ -47,8 +47,8 @@
 | 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
 | 5 | 无 app_access 门（首次控制某包没有 allow_once / always_allow / deny） | `daemon.rs` | 审批模型少一层 |
-| 6 | 无 Android 证据层 guard（§7）：role 规范化 / `isPassword` / 包签名身份 / 敏感页 / 截图可用性 / 树完整性 | `daemon.rs` | **证据层已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），10 个单测通过；helper 已补 `password` 标记。**待真机验收 15/16** |
-| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | **已实现（2026-09-15）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**；`lau approve` 对接管门直接拒绝。**待真机验收 16** |
+| 6 | 无 Android 证据层 guard（§7） | `daemon.rs` | **已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），11 个单测通过；helper 已补 `password` 标记。**真机已验证密码框 → R4**（验收 16）；验收 15（谎报 navigate）目前只有单测覆盖 |
+| 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
 | 9 | 无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误 | `daemon.rs` | 计划要求的「不确定不重放」语义缺失 |
 | 10 | 无 per-serial 队列 / forward 隔离 | `daemon.rs` | 双设备场景不成立 |
@@ -71,6 +71,7 @@
 | 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
 | 23 ✅ | ~~关屏时 `screenshot` 照常"成功"~~ **已修并验证（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked` | `main.rs` | 真机三条全过：亮屏解锁 → ok 带状态；关屏 → `screen_off`；亮屏锁屏 → `device_locked`（均未唤醒/解锁设备） |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
+| 25 | 🟡 **bounds 复核在列表动画期间会拒绝动作**（真机遇到一次：连续滚动时 `stale_observation: node e1 moved or resized since the dump`） | helper | 设计内的 fail-closed，但会带来"重试一次"的操作成本；已写入 troubleshooting。若实测过于频繁，再评估 D7 的容差或对可滚动容器放宽 |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
 
