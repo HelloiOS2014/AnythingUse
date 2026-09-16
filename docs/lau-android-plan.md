@@ -53,7 +53,7 @@
 | 9 ✅ | ~~无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误~~ **已实现并真机验证（2026-09-15）**：helper 的语义错误码与传输类错误分离（`is_helper_semantic_error`）；传输类 → `indeterminate:true`、作废观察、保持可继续、**绝不重试** | `daemon.rs` | 真机：`am crash` 后立刻 `act` → `indeterminate: … do not resend it`，任务 `waiting_actor` + `observation_id:null`；helper 2s 后恢复、`decide` 立即可用 |
 | 10 ✅ | ~~无 per-serial 队列 / forward 隔离~~ **已实现（2026-09-15）**：`serial_is_busy` + `promote_next_for_serial`，每个请求入口做一次 `sweep_queues`；同设备第二个任务进 `queued`，终态后自动提升 | `daemon.rs` | 真机（单设备）验证通过；转发隔离本就按 serial 键控端口。**双设备并行未验**（只有一台设备） |
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
-| 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
+| 12 ✅ | ~~无 helper peer 凭据校验（§4 威胁模型承诺项）~~ **已实现（2026-09-15）**：`handleClient` 读取 `LocalSocket.peerCredentials`，只接受 uid 0（root）与 2000（shell，`adb forward` 的身份），其余直接以 `forbidden_peer` 拒绝 | helper | 真机验证：加校验后 `dump`/`doctor` 等正常路径不受影响。**注意**：平台若拒绝报告凭据则放行（不因此破坏可用路径），因此这是纵深防御而非硬边界，§4 的威胁模型描述不变 |
 | 13 ✅ | ~~分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill~~ **已完成（2026-09-15）**：`install-cli.sh` 安装 `lau`（缺构建时给出提示）；`package-release.sh` 打包 `bin/lau` + `android/anythinguse-lau-helper.apk` + `install-android-helper.sh` + 两个 skill；**Android skill 定名 `local-android-use`（D4）** 并随 Pi 包/release 包分发 | `scripts/` `skills/` | 实测：`~/.local/bin/lau` 可运行、release zip 含全部 Android 产物（5.0 MB） |
 | 14 | `android-helper` 仍无测试（Kotlin 侧需要 instrumentation 或可测的纯函数抽取）；`lau-cli` 已有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类），但**无端到端自动化** | 全仓 | 回归保护以 Rust 单测 + 真机验收清单为主 |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | **由会话令牌 + fail-closed 消化**：过期即 `stale_observation` 并要求重取（不会再误执行）。对 Agent 的操作要求是"拿到即用"，已写入 skill |

@@ -120,6 +120,21 @@ class LauAccessibilityService : AccessibilityService() {
         socket.soTimeout = 8_000
         val reader = BufferedReader(InputStreamReader(socket.inputStream, StandardCharsets.UTF_8))
         val writer = BufferedWriter(OutputStreamWriter(socket.outputStream, StandardCharsets.UTF_8))
+        // Plan §4: the forwarded socket is reachable by other device-local
+        // processes. Accept only root/shell (adb forward arrives as shell); if the
+        // platform refuses to report credentials we do not break the working path.
+        val peerUid = try {
+            socket.peerCredentials?.uid
+        } catch (_: Exception) {
+            null
+        }
+        if (peerUid != null && peerUid != 0 && peerUid != 2000) {
+            write(
+                writer,
+                error(JSONObject(), "forbidden_peer", "peer uid $peerUid is not allowed")
+            )
+            return
+        }
         val line = reader.readLine() ?: return
         if (line.length > MAX_REQUEST) {
             write(writer, error(JSONObject(), "protocol_error", "request too large"))
