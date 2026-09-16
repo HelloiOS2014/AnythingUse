@@ -139,6 +139,8 @@ AnythingUse 将**决策者（AI Agent / 本地模型）**与**底座执行/安�
 
 **环境要求**：Apple Silicon Mac、Rust 1.85+、Xcode Command Line Tools。
 
+也可以直接用预编译包：每个 [release](https://github.com/HelloiOS2014/AnythingUse/releases) 都带 macOS 二进制、两个 Agent 技能与 Android helper APK；推 `v*` tag 会自动构建并发布。
+
 ```bash
 # 克隆仓库
 git clone https://github.com/HelloiOS2014/AnythingUse.git

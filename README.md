@@ -139,6 +139,10 @@ AnythingUse enforces a strict separation between **decision makers** (AI agents 
 
 **Prerequisites**: macOS on Apple Silicon, Rust 1.85+, Xcode Command Line Tools.
 
+Prefer a prebuilt package? Every [release](https://github.com/HelloiOS2014/AnythingUse/releases)
+ships the macOS binaries, both Agent skills and the Android helper APK; pushing a `v*` tag builds and
+publishes one automatically.
+
 ```bash
 # Clone the repository
 git clone https://github.com/HelloiOS2014/AnythingUse.git
