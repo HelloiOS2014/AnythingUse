@@ -1,6 +1,6 @@
 # LAU — Android 端完整方案规划（v2）
 
-> **状态：已按本文推进中**（v2 之后未再改版）。v1 经双模型并行审查（自审 + GPT-5.6 Sol，结论 BLOCK）后返工；Phase 2 起任何实现以本文为准，修改需先改文档。**当前实现进度与差距见 §0。**
+> **状态：已按本文推进中**（v2；2026-09-15 增补「观察身份」修订，见 §4 / §5.2 / D7）。v1 经双模型并行审查（自审 + GPT-5.6 Sol，结论 BLOCK）后返工；Phase 2 起任何实现以本文为准，修改需先改文档。**当前实现进度、差距与真机验收结果见 §0。**
 > 产品名 **AnythingUse**；`lcu` = Local Computer Use（只管本地电脑）；`lau` = **Local Android Use**（Android 端独立 CLI）。
 
 ## 0. 实现现状与差距（2026-09-15：源码核对 + 真机验收）
@@ -61,8 +61,8 @@
 
 | # | 差距 | 位置 | 影响 |
 |---|---|---|---|
-| 15 | 🔴 **`observationId` 不持久、无会话身份**：`generation` 是服务实例内计数器，实例重建即归零（实测**同一进程** PID 32256 不变、代次 22→1） | helper | 旧观察在代次碰撞后会被当成"当前"，动作可能落到与观察无关的元素上 |
-| 16 | 🔴 helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**：只查代次、下标、`refresh()`、自身包名 | helper | 与 #15 叠加 ⇒ 动作可能落到别的元素 |
+| 15 | 🔴 **`observationId` 不持久、无会话身份**：`generation` 是服务实例内计数器，实例重建即归零（实测**同一进程** PID 32256 不变、代次 22→1） | helper | 旧观察在代次碰撞后会被当成"当前"，动作可能落到与观察无关的元素上。**修复方案已定：§4 观察身份 + §5.2 校验顺序（待实现）** |
+| 16 | 🔴 helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**：只查代次、下标、`refresh()`、自身包名 | helper | 与 #15 叠加 ⇒ 动作可能落到别的元素。**修复方案已定：§5.2 第 4–6 步（待实现，容差待定 D7）** |
 | 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开 |
 | 18 | 🟠 **可点元素与 label 分离**：能 `invoke` 的容器无 label，带 label 的节点多数不可 `invoke` | helper / daemon | Agent 无法把"点开某条目"直接映射成一个 element id（mac 侧由 Runtime 解析，lau 无等价机制） |
 | 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
@@ -135,6 +135,9 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **forward 生命周期**：adb server 重启 / USB 重插 / transport 替换都会失效。daemon 在**每个会话前**：验证 serial → 检查/重建 forward → `ping` helper → 才执行。端口建议 serial 键控或 `tcp:0` 自动分配。
 - **不确定结果不重放**：动作发出后响应丢失/超时 → 返回 `indeterminate`，**强制重观察**，绝不自动重试动作（副作用风险）。只重试幂等的 ping/dump。
 - **协议（JSON 行）**：每行一个请求/响应；带 `v`（协议版本）、`id`（请求 ID，响应必须对应）；UTF-8；请求/树/文本有最大尺寸；超时与 exactly-one-response 语义；畸形输入 → 关连接。单时刻只接受一个活跃客户端（CLI 串行）。
+- **观察身份（2026-09-15 修订，针对 §0 #15/#16）**：服务实例在 `onServiceConnected` 生成随机 `sessionId`；`observationId` 从裸计数器改为 **`"<sessionId>:<generation>"` 的不透明字符串**，客户端只负责原样带回，不得解析、拼接或自行构造（`ping` 也返回当前 `sessionId`，供诊断）。
+  动作校验必须**同时**满足：`sessionId` 与当前实例一致 **且** `generation` 与当前代次一致；任一不符 → `stale_observation`。
+  这堵掉了"实例重建后计数器归零、旧 id 与新的数值巧合相等就被当成当前"的窗口（§0 #15 实测：同一进程 PID 不变、代次 22→1）。
 - **本地威胁模型（如实写）**：forward 出来的 127.0.0.1 端口本机其他进程可达；设备侧 abstract socket 受 SELinux 约束但仍可能被设备本地进程探测。缓解：包名前缀 socket + 设备侧校验 peer credentials（实测 forward 后的 UID）+ 如需更强再加一次性 session token。**不宣称「无鉴权问题」**。
 
 ## 5. Helper APK 设计（Phase 2 主体）
@@ -145,7 +148,15 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - dump：按需新鲜 dump（被动缓存仅记前台窗口包名）；**观察代次**（observationId）随每次 dump 递增，节点快照有界缓存。
 
 ### 5.2 执行规则
-- 所有元素动作请求带 `observationId`；helper 校验代次 → `refresh()` 节点 → 复核窗口 ID/包名/bounds/能力 → 任一不符 → `stale_observation`，绝不静默换节点。
+- 所有元素动作请求带 `observationId`（`<sessionId>:<generation>` 字符串）。helper 的校验顺序如下，**任一不符即 `stale_observation`，绝不静默换节点**：
+  1. `sessionId` == 当前实例的 `sessionId`（实例一旦重建，此前所有观察立即作废）；
+  2. `generation` == 当前代次；
+  3. `elementId` 下标在本次 dump 范围内，且 `refresh()` 成功；
+  4. **节点身份复核**：刷新后节点的 `packageName` 与 `windowId` 必须与 dump 时记录的一致；
+  5. **bounds 复核**：刷新后节点的归一化 bounds 必须与 dump 时记录的一致（容差取值见 D7）；
+  6. **能力复核**：请求的能力必须仍在 dump 时声明的集合内（例如 `set_value` 要求节点仍可编辑），否则 `unsupported_capability`；
+  7. 节点包名不得是 helper 自身（既有规则）。
+  helper 需为**当前代次**保存 `elementId → {packageName, windowId, bounds, capabilities}` 快照（随代次失效、数量有界）。
 - `set_value`：能力未声明 → `unsupported_capability`；执行后重 dump 比对值，不符 → `verification_failed`。
 - **helper 永不接收坐标请求之外的解释权**：`dispatchGesture` 仅由 CLI 侧在无语义能力时提出，仍受 `semantic_action_required` 拒绝规则约束（对齐 mac）。
 - **helper 拒绝对自己包名的任何自动化动作**。
@@ -207,6 +218,10 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   7. 有语义能力时提交坐标 → `semantic_action_required`
   8. 双设备接入：per-serial 队列与 forward 各自独立
   9. daemon 空闲退出（60s）→ 下次 `run` 重新拉起，任务状态不丢（队列在 daemon 内存，任务跨 daemon 重启不承诺——单任务内完成）
+  10. **会话隔离**（2026-09-15 新增，§0 #15）：重建服务实例（关屏/亮屏，或 `am crash`）后，用**旧** `observationId` 提交动作 → 必须 `stale_observation`，**即使代次数值巧合相同**
+  11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素
+  12. **能力复核**（2026-09-15 新增）：对 dump 时声明 `set_value`、现已不可编辑的节点执行 `set_value` → `unsupported_capability` 或 `stale_observation`
+  13. **回归**：正常 `decide → act` 流程与 Phase 2 的 P2-3 / P2-4 不受影响
 
 ### Phase 4 — 并入共享 Runtime（评估，不承诺）
 - 触发条件：Phase 3 全过 + 真实跨端单队列需求。届时先补设计文档再动 `lcu-desktop`。
@@ -217,7 +232,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 |---|---|
 | HyperOS「USB 安装」需小米账号/`INSTALL_FAILED_USER_RESTRICTED` | 安装脚本 + 引导页逐步指引；troubleshooting 记录 |
 | 无障碍开关手动一次性（等价 macOS 授权） | doctor 引导 blocker + 深链 |
-| HyperOS 杀后台/自启动关 → 服务不复活 | 验收含杀进程+重启；指引开自启动/电池无限制 |
+| HyperOS 杀后台/自启动关 → 服务不复活 | **2026-09-15 实测命中（§0 #17）**：系统会**自行关闭无障碍服务**（机主未操作），进程虽被重启但开关不会回来 → **必须人工重开**；对策：doctor 以 `enabled` 为准并给出引导；指引开自启动/电池无限制 |
 | SET_TEXT 场景局限（WebView/自定义 View/IME 校验） | 能力探测 + 重 dump 验证 + 显式错误码；验收覆盖 CJK/emoji/Compose |
 | dump 时视图滞后（动画中） | 新鲜 dump + 代次 + `stale_observation` |
 | forward 失效 / 响应不确定 | 每会话重建 + `indeterminate` 强制重观察，绝不重放 |
@@ -234,6 +249,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D5** 坐标兜底 = helper `dispatchGesture`（不经 ADB，受 `semantic_action_required` 约束）（推荐：是；替代项：完全禁止坐标）
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（Phase 3 末定）
+- **D7**（2026-09-15 新增，**待定**）bounds 复核的严格度：① 严格相等（最保守，可能因动画/微移把同一元素误判为 stale）；② 归一化容差（**推荐**，如 ≤0.5% 屏宽/高）；③ 只比 `packageName` + `windowId`、不比 bounds
 
 ## 11. 仓库布局（完成后）
 
