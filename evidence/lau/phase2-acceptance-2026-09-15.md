@@ -565,6 +565,44 @@ $ lau dump --json | jq -c '{packageName,windowId,windowTitle,capturedAtMs,rotati
 至此 Phase 2 的 P2-2（「已知 label / 能力字段 / 包与窗口身份」）全部通过，§5.3 要求的字段清单
 （`isInteractive`、Keyguard 态、前台包名/窗口、时间戳、方向/display、截图可用性）齐全。
 
+## 追加：Phase 2-7 后半（重启手机）+ Phase 3-2（中文搜索闭环）— ✅ 均通过
+
+### 重启手机（P2-7，2026-09-15）
+
+```
+重启前：doctor 四态全绿；enabled_accessibility_services 含我们的服务；helper pid=32636
+$ adb reboot
+  → 5s 后 adb 已连接、sys.boot_completed=1
+重启后（90 秒内持续观察）：
+  enabled_accessibility_services 仍含我们的服务      ← HyperOS **没有**自关（与"杀进程后曾自关"形成对照）
+  helper pid: 无；ping=false；bound=false
+  doctor → helper_unavailable
+    blocker: "helper socket not responding — toggle AnythingUse LAU off/on"
+    notes  : "service is enabled but does not appear in Bound services (may still be binding)"   ← notes 字段按设计发挥作用
+  屏幕：mWakefulness=Awake, mDreamingLockscreen=true（停在锁屏）
+机主解锁手机后：
+  → helper 进程出现；≤2s 内 ping 恢复；doctor 四态全绿、exit 0
+  → 会话全新：dump 得到 f7b792d9:1（重启后实例重建的证据）
+```
+
+**结论**：重启**不会**关掉无障碍开关；真正的约束是 **Android 凭据加密存储** —— 首次解锁前 App 进程
+起不来，服务无法绑定。指引必须以"开机后先解锁一次"为前提（已写入 §9 风险表与 troubleshooting）。
+
+### 中文搜索 + global_back 回退（P3-2，同一任务闭环 step=4）
+
+```
+① invoke e1「搜索系统设置项」 → invoke ok, step=1
+② act set_value e2 = 你好LCU（effect=local_edit） → set_value ok, step=2
+   重观察：value == 你好LCU；页面显示「没有找到设置项 / 你好LCU / 清空 / 取消」  ✅
+   （注：第一次写到了同 frame 的重复 EditText e8 → 报 ok 但值不保留；改选 e2 后成功。
+     dump 中可能出现同 frame 的重复节点，选错会"报 ok 但没写进去"——已记入规划验收 #2 的备注）
+③ invoke global_back → global_back ok, step=4 → 页面退回设置首页（含「搜索系统设置项」）✅
+④ done → state=succeeded
+```
+
+至此：**Phase 2 验收 7/7 全部真机通过；Phase 3 验收 16/17 真机通过**，
+仅 #8「双设备并行」受硬件限制（手边只有一台设备）。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。

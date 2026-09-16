@@ -64,7 +64,7 @@
 |---|---|---|---|
 | 15 ✅ | ~~**`observationId` 不持久、无会话身份**~~ **已修（2026-09-15）**：观察令牌改为 `<sessionId>:<generation>`，实例重建即会话失效 | helper / daemon | 已按 §4 实现，验收第 10 条真机通过（数字撞车仍被拒） |
 | 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
-| 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
+| 17 | 🟠 **HyperOS 曾在"杀进程之后"自行关闭无障碍服务**（机主确认未操作）；**触发条件仍未确证** | 系统 / 产品 | 两次对照实验：`am crash` 后**有时**自关、**有时**不自关；`adb reboot` 后**不自关**。可确定的是"重启后首次解锁前 helper 无法运行"（凭据加密存储）。对策见 §9：`enabled` 为唯一门禁 + 引导 blocker + 开机先解锁 |
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
 | 19 | 🟠 daemon 响应传输异常（**已观测两次**：8192 字节截断、以及 0 字节空响应 `EOF … column 0`；均重试即成功） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`、`permissions_list bytes=38`）。0 字节那次**削弱了"固定 8 KiB 边界"的假设**，根因仍未确证，继续等现场 |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
@@ -253,7 +253,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - `lau doctor` / `lau screenshot`（真机验收过：Xiaomi 2211133C / Android 16）。
 - **本轮修复（审查 #13）**：doctor 吞掉 serial 解析错误 → 多设备/无效 serial 现为 blocker（`target_unresolved`），显式 `--serial` 校验存在与授权状态。
 
-### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— **验收 6/7 通过，仅缺"重启手机"**（`dispatchGesture` 见 D5：已暂缓）
+### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— **验收 7/7 全部真机通过**（`dispatchGesture` 见 D5：已明确暂缓）
 - 交付：`native/android-helper/` + 安装脚本 + `lau dump / invoke / set_value / scroll / foreground`（CLI 单进程直连；**观察代次状态由 helper 持有**——AccessibilityService 本身设备侧长活）。
 - **验收（确定性断言，非元素计数）**：
   1. doctor 四态 + 未启用时的引导 blocker —— ✅ 真机通过（正常态四态全绿；禁用态给出精确引导 blocker，exit 3）
@@ -262,13 +262,13 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   4. set_value：原生/Compose 控件输入 `你好LCU`，重 dump 断言值相等；WebView 不支持时返回 `unsupported_capability`（不静默失败） —— ✅ 真机通过（搜索框写入 `你好LCU`，重 dump 值相等）
   5. 陈旧 observationId → `stale_observation`；能力未声明 → `unsupported_capability` —— ✅ 真机通过（两条均 exit 3）
   6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒 —— ✅ 真机通过（亮屏解锁/关屏/锁屏三种状态；`mWakefulness` 保持 Asleep，未被唤醒或解锁）
-  7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）—— 🟡 前半 ✅（`am crash` 后 PID 17820→32256，≤2s 内 ping 恢复）；**重启手机待验**（且实测发现 HyperOS 可能自行关闭无障碍服务，见 §0 #17）
+  7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）—— ✅ **2026-09-15 真机通过**：`am crash` 后 ≤2s ping 恢复；`adb reboot` 后开关**仍在**（HyperOS 没有自关），但 helper 在**首次解锁前无法运行**（Android 凭据加密存储，进程起不来 → 服务无法绑定）；机主解锁后 ~2s 内 `doctor` 四态全绿、会话全新（`f7b792d9:1`）。**指引必须以"解锁一次"为前提**（已写入 §9 与 troubleshooting）
 
-### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **验收 15/17 通过，2 条受限**（#2 中文搜索仅分项验证；#8 双设备只有单设备）
+### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **验收 16/17 真机通过**；仅 #8 的"双设备并行"受硬件限制（手边只有一台设备）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded` —— ✅ **2026-09-15 真机通过（目标真实达成）**：`在设置里打开蓝牙页面`，两步语义动作（返回 → 蓝牙行，step=4）后重观察确认页面已是蓝牙页，再 `done` → `succeeded`。注意：`succeeded` 只证明「显式 Done + 目标可再次观察」，**不判断目标内容**（与 mac 契约一致，诚实性由 Actor 负责）
-  2. 中文搜索 + `global_back` 回退（两步）—— 🟡 `global_back` ✅ 2026-09-15 真机通过（`global_back ok`，从蓝牙页退回设置首页）；任务闭环内的"中文搜索"待补（Phase 2 的 P2-4 已单独验证过 CJK `set_value`）
+  2. 中文搜索 + `global_back` 回退（两步）—— ✅ **2026-09-15 真机通过（同一任务闭环，step=4）**：打开设置搜索 → `set_value 你好LCU`（重观察确认 `value == 你好LCU`，页面显示"没有找到设置项 你好LCU"）→ `global_back` 退回设置首页 → `done` → `succeeded`。注：首次尝试写到了同框的重复 EditText（`e8`）而没生效，改选真正的搜索框（`e2`）后成功——dump 里可能出现同 frame 的重复节点，选错会"报 ok 但没写进去"
   3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）—— ✅ 2026-09-15 通过
   4. getevent 断流 → fail closed（暂停并报告，不装共存）—— ✅ **2026-09-15 真机故障注入通过**：杀掉 `getevent` 进程后 `decide` → `paused` + `wait_reason=watch_unavailable`，`status` 报告 `watch:{healthy:false, dead_reason:"getevent stream ended"}`；`lau resume` 重建监听后 `healthy:true` 恢复
   5. app_access 首次 → **Mac 对话框**（与 §5.4 / D6 一致；**不是**手机弹窗，避免误触发 getevent 接管）；批准 → 重观察继续；helper 自动化触不到对话框
@@ -294,7 +294,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 |---|---|
 | HyperOS「USB 安装」需小米账号/`INSTALL_FAILED_USER_RESTRICTED` | 安装脚本 + 引导页逐步指引；troubleshooting 记录 |
 | 无障碍开关手动一次性（等价 macOS 授权） | doctor 引导 blocker + 深链 |
-| HyperOS 杀后台/自启动关 → 服务不复活 | **2026-09-15 实测命中（§0 #17）**：系统会**自行关闭无障碍服务**（机主未操作），进程虽被重启但开关不会回来 → **必须人工重开**；对策：doctor 以 `enabled` 为准并给出引导；指引开自启动/电池无限制 |
+| HyperOS 杀后台/自启动关 → 服务不复活 | **2026-09-15 实测（§0 #17）**：曾在"杀进程之后"观察到系统**自行关闭无障碍服务**（机主未操作）→ 必须人工重开；但**重启手机不会自关**（同日实测：`adb reboot` 后开关仍在）。**重启后的真正约束是首次解锁**：解锁前 App 进程起不来 → 服务无法绑定，`doctor` 报 `helper socket not responding`。对策：`enabled` 为唯一门禁 + 引导 blocker；指引明确"开机后先解锁一次"，并开自启动/电池无限制 |
 | SET_TEXT 场景局限（WebView/自定义 View/IME 校验） | 能力探测 + 重 dump 验证 + 显式错误码；验收覆盖 CJK/emoji/Compose |
 | dump 时视图滞后（动画中） | 新鲜 dump + 代次 + `stale_observation` |
 | forward 失效 / 响应不确定 | 每会话重建 + `indeterminate` 强制重观察，绝不重放 |
