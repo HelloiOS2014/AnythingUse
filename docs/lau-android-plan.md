@@ -46,7 +46,7 @@
 | 2 ✅ | ~~触摸纪元是全局的~~ **已修**：改为 `watches: HashMap<serial, TouchWatch>`，纪元与健康状态按设备隔离 | `daemon.rs` | 双设备的接管判定互不干扰 |
 | 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
-| 5 | 无 app_access 门（首次控制某包没有 allow_once / always_allow / deny） | `daemon.rs` | 审批模型少一层 |
+| 5 ✅ | ~~无 app_access 门（首次控制某包没有 allow_once / always_allow / deny）~~ **已实现（2026-09-15）**：身份 = 包名 + 签名证书 SHA-256（helper 新增 `app_identity` op）；按 D8② 拦 `decide`/`act`；三按钮 Mac 对话框；`always_allow` 持久化到 `<数据根>/app_permissions.json`（0600），`lau permissions` 列出、`--revoke <key>` 撤销 | daemon / helper | 真机已验证：门触发、身份取到真实签名摘要、`allow_once` 生效且**不落盘**、放行后 `decide` 恢复。Deny 与 `always_allow` 路径待验 |
 | 6 | 无 Android 证据层 guard（§7） | `daemon.rs` | **已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），11 个单测通过；helper 已补 `password` 标记。**真机已验证密码框 → R4**（验收 16）；验收 15（谎报 navigate）目前只有单测覆盖 |
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
