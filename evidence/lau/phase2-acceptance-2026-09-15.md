@@ -509,6 +509,47 @@ $ lau resume <t1> → {state:"waiting_actor"}；watch:{healthy:true, dead_reason
 
 **本批未验**：任务闭环内的中文搜索（Phase 2 P2-4 已单独验过 CJK `set_value`）；真正的双设备并行（只有一台设备）。
 
+## 追加：Phase 3 安全验收（indeterminate / 证据覆盖低报 / 破坏性门）
+
+```
+# 前置：任务 task_1789540146893734000（com.android.settings，app access 已放行）
+
+① 中文搜索（分项）—— 本次**未串成任务闭环**
+   设置首页当前视图的树里没有搜索框（可能已滚出可视区），未强凑。
+   分项均已单独验证：CJK `set_value` 见 Phase 2 的 P2-4；`global_back` 见本文件上一节。
+
+② indeterminate（§4 不确定结果不重放）—— ✅
+$ adb shell am crash dev.anythinguse.lau.helper      # 动作途中让 helper 消失
+$ lau act <t> --observation-id a14a123c:5 --action '{"kind":"semantic","type":"invoke","element_id":"e5"}' …
+{"error":"indeterminate: the action may or may not have been applied — re-observe with `decide`
+          before acting again, and do not resend it (helper accepted the connection but sent no
+          response — the AccessibilityService is probably disabled or restarting; …)"}   exit=3
+   task: {state:waiting_actor, wait_reason:agent_decision, indeterminate:true, observation_id:null}
+        ↑ 不自动重试；观察被作废强制重观察；结果未知这一点被显式标记
+   恢复：helper 2 秒后自动重启；`decide` 立刻可用（新会话 a14a123c）
+
+③ 证据覆盖低报（验收 15/6）—— ✅ 最关键的一条
+   路径：设置 → 应用设置 → 应用列表 → 百度地图详情页 → e32「卸载」
+$ lau act <t> --observation-id a14a123c:4 \
+      --action '{"kind":"semantic","type":"invoke","element_id":"e32"}' \
+      --effect '{"kind":"navigate","summary":"查看这个项目"}'      # 故意低报
+{"status":"waiting_user","wait_reason":"consequence"}              exit=2
+        ↑ 谎报 navigate 仍到达 R3 后果门，没有被静默执行
+   机主点 Deny → task {state:failed, error:"user denied on Mac dialog"}
+$ adb shell pm path com.baidu.BaiduMap
+package:/data/app/~~59m0w30BrUf7k1EHFoNscw==/com.baidu.BaiduMap-…/base.apk   ← 应用还在，没有被卸载 ✅
+
+④ 过程记录：daemon 传输异常第二次出现
+$ lau permissions --json
+lau: daemon response is not JSON: EOF while parsing a value at line 1 column 0     ← 0 字节空响应
+   重试即成功；daemon.log 显示 `op=permissions_list bytes=38`（该次调用其实成功）。
+   与 §0 #19 的 8192 字节截断同族，但这次是 0 字节 → **削弱了"固定 8 KiB 边界"的假设**，
+   根因仍未确证，继续靠 daemon.log 的字节数埋点等待现场。
+```
+
+**顺带的产品化改进**：被门拦下时，任务的 `last_action_summary` 现在会记录原因
+（`gated (R3): …` / `takeover (R4): …`），`lau status --json` 即可审计"为什么被拦"。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。

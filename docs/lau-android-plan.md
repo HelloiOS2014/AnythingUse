@@ -50,7 +50,7 @@
 | 6 | 无 Android 证据层 guard（§7） | `daemon.rs` | **已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），11 个单测通过；helper 已补 `password` 标记。**真机已验证密码框 → R4**（验收 16）；验收 15（谎报 navigate）目前只有单测覆盖 |
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
-| 9 | 无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误 | `daemon.rs` | 计划要求的「不确定不重放」语义缺失 |
+| 9 ✅ | ~~无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误~~ **已实现并真机验证（2026-09-15）**：helper 的语义错误码与传输类错误分离（`is_helper_semantic_error`）；传输类 → `indeterminate:true`、作废观察、保持可继续、**绝不重试** | `daemon.rs` | 真机：`am crash` 后立刻 `act` → `indeterminate: … do not resend it`，任务 `waiting_actor` + `observation_id:null`；helper 2s 后恢复、`decide` 立即可用 |
 | 10 ✅ | ~~无 per-serial 队列 / forward 隔离~~ **已实现（2026-09-15）**：`serial_is_busy` + `promote_next_for_serial`，每个请求入口做一次 `sweep_queues`；同设备第二个任务进 `queued`，终态后自动提升 | `daemon.rs` | 真机（单设备）验证通过；转发隔离本就按 serial 键控端口。**双设备并行未验**（只有一台设备） |
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
@@ -65,7 +65,7 @@
 | 16 ✅ | ~~helper **未按 §5.2 复核窗口 ID/包名/bounds/能力**~~ **已修（2026-09-15）**：`resolveNode` 落地 7 步校验（会话/代次/下标+refresh/包名+windowId/bounds 容差 0.5%/能力） | helper | 已按 §5.2 实现，验收第 11、12 条真机通过 |
 | 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
-| 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`）。**等复发抓现场** |
+| 19 | 🟠 daemon 响应传输异常（**已观测两次**：8192 字节截断、以及 0 字节空响应 `EOF … column 0`；均重试即成功） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`、`permissions_list bytes=38`）。0 字节那次**削弱了"固定 8 KiB 边界"的假设**，根因仍未确证，继续等现场 |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
 | 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
@@ -272,7 +272,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）—— ✅ 2026-09-15 通过
   4. getevent 断流 → fail closed（暂停并报告，不装共存）—— ✅ **2026-09-15 真机故障注入通过**：杀掉 `getevent` 进程后 `decide` → `paused` + `wait_reason=watch_unavailable`，`status` 报告 `watch:{healthy:false, dead_reason:"getevent stream ended"}`；`lau resume` 重建监听后 `healthy:true` 恢复
   5. app_access 首次 → **Mac 对话框**（与 §5.4 / D6 一致；**不是**手机弹窗，避免误触发 getevent 接管）；批准 → 重观察继续；helper 自动化触不到对话框
-  6. 破坏性效果声明 → `waiting_user`（CLI exit 2，Agent 停）；**把删除/支付标签谎报为 navigate → 仍要到达正确的门**（证据覆盖低报）
+  6. 破坏性效果声明 → `waiting_user`（CLI exit 2，Agent 停）；**把删除/支付标签谎报为 navigate → 仍要到达正确的门**（证据覆盖低报）—— ✅ **2026-09-15 真机通过**：对应用详情页的「卸载」提交 `invoke` 但谎报 `effect=navigate` → 仍停在 `wait_reason=consequence`（exit 2）；机主点 Deny → 任务 `failed`，且 `pm path` 确认应用**没有被卸载**
   7. 有语义能力时提交坐标 → `semantic_action_required` —— ✅ **2026-09-15 真机通过**：`act` 提交 `targeted/click` → 立即 `semantic_action_required`（exit 3），**不弹任何门**。注意：曾因证据层先判 R3 而错误地弹出后果确认框，已把"坐标一律先拒"提到门之前（D5 未决期间不得让坐标经审批执行）
   8. 双设备接入：per-serial 队列与 forward 各自独立 —— 🟡 **per-serial 队列已实现并真机验证（单设备）**：同设备第二个任务 `state=queued`（`wait_reason=device_queue`），`decide` 返回 `queued` 且不弹门；前一个任务终态后自动提升（`promoted from the device queue`）。**真正的双设备并行未验**（当前只有一台设备）
   9. daemon 空闲退出（60s）→ 下次 `run` 重新拉起，任务状态不丢（队列在 daemon 内存，任务跨 daemon 重启不承诺——单任务内完成）
