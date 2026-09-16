@@ -66,11 +66,11 @@
 | 17 | 🔴 **HyperOS 会自行关闭无障碍服务**（机主确认未操作；发生在杀进程之后） | 系统 / 产品 | 命中 §9 风险表；任务无法继续，必须人工重开。**一次复现尝试未成功（`am crash` 后服务仍为 enabled），触发条件未确证** |
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
 | 19 | 🟠 daemon 响应被**截断在 8192 字节**，`decide` 偶发 exit 70（12+15 次压测未复现，根因未确证） | daemon | Agent 循环偶发中断；`decide --wait` 不重试硬错误 |
-| 20 | 🟠 doctor 判据不可靠：`bound` 恒为真（匹配到无障碍快捷按钮条目）、`ping` 有滞后窗口 | `main.rs` | 四态里**只有 `enabled` 可信**，其余只能当诊断 |
+| 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
 | 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
 | 23 | 🟡 关屏时 `screenshot` 照常"成功"（返回锁屏 PNG，exit 0） | `main.rs` | Agent 若只看截图会拿到无意义画面 |
-| 24 | 🟡 服务被禁用后 socket 仍可连接但返回空响应（`helper returned an empty response`） | daemon / helper | 用户得不到可行动的指引 |
+| 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
 
@@ -183,6 +183,12 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 ### 5.5 构建与分发
 - Gradle + Kotlin，`minSdk 24`（dispatchGesture/SCROLL_* 均满足）。`scripts/install-android-helper.sh`（`adb install -r`；含 HyperOS「USB 安装」失败指引）。
 - `lau doctor` 四态区分：**installed / enabled / bound / ping-responsive**；验收含杀进程与**重启手机**后恢复。
+  **判据与优先级（2026-09-15 修订，针对 §0 #20/#24）**：
+  1. `enabled`（读 `settings get secure enabled_accessibility_services`）是**唯一门禁依据** —— 只有它能决定 blocker 与退出码；
+  2. `bound` 必须**只解析 `dumpsys accessibility` 的 `Bound services:` 那一行**，不得对整篇 dumpsys 做子串匹配（禁用后 `button:{…LauAccessibilityService…}` 条目仍在，会造成恒真的假阳性）；
+  3. `ping` 仅作诊断，存在**滞后窗口**（服务已禁用、旧实例 socket 尚未销毁时仍能应答）；`enabled:false` 而 `ping:true` 时必须在报告里显式说明"这是陈旧实例，以 `enabled` 为准"；
+  4. 服务禁用后 socket 可连接但返回空响应：CLI 必须给出**可行动的报错**（提示去 `lau doctor` 并重新打开无障碍开关），不得只报 `empty response`。
+  5. `lau doctor` 只读已足够；CLI 只有在**能够**做到时才去切换开关（本章暂不允许 CLI 改设备设置）。
 
 ## 6. `lau` daemon（Phase 3，按需非常驻）
 

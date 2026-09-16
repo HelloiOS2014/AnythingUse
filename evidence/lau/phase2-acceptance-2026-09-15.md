@@ -299,6 +299,35 @@ $ lau dump → 页面变为蓝牙设置：返回 | 蓝牙 | 设备名称 <phone-
 
 APK 更新后的一个附带观察：安装新 APK 后 5 秒内 `ping` 曾为 false（服务尚未重新绑定），随后**自动恢复**（新 PID 21838），无需人工切换；doctor 当时给出的 blocker 文案（"toggle AnythingUse LAU off/on"）是准确的但偏保守。
 
+## 追加：#20 / #24 修复与验证（2026-09-15 晚）
+
+**#20 doctor 判据**（`crates/lau-cli/src/main.rs`）
+
+真机抓到的 `dumpsys accessibility` 结构（这台 ROM）：
+
+```
+     button:{dev.anythinguse.lau.helper/…LauAccessibilityService, com.android.settings/…AccessibilityMenuService}
+     Bound services:{Service[label=无障碍功能菜单, feedbackType[FEEDBACK_GENERIC], capabilities=8, …], 
+                     Service[label=AnythingUse LAU, feedbackType[FEEDBACK_GENERIC], capabilities=33, …]}
+     Enabled services:{…}
+     Binding services:{}
+```
+
+- 关键细节：`Bound services:` **跨多行**，且服务是**按 `android:label` 列出**（不是组件名）——只读第一行、或只找组件名都会漏。
+- 修复：`bound_from_dumpsys` 扫描该块（遇到 `Enabled services:` / `Binding services:` 结束），同时匹配组件名与 label；`enabled` 作为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里说明"陈旧实例"。
+- 验证：真机（服务已启用）`doctor` → `{installed:true, enabled:true, bound:true, ping:true, notes:[], blockers:[]}` exit 0 ✅；禁用态由**用真机原文写的单测**覆盖（`bound_comes_from_the_bound_services_block_only`，6/6 通过）。
+
+**#24 空响应报错**（`crates/lau-cli/src/helper.rs`）
+
+```
+旧：error: helper returned an empty response
+新：error: helper accepted the connection but sent no response — the AccessibilityService is
+     probably disabled or restarting; run `lau doctor --json` and re-enable
+     Settings → Accessibility → AnythingUse LAU
+```
+
+（连接被拒/中断的另一条路径也带上了同一句指引。）**未做实机复现**：该错误只在"服务已禁用、旧实例 socket 尚未销毁"的窗口期出现，复现需要关掉无障碍开关。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
