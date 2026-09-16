@@ -13,7 +13,7 @@
 | 断言 | 结果 |
 |---|---|
 | P2-1 doctor 四态 + 未启用时的引导 blocker | ✅ 两条路径均过（禁用时精确报出引导 blocker，exit 3） |
-| P2-2 dump：已知 label / 能力字段 / 包与窗口身份 | 🟡 包名、能力字段、真实 label 均过；**窗口身份取不到**（#22） |
+| P2-2 dump：已知 label / 能力字段 / 包与窗口身份 | ✅ 全部通过（#22 修好后补齐窗口身份；真机实测 `windowId=9381`、`windowTitle="应用信息"`、`rotation`/`displayId`/`capturedAtMs` 齐全） |
 | P2-3 invoke 语义点开（全程无坐标） | ✅ 设置首页 →「我的设备」详情页，代次 15→16 |
 | P2-4 set_value 中文并重 dump 断言 | ✅ 重 dump 得到 `value == 你好LCU` |
 | P2-5 陈旧 observationId / 能力未声明 | ✅ `stale_observation`、`unsupported_capability`，均 exit 3 |
@@ -68,7 +68,7 @@
 | 19 | 🟠 daemon 响应传输异常（**已观测两次**：8192 字节截断、以及 0 字节空响应 `EOF … column 0`；均重试即成功） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`、`permissions_list bytes=38`）。0 字节那次**削弱了"固定 8 KiB 边界"的假设**，根因仍未确证，继续等现场 |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
 | 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
-| 22 | 🟡 dump 缺窗口身份：`windowTitle` 取自 `root.contentDescription` 实测恒空、无 `windowId`；§5.3 的时间戳 / 方向(displayId) / 截图可用性也缺 | helper | 验收 P2-2 只完成一半；缺 `target_lost` 类判定依据 |
+| 22 ✅ | ~~dump 缺窗口身份~~ **已修并真机验证（2026-09-15）**：helper 改用 `AccessibilityWindowInfo.title` + `root.windowId`，并补 `capturedAtMs` / `rotation` / `displayId`；daemon 的 `decide` 增加 `screenshot: bool` | helper / daemon | 真机实测 `{"windowId":9381,"windowTitle":"应用信息","capturedAtMs":…,"rotation":0,"displayId":0}` —— 验收 P2-2 的「包/窗口身份」与 §5.3 字段清单现已齐全 |
 | 23 ✅ | ~~关屏时 `screenshot` 照常"成功"~~ **已修并验证（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked` | `main.rs` | 真机三条全过：亮屏解锁 → ok 带状态；关屏 → `screen_off`；亮屏锁屏 → `device_locked`（均未唤醒/解锁设备） |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
 | 25 | 🟡 **bounds 复核在列表动画期间会拒绝动作**（真机遇到一次：连续滚动时 `stale_observation: node e1 moved or resized since the dump`） | helper | 设计内的 fail-closed，但会带来"重试一次"的操作成本；已写入 troubleshooting。若实测过于频繁，再评估 D7 的容差或对可滚动容器放宽 |

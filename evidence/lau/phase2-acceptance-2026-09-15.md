@@ -550,6 +550,21 @@ lau: daemon response is not JSON: EOF while parsing a value at line 1 column 0  
 **顺带的产品化改进**：被门拦下时，任务的 `last_action_summary` 现在会记录原因
 （`gated (R3): …` / `takeover (R4): …`），`lau status --json` 即可审计"为什么被拦"。
 
+## 追加：#22 窗口身份 + §5.3 字段（P2-2 补齐）— ✅ 真机通过
+
+修复：helper 的 dump 改用 `AccessibilityWindowInfo.title` 与 `root.windowId`（原来取 `root.contentDescription`，
+本平台恒空），并补齐 `capturedAtMs` / `rotation` / `displayId`；daemon 的 `decide` 增加 `screenshot: bool`。
+
+```
+$ lau dump --json | jq -c '{packageName,windowId,windowTitle,capturedAtMs,rotation,displayId,isInteractive,keyguardLocked}'
+{"packageName":"com.miui.securitycenter","windowId":9381,"windowTitle":"应用信息",
+ "capturedAtMs":1789540498654,"rotation":0,"displayId":0,
+ "isInteractive":true,"keyguardLocked":false}
+```
+
+至此 Phase 2 的 P2-2（「已知 label / 能力字段 / 包与窗口身份」）全部通过，§5.3 要求的字段清单
+（`isInteractive`、Keyguard 态、前台包名/窗口、时间戳、方向/display、截图可用性）齐全。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
