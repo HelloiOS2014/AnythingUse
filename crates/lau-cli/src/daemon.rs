@@ -727,6 +727,7 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                 t.state = "waiting_actor".into();
                 t.wait_reason = Some("takeover".into());
                 t.takeover = true;
+                t.last_action_summary = Some(format!("takeover (R4): {}", judged.rationale));
                 t.pending_identity = None;
                 t.pending_brief = None;
                 let body = format!(
@@ -764,6 +765,8 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                     t.wait_reason = Some("consequence".into());
                     t.pending_identity = Some(identity);
                     t.pending_brief = Some(action_brief(&action));
+                    t.last_action_summary =
+                        Some(format!("gated (R3): {}", judged.rationale));
                     let summary = effect
                         .as_ref()
                         .and_then(|e| e.summary.clone())
