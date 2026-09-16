@@ -92,6 +92,8 @@ struct Task {
     observation_id: Option<String>,
     /// Observation token the parked consequence action was bound to.
     pending_observation: Option<String>,
+    /// R4 gate: the human performs the action; nothing is stored for replay.
+    takeover: bool,
     elements: Value,
     image_path: Option<String>,
     last_action_summary: Option<String>,
@@ -345,6 +347,7 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         step: 0,
         observation_id: None,
         pending_observation: None,
+        takeover: false,
         elements: json!([]),
         image_path: None,
         last_action_summary: None,
@@ -391,6 +394,7 @@ fn task_view(t: &Task) -> Value {
         "goal": t.goal,
         "state": t.state,
         "wait_reason": t.wait_reason,
+        "takeover": t.takeover,
         "actor": t.actor,
         "app": t.app,
         "serial": t.serial,
@@ -507,22 +511,58 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
             return json!({"ok": true, "data": task_view(t)});
         }
         Action::Semantic(_) | Action::Targeted(_) => {
-            if effect.is_none() {
-                t.state = "failed".into();
-                t.error = Some("executable action has no effect declaration".into());
-                return json!({"ok": false, "error": t.error.clone()});
+            // Runtime-side evidence floor (plan §5.6): the Actor's claim can only
+            // raise it, never lower it.
+            let judged = crate::evidence::judge(
+                t.elements.as_array().map(|v| v.as_slice()).unwrap_or(&[]),
+                &action,
+                effect.as_ref(),
+            );
+            if judged.unknown {
+                t.state = "waiting_actor".into();
+                t.wait_reason = Some("consequence".into());
+                t.error = Some(format!(
+                    "actor cannot classify consequence: {}",
+                    judged.rationale
+                ));
+                let view = task_view(t);
+                return json!({
+                    "ok": false,
+                    "error": "waiting_user",
+                    "wait_reason": "actor_cannot_classify",
+                    "data": view
+                });
             }
-            let kind = effect.as_ref().unwrap().kind;
-            if matches!(
-                kind,
-                EffectKind::Destructive
-                    | EffectKind::ExternalCommunication
-                    | EffectKind::ExternalSubmit
-                    | EffectKind::PermissionChange
-                    | EffectKind::Financial
-                    | EffectKind::Credential
-                    | EffectKind::Unknown
-            ) {
+            if judged.risk.requires_user_takeover() {
+                // R4 → human takeover. The proposal is discarded, never replayed.
+                t.state = "waiting_actor".into();
+                t.wait_reason = Some("takeover".into());
+                t.takeover = true;
+                t.pending_action = None;
+                t.pending_effect = None;
+                t.pending_observation = None;
+                let body = format!(
+                    "LAU judged this action R4: {}\n\nApp: {}\nAction: {}",
+                    judged.rationale,
+                    t.app,
+                    action_brief(&action)
+                );
+                let view = task_view(t);
+                let tid = t.id.clone();
+                drop(g);
+                spawn_mac_takeover(inner.clone(), tid, body);
+                return json!({
+                    "ok": false,
+                    "error": "waiting_user",
+                    "wait_reason": "takeover",
+                    "data": view
+                });
+            }
+            if judged.risk.requires_per_action_approval() {
+                let kind = effect
+                    .as_ref()
+                    .map(|e| e.kind)
+                    .unwrap_or(EffectKind::Unknown);
                 t.state = "waiting_actor".into();
                 t.wait_reason = Some("consequence".into());
                 t.pending_action = Some(action.clone());
@@ -533,10 +573,11 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                     .and_then(|e| e.summary.clone())
                     .unwrap_or_else(|| format!("{kind:?}"));
                 let body = format!(
-                    "LAU wants to run a {} action on {}\n\n{}\n\nAllow? (Mac dialog — not the phone)",
+                    "LAU wants to run a {} action on {}\n\n{}\n\nRisk: {}\n\nAllow? (Mac dialog — not the phone)",
                     format!("{kind:?}").to_lowercase(),
                     t.app,
-                    summary
+                    summary,
+                    judged.rationale
                 );
                 let view = task_view(t);
                 let tid = t.id.clone();
@@ -698,6 +739,7 @@ fn op_resume(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     t.pending_action = None;
     t.pending_effect = None;
     t.pending_observation = None;
+    t.takeover = false;
     t.error = None;
     t.last_action_summary = Some("resumed; re-observe with the next decide".into());
     json!({"ok": true, "data": task_view(t)})
@@ -710,6 +752,12 @@ fn op_approve(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         Some(t) => t,
         None => return json!({"ok": false, "error": format!("unknown task {id}")}),
     };
+    if t.takeover {
+        return json!({
+            "ok": false,
+            "error": "takeover in progress — do it on the phone; the Mac dialog is the only control"
+        });
+    }
     if t.wait_reason.as_deref() != Some("consequence") || t.pending_action.is_none() {
         return json!({"ok": false, "error": "no pending consequence grant"});
     }
@@ -784,18 +832,100 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
     });
 }
 
-fn mac_dialog_allow(body: &str) -> bool {
+fn mac_dialog_choice(body: &str, title: &str, deny_label: &str, ok_label: &str) -> bool {
     let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
-        r#"display dialog "{escaped}" buttons {{"Deny", "Allow"}} default button "Deny" with title "AnythingUse LAU""#
+        r#"display dialog "{escaped}" buttons {{"{deny_label}", "{ok_label}"}} default button "{deny_label}" with title "{title}""#
     );
     let out = Command::new("osascript").arg("-e").arg(&script).output();
     match out {
         Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).contains("Allow")
+            String::from_utf8_lossy(&o.stdout).contains(ok_label)
         }
         _ => false,
     }
+}
+
+fn mac_dialog_allow(body: &str) -> bool {
+    mac_dialog_choice(body, "AnythingUse LAU", "Deny", "Allow")
+}
+
+/// Short, credential-free description of a proposal for a human-facing dialog.
+fn action_brief(action: &Action) -> String {
+    match action {
+        Action::Semantic(SemanticAction::Invoke { element_id }) => format!("invoke {element_id}"),
+        Action::Semantic(SemanticAction::SetValue { element_id, .. }) => {
+            format!("set_value {element_id} (value withheld)")
+        }
+        Action::Semantic(SemanticAction::Scroll {
+            element_id,
+            delta_y,
+            ..
+        }) => format!("scroll {element_id:?} dy={delta_y}"),
+        Action::Semantic(SemanticAction::Focus { element_id }) => format!("focus {element_id}"),
+        Action::Semantic(SemanticAction::Navigate { .. }) => "navigate".into(),
+        Action::Targeted(_) => "coordinate input".into(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// R4 takeover (plan §5.4): the human does the action on the phone; on Done the
+/// proposal is discarded and the task re-observes. Nothing is ever replayed.
+fn spawn_mac_takeover(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
+    thread::spawn(move || {
+        let cancelled = |inner: &Arc<Mutex<Inner>>, reason: &str| {
+            if let Ok(mut g) = inner.lock() {
+                if let Some(t) = g.tasks.get_mut(&task_id) {
+                    t.takeover = false;
+                    t.state = "failed".into();
+                    t.error = Some(reason.to_string());
+                    t.wait_reason = None;
+                }
+            }
+        };
+        let start = mac_dialog_choice(
+            &format!(
+                "{body}\n\nDo the action yourself on the phone — AnythingUse will NOT run it for you.",
+            ),
+            "AnythingUse LAU — start takeover",
+            "Cancel",
+            "Start takeover",
+        );
+        if !start {
+            cancelled(&inner, "user cancelled the takeover");
+            return;
+        }
+        let done = mac_dialog_choice(
+            "Takeover in progress.\n\nClick Done only after you finished the action yourself on the phone.",
+            "AnythingUse LAU — takeover done?",
+            "Cancel",
+            "Done",
+        );
+        if !done {
+            cancelled(&inner, "user cancelled the takeover");
+            return;
+        }
+        let mut g = match inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let serial = match g.tasks.get(&task_id) {
+            Some(t) if t.wait_reason.as_deref() == Some("takeover") => t.serial.clone(),
+            _ => return,
+        };
+        let epoch = watch_state(&g, &serial).epoch;
+        if let Some(t) = g.tasks.get_mut(&task_id) {
+            t.takeover = false;
+            t.state = "waiting_actor".into();
+            t.wait_reason = Some("agent_decision".into());
+            t.pending_action = None;
+            t.pending_effect = None;
+            t.pending_observation = None;
+            t.observation_id = None;
+            t.touch_epoch = epoch;
+            t.last_action_summary = Some("takeover done by the human; re-observe".into());
+        }
+    });
 }
 
 fn helper_call(serial: &str, token: &str, action: &Action) -> Result<&'static str> {
@@ -931,6 +1061,7 @@ mod tests {
             step: 0,
             observation_id: Some("abcd1234:1".into()),
             pending_observation: None,
+            takeover: false,
             elements: json!([]),
             image_path: None,
             last_action_summary: None,

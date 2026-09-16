@@ -7,6 +7,7 @@
 //! injection. Status and known gaps: `docs/lau-android-plan.md` §0.
 
 mod daemon;
+mod evidence;
 mod helper;
 
 use anyhow::{bail, Context, Result};

@@ -280,6 +280,8 @@ class LauAccessibilityService : AccessibilityService() {
                     .put("capabilities", capsJson)
                 if (!label.isNullOrBlank()) obj.put("label", label.take(200))
                 if (node.isEditable && node.text != null) obj.put("value", node.text.toString().take(200))
+                // Plan §5.6: password evidence for the Android effect guard.
+                if (node.isPassword) obj.put("password", true)
                 out.put(obj)
             }
         }
