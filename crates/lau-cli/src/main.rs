@@ -59,8 +59,9 @@ enum Commands {
     /// Semantic click on a dumped element
     Invoke {
         element_id: String,
+        /// Opaque observation token from `lau dump` (`<sessionId>:<generation>`)
         #[arg(long)]
-        observation_id: i64,
+        observation_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -68,16 +69,18 @@ enum Commands {
     SetValue {
         element_id: String,
         value: String,
+        /// Opaque observation token from `lau dump` (`<sessionId>:<generation>`)
         #[arg(long)]
-        observation_id: i64,
+        observation_id: String,
         #[arg(long)]
         json: bool,
     },
     /// Semantic scroll. dy>0 forward/down, dy<0 backward/up
     Scroll {
         element_id: String,
+        /// Opaque observation token from `lau dump` (`<sessionId>:<generation>`)
         #[arg(long)]
-        observation_id: i64,
+        observation_id: String,
         #[arg(long, default_value_t = 0.0)]
         dx: f64,
         #[arg(long, default_value_t = 1.0)]

@@ -30,14 +30,38 @@ class LauAccessibilityService : AccessibilityService() {
     private var server: LocalServerSocket? = null
     private var acceptThread: Thread? = null
 
+    /**
+     * Random identity of *this service instance*. Every observation id carries
+     * it, so an instance rebuild (screen off/on, rebind, crash) invalidates all
+     * earlier observations even when the generation counter starts over.
+     */
+    @Volatile private var sessionId: String = ""
+
     @Volatile private var generation: Long = 0
     private val nodes = ArrayList<AccessibilityNodeInfo>(64)
+
+    /** What the current dump advertised per element id (plan §5.2 steps 4–6). */
+    private val meta = HashMap<String, ElementMeta>()
     private val lock = Any()
+
+    private class ElementMeta(
+        val packageName: String,
+        val windowId: Int,
+        val x: Double,
+        val y: Double,
+        val width: Double,
+        val height: Double,
+        val capabilities: Set<String>,
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        sessionId = newSessionId()
         startServer()
     }
+
+    private fun newSessionId(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "").take(8)
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Window changes invalidate the dump generation; next dump is fresh.
@@ -112,7 +136,13 @@ class LauAccessibilityService : AccessibilityService() {
         val op = req.optString("op", "")
         val resp = try {
             when (op) {
-                "ping" -> ok(req, JSONObject().put("pong", true).put("generation", generation))
+                "ping" -> ok(
+                    req,
+                    JSONObject()
+                        .put("pong", true)
+                        .put("generation", generation)
+                        .put("sessionId", sessionId)
+                )
                 "dump" -> dump(req)
                 "foreground" -> foreground(req)
                 "invoke" -> invoke(req)
@@ -189,7 +219,7 @@ class LauAccessibilityService : AccessibilityService() {
             walk(root, collected, sw, sh)
         }
         val data = screenState()
-            .put("observationId", generation)
+            .put("observationId", "$sessionId:$generation")
             .put("packageName", pkg)
             .put("windowTitle", root.contentDescription?.toString() ?: "")
             .put("elements", collected)
@@ -204,32 +234,47 @@ class LauAccessibilityService : AccessibilityService() {
             if (bounds.width() > 0 && bounds.height() > 0) {
                 val id = "e${nodes.size + 1}"
                 nodes.add(AccessibilityNodeInfo.obtain(node))
-                val caps = JSONArray()
+                val caps = linkedSetOf<String>()
                 if (node.isClickable || hasAction(node, AccessibilityNodeInfo.ACTION_CLICK)) {
-                    caps.put("invoke")
+                    caps.add("invoke")
                 }
                 if (node.isEditable || hasAction(node, AccessibilityNodeInfo.ACTION_SET_TEXT)) {
-                    caps.put("set_value")
+                    caps.add("set_value")
                 }
                 if (hasAction(node, AccessibilityNodeInfo.ACTION_FOCUS) || node.isFocusable) {
-                    caps.put("focus")
+                    caps.add("focus")
                 }
                 if (node.isScrollable ||
                     hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ||
                     hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
                 ) {
-                    caps.put("scroll")
+                    caps.add("scroll")
                 }
+                val nx = bounds.left / sw
+                val ny = bounds.top / sh
+                val nw = bounds.width() / sw
+                val nh = bounds.height() / sh
+                meta[id] = ElementMeta(
+                    node.packageName?.toString() ?: "",
+                    node.windowId,
+                    nx,
+                    ny,
+                    nw,
+                    nh,
+                    caps.toSet(),
+                )
+                val capsJson = JSONArray()
+                for (cap in caps) capsJson.put(cap)
                 val label = node.text?.toString() ?: node.contentDescription?.toString()
                 val obj = JSONObject()
                     .put("id", id)
                     .put("role", shortRole(node.className?.toString()))
                     .put("frame", JSONObject()
-                        .put("x", bounds.left / sw)
-                        .put("y", bounds.top / sh)
-                        .put("width", bounds.width() / sw)
-                        .put("height", bounds.height() / sh))
-                    .put("capabilities", caps)
+                        .put("x", nx)
+                        .put("y", ny)
+                        .put("width", nw)
+                        .put("height", nh))
+                    .put("capabilities", capsJson)
                 if (!label.isNullOrBlank()) obj.put("label", label.take(200))
                 if (node.isEditable && node.text != null) obj.put("value", node.text.toString().take(200))
                 out.put(obj)
@@ -261,35 +306,8 @@ class LauAccessibilityService : AccessibilityService() {
         return if (i >= 0) className.substring(i + 1) else className
     }
 
-    private fun requireNode(req: JSONObject): AccessibilityNodeInfo {
-        val obs = req.optLong("observationId", -1)
-        val eid = req.optString("elementId", "")
-        if (obs <= 0 || eid.isEmpty()) {
-            throw HelperException("protocol_error", "observationId and elementId required")
-        }
-        synchronized(lock) {
-            if (obs != generation) {
-                throw HelperException("stale_observation", "observation $obs is not current ($generation)")
-            }
-            val idx = eid.removePrefix("e").toIntOrNull()?.minus(1)
-                ?: throw HelperException("element_not_found", "bad element id $eid")
-            if (idx < 0 || idx >= nodes.size) {
-                throw HelperException("element_not_found", "element $eid not in dump")
-            }
-            val node = nodes[idx]
-            if (!node.refresh()) {
-                throw HelperException("stale_observation", "node $eid failed refresh")
-            }
-            val pkg = node.packageName?.toString() ?: ""
-            if (pkg == packageName) {
-                throw HelperException("forbidden_package", "refusing to automate the helper itself")
-            }
-            return node
-        }
-    }
-
     private fun invoke(req: JSONObject): JSONObject {
-        val node = requireNode(req)
+        val node = resolveNode(req, "invoke")
         if (!node.isClickable && !hasAction(node, AccessibilityNodeInfo.ACTION_CLICK)) {
             throw HelperException("unsupported_capability", "${req.optString("elementId")} has no invoke")
         }
@@ -299,7 +317,7 @@ class LauAccessibilityService : AccessibilityService() {
     }
 
     private fun setValue(req: JSONObject): JSONObject {
-        val node = requireNode(req)
+        val node = resolveNode(req, "set_value")
         if (!node.isEditable && !hasAction(node, AccessibilityNodeInfo.ACTION_SET_TEXT)) {
             throw HelperException("unsupported_capability", "${req.optString("elementId")} has no set_value")
         }
@@ -320,7 +338,7 @@ class LauAccessibilityService : AccessibilityService() {
     }
 
     private fun scroll(req: JSONObject): JSONObject {
-        val node = requireNode(req)
+        val node = resolveNode(req, "scroll")
         val dx = req.optDouble("dx", 0.0)
         val dy = req.optDouble("dy", 0.0)
         val action = when {
@@ -376,6 +394,94 @@ class LauAccessibilityService : AccessibilityService() {
             try { n.recycle() } catch (_: Exception) {}
         }
         nodes.clear()
+        meta.clear()
+    }
+
+    private fun screenSize(): Pair<Double, Double> {
+        val dm = resources.displayMetrics
+        return Pair(
+            dm.widthPixels.coerceAtLeast(1).toDouble(),
+            dm.heightPixels.coerceAtLeast(1).toDouble(),
+        )
+    }
+
+    /**
+     * Plan §5.2 (2026-09-15 修订) — resolve the node an observation-bound action
+     * refers to, or refuse. Never silently substitutes another node.
+     */
+    private fun resolveNode(req: JSONObject, requiredCapability: String): AccessibilityNodeInfo {
+        val token = req.optString("observationId", "")
+        val eid = req.optString("elementId", "")
+        if (token.isEmpty() || eid.isEmpty()) {
+            throw HelperException("protocol_error", "observationId and elementId required")
+        }
+        val sep = token.indexOf(':')
+        if (sep <= 0) {
+            throw HelperException("protocol_error", "malformed observationId (want <session>:<generation>)")
+        }
+        val sess = token.substring(0, sep)
+        val gen = token.substring(sep + 1).toLongOrNull()
+            ?: throw HelperException("protocol_error", "malformed observationId generation")
+        synchronized(lock) {
+            // 1–2. instance session, then generation: either mismatch is stale.
+            if (sessionId.isEmpty() || sess != sessionId) {
+                throw HelperException(
+                    "stale_observation",
+                    "observation belongs to session $sess, current is $sessionId"
+                )
+            }
+            if (gen != generation) {
+                throw HelperException(
+                    "stale_observation",
+                    "observation $token is not current ($sessionId:$generation)"
+                )
+            }
+            // 3. index within this dump, and the node must still refresh.
+            val idx = eid.removePrefix("e").toIntOrNull()?.minus(1)
+                ?: throw HelperException("element_not_found", "bad element id $eid")
+            if (idx < 0 || idx >= nodes.size) {
+                throw HelperException("element_not_found", "element $eid not in dump")
+            }
+            val recorded = meta[eid]
+                ?: throw HelperException("stale_observation", "no snapshot recorded for $eid")
+            val node = nodes[idx]
+            if (!node.refresh()) {
+                throw HelperException("stale_observation", "node $eid failed refresh")
+            }
+            // 4. identity: same package and same window as the observation.
+            val pkg = node.packageName?.toString() ?: ""
+            if (pkg == packageName) {
+                throw HelperException("forbidden_package", "refusing to automate the helper itself")
+            }
+            if (pkg != recorded.packageName) {
+                throw HelperException("stale_observation", "node $eid now belongs to $pkg")
+            }
+            if (node.windowId != recorded.windowId) {
+                throw HelperException(
+                    "stale_observation",
+                    "node $eid moved to window ${node.windowId} (was ${recorded.windowId})"
+                )
+            }
+            // 5. bounds: normalized frame within tolerance (D7 option ②).
+            val b = Rect()
+            node.getBoundsInScreen(b)
+            val (sw, sh) = screenSize()
+            val moved = kotlin.math.abs(b.left / sw - recorded.x) > BOUNDS_TOLERANCE ||
+                kotlin.math.abs(b.top / sh - recorded.y) > BOUNDS_TOLERANCE ||
+                kotlin.math.abs(b.width() / sw - recorded.width) > BOUNDS_TOLERANCE ||
+                kotlin.math.abs(b.height() / sh - recorded.height) > BOUNDS_TOLERANCE
+            if (moved) {
+                throw HelperException("stale_observation", "node $eid moved or resized since the dump")
+            }
+            // 6. capability: only what the dump advertised.
+            if (requiredCapability !in recorded.capabilities) {
+                throw HelperException(
+                    "unsupported_capability",
+                    "$eid did not advertise $requiredCapability"
+                )
+            }
+            return node
+        }
     }
 
     private class HelperException(val code: String, message: String) : Exception(message)
@@ -384,5 +490,8 @@ class LauAccessibilityService : AccessibilityService() {
         const val SOCKET_NAME = "dev.anythinguse.lau.helper"
         const val MAX_NODES = 400
         const val MAX_REQUEST = 64 * 1024
+
+        /** Normalized frame tolerance for the §5.2 bounds re-check (D7 option ②). */
+        const val BOUNDS_TOLERANCE = 0.005
     }
 }

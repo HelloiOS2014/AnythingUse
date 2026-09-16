@@ -87,7 +87,8 @@ struct Task {
     wait_reason: Option<String>,
     step: u32,
     observation_id: Option<String>,
-    helper_generation: i64,
+    /// Observation token the parked consequence action was bound to.
+    pending_observation: Option<String>,
     elements: Value,
     image_path: Option<String>,
     last_action_summary: Option<String>,
@@ -310,7 +311,7 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         wait_reason: Some("agent_decision".into()),
         step: 0,
         observation_id: None,
-        helper_generation: 0,
+        pending_observation: None,
         elements: json!([]),
         image_path: None,
         last_action_summary: None,
@@ -327,9 +328,16 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
 fn capture(task: &mut Task) -> Result<()> {
     let dump = helper_rpc(&task.serial, helper::wrap_op("dump", json!({})))
         .and_then(helper::unwrap_ok)?;
-    let gen = dump.get("observationId").and_then(|v| v.as_i64()).unwrap_or(0);
-    task.helper_generation = gen;
-    task.observation_id = Some(format!("obs_{gen}"));
+    // Opaque `<sessionId>:<generation>` token (plan §4): carried verbatim.
+    let token = dump
+        .get("observationId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let Some(token) = token else {
+        bail!("helper dump returned no observationId");
+    };
+    task.observation_id = Some(token);
     task.elements = dump.get("elements").cloned().unwrap_or(json!([]));
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -440,6 +448,12 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     if let Some(err) = watch_gate(t, &watch) {
         return json!({"ok": false, "error": err, "data": task_view(t)});
     }
+    // The token is opaque (`<sessionId>:<generation>`, plan §4): carry it, never
+    // parse or rebuild it.
+    let token = match t.observation_id.clone() {
+        Some(token) => token,
+        None => return json!({"ok": false, "error": "no observation bound to this task"}),
+    };
     match &action {
         Action::Done { summary } => {
             t.summary = Some(summary.clone());
@@ -480,6 +494,7 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                 t.wait_reason = Some("consequence".into());
                 t.pending_action = Some(action.clone());
                 t.pending_effect = effect.clone();
+                t.pending_observation = Some(token.clone());
                 let summary = effect
                     .as_ref()
                     .and_then(|e| e.summary.clone())
@@ -504,14 +519,13 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         }
         _ => {}
     }
-    let gen = t.helper_generation;
     let serial = t.serial.clone();
     let extra = match &action {
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
-            json!({"elementId": element_id, "observationId": gen})
+            json!({"elementId": element_id, "observationId": &token})
         }
         Action::Semantic(SemanticAction::SetValue { element_id, value }) => {
-            json!({"elementId": element_id, "observationId": gen, "text": value})
+            json!({"elementId": element_id, "observationId": &token, "text": value})
         }
         Action::Semantic(SemanticAction::Scroll {
             element_id,
@@ -524,10 +538,10 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                     return json!({"ok": false, "error": "scroll requires element_id"});
                 }
             };
-            json!({"elementId": eid, "observationId": gen, "dx": delta_x, "dy": delta_y})
+            json!({"elementId": eid, "observationId": &token, "dx": delta_x, "dy": delta_y})
         }
         Action::Semantic(SemanticAction::Focus { element_id }) => {
-            json!({"elementId": element_id, "observationId": gen})
+            json!({"elementId": element_id, "observationId": &token})
         }
         Action::Semantic(SemanticAction::Navigate { .. }) => {
             return json!({"ok": false, "error": "navigate is Chrome-only; not a lau action"});
@@ -650,6 +664,7 @@ fn op_resume(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     t.observation_id = None;
     t.pending_action = None;
     t.pending_effect = None;
+    t.pending_observation = None;
     t.error = None;
     t.last_action_summary = Some("resumed; re-observe with the next decide".into());
     json!({"ok": true, "data": task_view(t)})
@@ -685,7 +700,7 @@ fn op_approve(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
 fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
     thread::spawn(move || {
         let allowed = mac_dialog_allow(&body);
-        let (serial, gen, action) = {
+        let (serial, token, action) = {
             let mut g = inner.lock().expect("inner");
             let Some(t) = g.tasks.get_mut(&task_id) else {
                 return;
@@ -706,9 +721,13 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
                 None => return,
             };
             t.pending_effect = None;
-            (t.serial.clone(), t.helper_generation, action)
+            let token = match t.pending_observation.take() {
+                Some(token) => token,
+                None => return,
+            };
+            (t.serial.clone(), token, action)
         };
-        match helper_call(&serial, gen, &action) {
+        match helper_call(&serial, &token, &action) {
             Ok(op) => {
                 let mut g = inner.lock().expect("inner");
                 let epoch = watch_state(&g, &serial).epoch;
@@ -746,15 +765,15 @@ fn mac_dialog_allow(body: &str) -> bool {
     }
 }
 
-fn helper_call(serial: &str, gen: i64, action: &Action) -> Result<&'static str> {
+fn helper_call(serial: &str, token: &str, action: &Action) -> Result<&'static str> {
     let (op, extra) = match action {
         Action::Semantic(SemanticAction::Invoke { element_id }) => (
             "invoke",
-            json!({"elementId": element_id, "observationId": gen}),
+            json!({"elementId": element_id, "observationId": token}),
         ),
         Action::Semantic(SemanticAction::SetValue { element_id, value }) => (
             "set_value",
-            json!({"elementId": element_id, "observationId": gen, "text": value}),
+            json!({"elementId": element_id, "observationId": token, "text": value}),
         ),
         Action::Semantic(SemanticAction::Scroll {
             element_id: Some(eid),
@@ -762,11 +781,11 @@ fn helper_call(serial: &str, gen: i64, action: &Action) -> Result<&'static str> 
             delta_y,
         }) => (
             "scroll",
-            json!({"elementId": eid, "observationId": gen, "dx": delta_x, "dy": delta_y}),
+            json!({"elementId": eid, "observationId": token, "dx": delta_x, "dy": delta_y}),
         ),
         Action::Semantic(SemanticAction::Focus { element_id }) => (
             "invoke",
-            json!({"elementId": element_id, "observationId": gen}),
+            json!({"elementId": element_id, "observationId": token}),
         ),
         _ => bail!("action cannot be approved for helper execution"),
     };
@@ -877,8 +896,8 @@ mod tests {
             state: "waiting_actor".into(),
             wait_reason: Some("agent_decision".into()),
             step: 0,
-            observation_id: Some("obs_1".into()),
-            helper_generation: 1,
+            observation_id: Some("abcd1234:1".into()),
+            pending_observation: None,
             elements: json!([]),
             image_path: None,
             last_action_summary: None,
