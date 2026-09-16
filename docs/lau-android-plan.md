@@ -68,7 +68,6 @@
 | 18 ✅ | ~~**可点元素与 label 分离**~~ **已修（2026-09-15）**：dump 时把子树文字归并到可点行上（§3「label 归属」，深度 ≤3、≤3 段、≤200 字符） | helper | 真机验证：`e10 LinearLayout "蓝牙 已开启"`、`e5 "我的设备"` 等全部带名；按名字直接 `invoke` 打开蓝牙页成功 |
 | 19 | 🟠 daemon 响应传输异常（**已观测两次**：8192 字节截断、以及 0 字节空响应 `EOF … column 0`；均重试即成功） | daemon | **已加埋点（2026-09-15）**：daemon 把每次响应的 `op + bytes` 追加到 `<数据根>/daemon.log`（不含负载，>64 KiB 启动时截断）；真机已验证写入（`decide bytes=6660`、`permissions_list bytes=38`）。0 字节那次**削弱了"固定 8 KiB 边界"的假设**，根因仍未确证，继续等现场 |
 | 20 ✅ | ~~doctor 判据不可靠~~ **已修（2026-09-15）**：`bound` 改为解析 `Bound services:` **块**（该块跨多行、按 `android:label` 列出服务），`enabled` 为唯一门禁；`enabled:false && ping:true` 时在 `notes` 里显式说明是陈旧实例 | `main.rs` | 真机 `bound:true` 正确；禁用态由"真机原文单测"覆盖（§5.5 判据表已写明） |
-| 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | 观察极易过期，Agent 必须"拿到即用" |
 | 22 ✅ | ~~dump 缺窗口身份~~ **已修并真机验证（2026-09-15）**：helper 改用 `AccessibilityWindowInfo.title` + `root.windowId`，并补 `capturedAtMs` / `rotation` / `displayId`；daemon 的 `decide` 增加 `screenshot: bool` | helper / daemon | 真机实测 `{"windowId":9381,"windowTitle":"应用信息","capturedAtMs":…,"rotation":0,"displayId":0}` —— 验收 P2-2 的「包/窗口身份」与 §5.3 字段清单现已齐全 |
 | 23 ✅ | ~~关屏时 `screenshot` 照常"成功"~~ **已修并验证（2026-09-15）**：按 §5.3 先取屏幕状态，非交互/锁屏即 `screen_off` / `device_locked`（exit 3），成功时 JSON 带 `isInteractive`/`keyguardLocked` | `main.rs` | 真机三条全过：亮屏解锁 → ok 带状态；关屏 → `screen_off`；亮屏锁屏 → `device_locked`（均未唤醒/解锁设备） |
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
@@ -309,10 +308,10 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D1** `lau-cli` 依赖共享契约类型（**已落地**：依赖平台中立的 `anything-core`，不依赖 `lcu-core`；guard 本体不复用，Android 证据层待建）
 - **D2** helper 包名 `dev.anythinguse.lau.helper`（socket 名同前缀）
 - **D3** ~~进程内单任务~~ → **按需 daemon + 空闲退出**（已并入 §6）
-- **D5** 坐标兜底 = helper `dispatchGesture`（不经 ADB，受 `semantic_action_required` 约束）（推荐：是；替代项：完全禁止坐标）
+- **D5** 坐标兜底 = helper `dispatchGesture`（不经 ADB）—— **暂缓（2026-09-15 定）**：当前**一律拒绝坐标**（`semantic_action_required`，验收 7 已真机通过）。理由：坐标兜底会引入"经一次审批即可点击任意位置"的新风险面，而 Phase 1–3 的验收并不依赖它。若将来要做，先补三件：helper `dispatchGesture`、证据层对坐标的固定风险地板、真机误触验收
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
 - **D4** Android skill 名（**已定：`local-android-use`**，2026-09-15；与 `lau` = Local Android Use 对齐，目录 `skills/local-android-use/`，随 Pi 包与 release 包分发）
-- **D7**（2026-09-15 新增，**待定**）bounds 复核的严格度：① 严格相等（最保守，可能因动画/微移把同一元素误判为 stale）；② 归一化容差（**推荐**，如 ≤0.5% 屏宽/高）；③ 只比 `packageName` + `windowId`、不比 bounds
+- **D7**（**已定，2026-09-15**）bounds 复核取 ② 归一化容差 ≤0.5%（0.005），已实现并经真机验证；副作用是列表动画期间会 fail-closed 要求重试一次（§0 #25，已写入 troubleshooting）
 - **D8**（2026-09-15 新增，**已定：②**）app access 的触发点：**同时拦 `decide`**（读屏也是控制，与 mac 一致）；`dump` / `screenshot` 作为无状态调试命令不受门禁约束。备选 ① 只拦 `act`（更松）、③ 连 `dump` 也拦（会让调试命令不可用）
 - **D9**（2026-09-15 新增，**已定：不重放**）Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（§5.4 已按此写）；helper 的代次/会话校验作为第二道防线保留
 - **D10**（2026-09-15 新增，**已定：`lau-cli` 模块内**）Android 证据层先与 CLI/daemon 同 crate；Phase 4 并入共享 Runtime 时再抽独立 crate
