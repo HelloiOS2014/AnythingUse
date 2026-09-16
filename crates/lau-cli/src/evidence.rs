@@ -159,6 +159,10 @@ fn classify(action: &Action, elements: &[Value]) -> (RiskLevel, String) {
                 _ => (RiskLevel::R1, "scroll".into()),
             }
         }
+        // A platform-level back is navigation-like; it has no element to point at.
+        Action::Semantic(SemanticAction::GlobalBack) => {
+            (RiskLevel::R1, "system back navigation".into())
+        }
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
             let el = element(elements, element_id);
             if el.is_none() {
@@ -375,6 +379,16 @@ mod tests {
         let done = j(Action::Done { summary: "ok".into() }, None);
         assert!(!done.unknown);
         assert_eq!(done.risk, RiskLevel::R0);
+    }
+
+    #[test]
+    fn system_back_is_navigation_like() {
+        let v = j(
+            Action::Semantic(SemanticAction::GlobalBack),
+            Some(EffectKind::Navigate),
+        );
+        assert_eq!(v.risk, RiskLevel::R1);
+        assert!(!v.unknown);
     }
 
     #[test]

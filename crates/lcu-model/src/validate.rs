@@ -86,7 +86,9 @@ pub fn validate_action(obs: &AppObservation, action: &Action) -> LcuResult<()> {
                 SemanticAction::Focus { element_id } => {
                     require_capability(obs, element_id, "focus")?
                 }
-                SemanticAction::Navigate { .. } | SemanticAction::Scroll { .. } => {}
+                SemanticAction::Navigate { .. }
+                | SemanticAction::GlobalBack
+                | SemanticAction::Scroll { .. } => {}
             }
             Ok(())
         }

@@ -77,6 +77,10 @@ pub enum SemanticAction {
     Navigate {
         url: String,
     },
+    /// Platform-level "back" / return navigation (Android's system back).
+    /// A platform without such a concept must answer `unsupported_capability`
+    /// rather than inventing an equivalent gesture.
+    GlobalBack,
     Invoke {
         element_id: String,
     },

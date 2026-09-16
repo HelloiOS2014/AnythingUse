@@ -620,6 +620,12 @@ fn semantic_to_json(action: &SemanticAction) -> LcuResult<Value> {
                 "navigate is only supported by the ChromeTab surface",
             ));
         }
+        SemanticAction::GlobalBack => {
+            return Err(LcuError::coded(
+                ErrorCode::UnsupportedCapability,
+                "system back navigation is not a macOS window action",
+            ));
+        }
         SemanticAction::Invoke { element_id } => json!({
             "type": "invoke",
             "element_id": element_id,
@@ -678,6 +684,7 @@ fn risk_for_semantic(action: &SemanticAction) -> RiskLevel {
     match action {
         SemanticAction::Focus { .. } => RiskLevel::R0,
         SemanticAction::Navigate { .. }
+        | SemanticAction::GlobalBack
         | SemanticAction::Invoke { .. }
         | SemanticAction::Scroll { .. } => RiskLevel::R1,
         SemanticAction::SetValue { .. } => RiskLevel::R2,

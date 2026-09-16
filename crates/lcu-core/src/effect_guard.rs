@@ -87,6 +87,9 @@ fn classify(action: &Action, observation: &anything_core::AppObservation) -> (Ri
                 (RiskLevel::R1, "browser navigation".into())
             }
         }
+        Action::Semantic(SemanticAction::GlobalBack) => {
+            (RiskLevel::R1, "platform back navigation".into())
+        }
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
             // Synthetic nav_* is not a valid product path; elevate so it cannot auto-run.
             if element_id.starts_with("nav_") {

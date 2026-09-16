@@ -151,6 +151,7 @@ class LauAccessibilityService : AccessibilityService() {
                 "invoke" -> invoke(req)
                 "set_value" -> setValue(req)
                 "scroll" -> scroll(req)
+                "global_back" -> globalBack(req)
                 "launch" -> launch(req)
                 else -> error(req, "protocol_error", "unknown op $op")
             }
@@ -389,6 +390,18 @@ class LauAccessibilityService : AccessibilityService() {
         val ok = node.performAction(action)
         if (!ok) throw HelperException("verification_failed", "scroll returned false")
         return ok(req, JSONObject().put("performed", "scroll"))
+    }
+
+    /**
+     * Plan §3: system-level back, for when the app exposes no semantic back
+     * control. Honest failure if the platform refuses it.
+     */
+    private fun globalBack(req: JSONObject): JSONObject {
+        val performed = performGlobalAction(GLOBAL_ACTION_BACK)
+        if (!performed) {
+            throw HelperException("verification_failed", "GLOBAL_ACTION_BACK returned false")
+        }
+        return ok(req, JSONObject().put("performed", "global_back"))
     }
 
     /**

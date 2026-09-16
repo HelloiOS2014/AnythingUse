@@ -605,7 +605,12 @@ fn screenshot(json: bool, out: Option<PathBuf>, cli_serial: Option<&str>) -> Res
 
 /// Errors that only a human can clear (`lau resume`, or fixing the device):
 /// `decide --wait` keeps polling through them instead of giving up.
-const RETRYABLE_WAIT_ERRORS: [&str; 3] = ["taken_over", "task is paused", "watch_unavailable"];
+const RETRYABLE_WAIT_ERRORS: [&str; 4] = [
+    "taken_over",
+    "task is paused",
+    "watch_unavailable",
+    "task is queued behind another task on this device",
+];
 
 fn daemon_cmd(req: Value, json: bool) -> Result<i32> {
     daemon::ensure_daemon()?;
@@ -660,6 +665,8 @@ fn emit_daemon_response(resp: Value, json: bool) -> i32 {
     }
     let status = if err == "waiting_user" {
         "waiting_user"
+    } else if err == "task is queued behind another task on this device" {
+        "queued"
     } else if RETRYABLE_WAIT_ERRORS.contains(&err.as_str()) {
         // Paused: only a human action clears it (plan §0 #1/#2).
         "paused"

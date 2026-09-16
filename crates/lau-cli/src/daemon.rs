@@ -217,6 +217,52 @@ fn permissions_path() -> PathBuf {
     sock_path().with_file_name("app_permissions.json")
 }
 
+/// Plan §6: one serial queue per device. A task whose device already has a
+/// steerable task waits in `queued`; unrelated devices are unaffected.
+fn serial_is_busy(inner: &Inner, serial: &str, except_id: &str) -> bool {
+    inner.tasks.values().any(|t| {
+        t.serial == serial
+            && t.id != except_id
+            && matches!(t.state.as_str(), "running" | "waiting_actor" | "paused")
+    })
+}
+
+/// Promote the oldest queued task for a device once that device is free.
+fn promote_next_for_serial(inner: &mut Inner, serial: &str) {
+    if serial_is_busy(inner, serial, "") {
+        return;
+    }
+    // Task ids are `task_<nanos>`, so the lexicographic minimum is the oldest.
+    let next = inner
+        .tasks
+        .values()
+        .filter(|t| t.serial == serial && t.state == "queued")
+        .map(|t| t.id.clone())
+        .min();
+    if let Some(id) = next {
+        if let Some(t) = inner.tasks.get_mut(&id) {
+            t.state = "waiting_actor".into();
+            t.wait_reason = Some("agent_decision".into());
+            t.last_action_summary = Some("promoted from the device queue".into());
+        }
+    }
+}
+
+/// Run the queue sweep on every request: any terminal transition therefore
+/// promotes the next waiting task for that device without a worker thread.
+fn sweep_queues(inner: &Arc<Mutex<Inner>>) {
+    let mut g = match inner.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let mut serials: Vec<String> = g.tasks.values().map(|t| t.serial.clone()).collect();
+    serials.sort();
+    serials.dedup();
+    for serial in serials {
+        promote_next_for_serial(&mut g, &serial);
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -303,7 +349,10 @@ pub fn daemon_main() -> Result<()> {
         }
         let g = inner.lock().expect("inner");
         let busy = g.tasks.values().any(|t| {
-            t.state == "waiting_actor" || t.state == "running" || t.state == "paused"
+            t.state == "waiting_actor"
+                || t.state == "running"
+                || t.state == "paused"
+                || t.state == "queued"
         });
         if !busy && g.last_activity.elapsed() > idle {
             drop(g);
@@ -320,6 +369,9 @@ fn handle_client(mut stream: UnixStream, inner: &Arc<Mutex<Inner>>) -> Result<()
     reader.read_line(&mut line)?;
     let req: Value = serde_json::from_str(line.trim()).unwrap_or(json!({}));
     let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    // Plan §6: sweep per-device queues on every request so a finished task lets
+    // the next task for that device proceed.
+    sweep_queues(inner);
     let resp = match op {
         "ping" => json!({"ok": true, "data": {"pong": true}}),
         "run" => op_run(&req, inner),
@@ -417,7 +469,7 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
             .unwrap_or(0)
     );
     let epoch = watch_epoch(inner, &serial);
-    let task = Task {
+    let mut task = Task {
         id: id.clone(),
         goal,
         app,
@@ -445,8 +497,16 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         error: None,
         touch_epoch: epoch,
     };
-    inner.lock().expect("inner").tasks.insert(id.clone(), task);
-    json!({"ok": true, "data": {"task_id": id, "state": "waiting_actor"}})
+    let mut g = inner.lock().expect("inner");
+    // Plan §6: one serial queue per device — a second task on the same device
+    // waits instead of interleaving with the first.
+    if serial_is_busy(&g, &task.serial, &id) {
+        task.state = "queued".into();
+        task.wait_reason = Some("device_queue".into());
+    }
+    let state = task.state.clone();
+    g.tasks.insert(id.clone(), task);
+    json!({"ok": true, "data": {"task_id": id, "state": state}})
 }
 
 fn capture(task: &mut Task) -> Result<()> {
@@ -533,6 +593,13 @@ fn op_decide(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     if t.state == "paused" {
         return json!({"ok": false, "error": "task is paused", "data": task_view(t)});
     }
+    if t.state == "queued" {
+        return json!({
+            "ok": false,
+            "error": "task is queued behind another task on this device",
+            "data": task_view(t)
+        });
+    }
     if t.state == "succeeded" || t.state == "failed" || t.state == "cancelled" {
         return json!({"ok": false, "error": format!("task is {}", t.state), "data": task_view(t)});
     }
@@ -578,6 +645,13 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
     if t.state == "paused" {
         return json!({"ok": false, "error": "task is paused", "data": task_view(t)});
     }
+    if t.state == "queued" {
+        return json!({
+            "ok": false,
+            "error": "task is queued behind another task on this device",
+            "data": task_view(t)
+        });
+    }
     if t.observation_id.as_deref() != Some(obs) {
         return json!({"ok": false, "error": "stale observation_id", "data": task_view(t)});
     }
@@ -590,6 +664,17 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         Some(token) => token,
         None => return json!({"ok": false, "error": "no observation bound to this task"}),
     };
+    // Plan §5.6 / §0 D5: coordinate input is refused outright — it must never be
+    // gated into an approval that could then execute it. (Verified live
+    // 2026-09-15: gating it first produced a consequence dialog instead.)
+    if matches!(action, Action::Targeted(_)) {
+        t.last_action_summary = Some("REJECTED: semantic_action_required".into());
+        return json!({
+            "ok": false,
+            "error": "semantic_action_required: use invoke/set_value/scroll, not coordinate input",
+            "data": task_view(t)
+        });
+    }
     match &action {
         Action::Done { summary } => {
             t.summary = Some(summary.clone());
@@ -726,6 +811,9 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         Action::Semantic(SemanticAction::Focus { element_id }) => {
             json!({"elementId": element_id, "observationId": &token})
         }
+        Action::Semantic(SemanticAction::GlobalBack) => {
+            json!({})
+        }
         Action::Semantic(SemanticAction::Navigate { .. }) => {
             return json!({"ok": false, "error": "navigate is Chrome-only; not a lau action"});
         }
@@ -743,6 +831,7 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         Action::Done { .. } | Action::Fail { .. } => unreachable!(),
     };
     let op = match &action {
+        Action::Semantic(SemanticAction::GlobalBack) => "global_back",
         Action::Semantic(SemanticAction::Invoke { .. }) => "invoke",
         Action::Semantic(SemanticAction::SetValue { .. }) => "set_value",
         Action::Semantic(SemanticAction::Scroll { .. }) => "scroll",
@@ -961,7 +1050,7 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
 /// App access gate (plan §5.4, D8): the first control of a package needs a human
 /// decision on the Mac. Returns `Some(response)` when the caller must stop.
 fn ensure_app_access(id: &str, inner: &Arc<Mutex<Inner>>) -> Option<Value> {
-    let (app, serial, allowed, parked, cached, terminal) = {
+    let (app, serial, allowed, parked, cached, terminal, state_is_queued) = {
         let g = inner.lock().ok()?;
         let t = g.tasks.get(id)?;
         (
@@ -971,11 +1060,11 @@ fn ensure_app_access(id: &str, inner: &Arc<Mutex<Inner>>) -> Option<Value> {
             t.wait_reason.as_deref() == Some("app_access"),
             t.app_key.clone(),
             t.state == "succeeded" || t.state == "failed" || t.state == "cancelled",
+            t.state == "queued",
         )
     };
-    // A terminal task must stay terminal: a denied task must never be resurrected
-    // into a fresh gate by a later call (observed live on 2026-09-15).
-    if terminal {
+    // A task waiting in its device queue is not being steered yet.
+    if terminal || state_is_queued {
         return None;
     }
     if allowed {
@@ -1145,7 +1234,7 @@ fn mac_dialog_app_access(body: &str) -> AppAccessAnswer {
     let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"try
-  set r to display dialog "{escaped}" with title "AnythingUse LAU — app access" buttons {{"Deny", "Always allow", "Allow once"}} default button "Allow once" cancel button "Deny" with icon caution
+  set r to display dialog "{escaped}" with title "AnythingUse LAU — app access" buttons {{"Deny", "Always allow", "Allow once"}} default button "Deny" cancel button "Deny" with icon caution
   return button returned of r
 on error number -128
   return "Deny"
@@ -1197,6 +1286,7 @@ fn action_brief(action: &Action) -> String {
             ..
         }) => format!("scroll {element_id:?} dy={delta_y}"),
         Action::Semantic(SemanticAction::Focus { element_id }) => format!("focus {element_id}"),
+        Action::Semantic(SemanticAction::GlobalBack) => "system back".into(),
         Action::Semantic(SemanticAction::Navigate { .. }) => "navigate".into(),
         Action::Targeted(_) => "coordinate input".into(),
         other => format!("{other:?}"),
@@ -1455,6 +1545,43 @@ mod tests {
         let t = g.tasks.get("task_test").unwrap();
         assert_eq!(t.state, "failed");
         assert_eq!(t.wait_reason, None);
+    }
+
+    #[test]
+    fn a_second_task_on_the_same_device_waits_its_turn() {
+        // Plan §6: one serial queue per device; other devices are unaffected.
+        let mut inner = empty_inner();
+        for (id, serial, state) in [
+            ("task_0000000000000000001", "S", "waiting_actor"),
+            ("task_0000000000000000002", "S", "queued"),
+            ("task_0000000000000000003", "OTHER", "waiting_actor"),
+        ] {
+            let mut t = task(1);
+            t.id = id.into();
+            t.serial = serial.into();
+            t.state = state.into();
+            inner.tasks.insert(id.into(), t);
+        }
+        // The steerable task 001 makes the device busy for anyone else ...
+        assert!(serial_is_busy(&inner, "S", "task_0000000000000000002"));
+        // ... while a merely queued task is not itself "busy".
+        assert!(!serial_is_busy(&inner, "S", "task_0000000000000000001"));
+        assert!(!serial_is_busy(&inner, "OTHER", "task_0000000000000000003"));
+
+        // Nothing moves while the device is busy.
+        promote_next_for_serial(&mut inner, "S");
+        assert_eq!(inner.tasks["task_0000000000000000002"].state, "queued");
+
+        // Once the device is free, the oldest queued task is promoted.
+        inner
+            .tasks
+            .get_mut("task_0000000000000000001")
+            .unwrap()
+            .state = "succeeded".into();
+        promote_next_for_serial(&mut inner, "S");
+        let promoted = &inner.tasks["task_0000000000000000002"];
+        assert_eq!(promoted.state, "waiting_actor");
+        assert_eq!(promoted.wait_reason.as_deref(), Some("agent_decision"));
     }
 
     fn empty_inner() -> Inner {

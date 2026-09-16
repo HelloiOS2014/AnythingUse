@@ -1663,6 +1663,7 @@ pub fn describe_consequence_for_ui(
         Action::Fail { reason } => format!("fail: {reason}"),
         Action::RequestUser { reason } => format!("request user: {reason}"),
         Action::Semantic(SemanticAction::Navigate { url }) => format!("navigate to `{url}`"),
+        Action::Semantic(SemanticAction::GlobalBack) => "system back".to_string(),
         Action::Semantic(SemanticAction::Invoke { element_id }) => {
             let label = observation
                 .elements
