@@ -47,15 +47,16 @@
 | 3 ✅ | ~~无 `resume` / `pause` / `watch`~~ **部分修**：`lau resume` 已实现（重建监听、作废旧观察与待批动作）；`pause` / `watch` 仍未提供 | `main.rs` / `daemon.rs` | 被接管的暂停现在可以恢复 |
 | 4 ✅ | ~~`decide --wait` 被丢弃~~ **已修**：客户端轮询 `LAU_DECIDE_WAIT_SECS`（默认 600s），遇暂停持续等、遇 consequence 门/终态立即返回 | `main.rs` | Agent 侧无需自行轮询 |
 | 5 ✅ | ~~无 app_access 门~~ **已实现并全路径真机验证（2026-09-15）**：身份 = 包名 + 签名证书 SHA-256（helper `app_identity`）；按 D8② 拦 `decide`/`act`；三按钮 Mac 对话框；`always_allow` 持久化到 `<数据根>/app_permissions.json`（0600），`lau permissions` 列出、`--revoke <key>` 撤销 | daemon / helper | 门触发、真实身份、allow_once 不落盘、Deny→failed、always_allow 持久化 + 静默放行、revoke 幂等 —— 全部真机通过 |
-| 6 | 无 Android 证据层 guard（§7） | `daemon.rs` | **已实现（2026-09-15）**：`crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降），11 个单测通过；helper 已补 `password` 标记。**真机已验证密码框 → R4**（验收 16）；验收 15（谎报 navigate）目前只有单测覆盖 |
+| 6 ✅ | ~~无 Android 证据层 guard（§7）~~ **已实现并真机验证（2026-09-15）** | `daemon.rs` | `crates/lau-cli/src/evidence.rs` 按 §5.6 落地（密码字段/凭证文本 → R4，发送·删除·支付类 → R3，能力未声明/元素不在观察内 → 抬高，声明只能抬不能降）；12 个单测 + 真机：密码框 → R4、谎报 `navigate` 的「卸载」仍到达 R3 门（验收 15） |
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
-| 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
+| 8 ✅ | ~~consequence 授权无绑定、无一次性消费与过期；批准后**重放**已存动作~~ **已修并真机验证（2026-09-15）**：提案**不再存储**（`pending_identity`/`pending_brief` 只留给人看的信息），Allow 只生成一次性 `Grant{identity,expires=300s}`；仅当**新观察**下的提案与身份完全匹配才消费并执行 | `daemon.rs` | 与 mac 端「批准不重放」一致：真机用旧令牌 act 被拒 `stale observation_id`；坐标那次误点 Allow 也未执行任何动作 |
 | 9 ✅ | ~~无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误~~ **已实现并真机验证（2026-09-15）**：helper 的语义错误码与传输类错误分离（`is_helper_semantic_error`）；传输类 → `indeterminate:true`、作废观察、保持可继续、**绝不重试** | `daemon.rs` | 真机：`am crash` 后立刻 `act` → `indeterminate: … do not resend it`，任务 `waiting_actor` + `observation_id:null`；helper 2s 后恢复、`decide` 立即可用 |
 | 10 ✅ | ~~无 per-serial 队列 / forward 隔离~~ **已实现（2026-09-15）**：`serial_is_busy` + `promote_next_for_serial`，每个请求入口做一次 `sweep_queues`；同设备第二个任务进 `queued`，终态后自动提升 | `daemon.rs` | 真机（单设备）验证通过；转发隔离本就按 serial 键控端口。**双设备并行未验**（只有一台设备） |
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
-| 13 | 分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill | `scripts/` | 未产品化 |
-| 14 | `android-helper` 无测试；`lau-cli` 已有 5 个单测（守卫/纪元）但无端到端 | 全仓 | 回归保护仍薄弱 |
+| 13 ✅ | ~~分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill~~ **已完成（2026-09-15）**：`install-cli.sh` 安装 `lau`（缺构建时给出提示）；`package-release.sh` 打包 `bin/lau` + `android/anythinguse-lau-helper.apk` + `install-android-helper.sh` + 两个 skill；**Android skill 定名 `local-android-use`（D4）** 并随 Pi 包/release 包分发 | `scripts/` `skills/` | 实测：`~/.local/bin/lau` 可运行、release zip 含全部 Android 产物（5.0 MB） |
+| 14 | `android-helper` 仍无测试（Kotlin 侧需要 instrumentation 或可测的纯函数抽取）；`lau-cli` 已有 **21 个单测**（守卫/纪元/队列/grant/证据层/令牌分类），但**无端到端自动化** | 全仓 | 回归保护以 Rust 单测 + 真机验收清单为主 |
+| 21 | 🟡 `decide`→`act` 之间代次增长极快（输入文字、搜索结果、切页均 bump），元素 id 会重排 | daemon | **由会话令牌 + fail-closed 消化**：过期即 `stale_observation` 并要求重取（不会再误执行）。对 Agent 的操作要求是"拿到即用"，已写入 skill |
 
 **真机验收新增的差距（2026-09-15，按严重度）**
 
