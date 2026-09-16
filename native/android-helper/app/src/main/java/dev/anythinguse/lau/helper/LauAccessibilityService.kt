@@ -265,7 +265,10 @@ class LauAccessibilityService : AccessibilityService() {
                 )
                 val capsJson = JSONArray()
                 for (cap in caps) capsJson.put(cap)
-                val label = node.text?.toString() ?: node.contentDescription?.toString()
+                val ownLabel = node.text?.toString() ?: node.contentDescription?.toString()
+                // Plan §3 label attribution: a clickable row often has no text of
+                // its own; derive it from the subtree so the target is named.
+                val label = if (ownLabel.isNullOrBlank()) derivedLabel(node) else ownLabel
                 val obj = JSONObject()
                     .put("id", id)
                     .put("role", shortRole(node.className?.toString()))
@@ -298,6 +301,31 @@ class LauAccessibilityService : AccessibilityService() {
 
     private fun hasAction(node: AccessibilityNodeInfo, action: Int): Boolean {
         return node.actionList.any { it.id == action }
+    }
+
+    /**
+     * Plan §3 label attribution (2026-09-15): collect non-empty text from the
+     * subtree (depth ≤ LABEL_DEPTH) so a clickable row with no text of its own
+     * still carries a name. Bounded to LABEL_PARTS fragments / 200 chars.
+     */
+    private fun derivedLabel(node: AccessibilityNodeInfo): String {
+        val parts = ArrayList<String>(LABEL_PARTS)
+        fun collect(n: AccessibilityNodeInfo, depth: Int) {
+            if (parts.size >= LABEL_PARTS || depth > LABEL_DEPTH) return
+            for (v in listOf(n.text?.toString(), n.contentDescription?.toString())) {
+                val s = v?.trim()
+                if (!s.isNullOrBlank() && parts.none { it == s }) parts.add(s)
+                if (parts.size >= LABEL_PARTS) return
+            }
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                collect(child, depth + 1)
+                child.recycle()
+                if (parts.size >= LABEL_PARTS) return
+            }
+        }
+        collect(node, 0)
+        return parts.joinToString(" ").take(200)
     }
 
     private fun shortRole(className: String?): String {
@@ -493,5 +521,9 @@ class LauAccessibilityService : AccessibilityService() {
 
         /** Normalized frame tolerance for the §5.2 bounds re-check (D7 option ②). */
         const val BOUNDS_TOLERANCE = 0.005
+
+        /** Label attribution bounds (plan §3): subtree depth and fragment count. */
+        const val LABEL_DEPTH = 3
+        const val LABEL_PARTS = 3
     }
 }
