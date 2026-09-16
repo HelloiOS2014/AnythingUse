@@ -92,6 +92,9 @@ struct Task {
     observation_id: Option<String>,
     /// R4 gate: the human performs the action; nothing is stored for replay.
     takeover: bool,
+    /// Plan §4: the last action's outcome was unknown (lost/timed-out response).
+    /// The observation was dropped; the actor must re-observe before acting again.
+    indeterminate: bool,
     /// App access (plan §5.4 / D8): stable identity of the controlled package,
     /// its display label, and whether this task may proceed.
     app_key: Option<String>,
@@ -484,6 +487,7 @@ fn op_run(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
         step: 0,
         observation_id: None,
         takeover: false,
+        indeterminate: false,
         app_key: None,
         app_label: None,
         app_allowed: false,
@@ -543,6 +547,7 @@ fn task_view(t: &Task) -> Value {
         "state": t.state,
         "wait_reason": t.wait_reason,
         "takeover": t.takeover,
+        "indeterminate": t.indeterminate,
         "app_key": t.app_key,
         "app_label": t.app_label,
         "app_allowed": t.app_allowed,
@@ -849,18 +854,60 @@ fn op_act(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
                 t.state = "waiting_actor".into();
                 t.wait_reason = Some("agent_decision".into());
                 t.touch_epoch = epoch;
+                t.indeterminate = false;
                 return json!({"ok": true, "data": task_view(t)});
             }
             json!({"ok": false, "error": "task disappeared"})
         }
         Err(e) => {
+            let msg = format!("{e:#}");
             let mut g = inner.lock().expect("inner");
             if let Some(t) = g.tasks.get_mut(id) {
-                t.last_action_summary = Some(format!("{e:#}"));
+                if is_helper_semantic_error(&msg) {
+                    // The helper answered and refused: a normal, retry-safe refusal.
+                    t.last_action_summary = Some(msg.clone());
+                    json!({"ok": false, "error": msg})
+                } else {
+                    // Plan §4: the response was lost or timed out, so the action may
+                    // or may not have been applied. Never retry it — drop the
+                    // observation and make the next decision start from a fresh one.
+                    t.indeterminate = true;
+                    t.observation_id = None;
+                    t.state = "waiting_actor".into();
+                    t.wait_reason = Some("agent_decision".into());
+                    t.last_action_summary = Some(format!("indeterminate: {msg}"));
+                    json!({
+                        "ok": false,
+                        "error": format!(
+                            "indeterminate: the action may or may not have been applied — \
+                             re-observe with `decide` before acting again, and do not resend it ({msg})"
+                        )
+                    })
+                }
+            } else {
+                json!({"ok": false, "error": "task disappeared"})
             }
-            json!({"ok": false, "error": format!("{e:#}")})
         }
     }
+}
+
+/// A helper that answered with one of its own error codes is a semantic refusal;
+/// anything else (connect/forward failure, timeout, empty or unparseable
+/// response) means the outcome of the action is unknown.
+fn is_helper_semantic_error(message: &str) -> bool {
+    const CODES: [&str; 10] = [
+        "protocol_error:",
+        "unsupported_capability:",
+        "stale_observation:",
+        "element_not_found:",
+        "verification_failed:",
+        "forbidden_package:",
+        "screen_off:",
+        "device_locked:",
+        "target_lost:",
+        "internal:",
+    ];
+    CODES.iter().any(|code| message.contains(code))
 }
 
 fn op_status(req: &Value, inner: &Arc<Mutex<Inner>>) -> Value {
@@ -1460,6 +1507,7 @@ mod tests {
             pending_brief: None,
             grant: None,
             takeover: false,
+            indeterminate: false,
             app_key: Some("com.android.settings#deadbeef".into()),
             app_label: Some("设置".into()),
             app_allowed: true,
@@ -1582,6 +1630,27 @@ mod tests {
         let promoted = &inner.tasks["task_0000000000000000002"];
         assert_eq!(promoted.state, "waiting_actor");
         assert_eq!(promoted.wait_reason.as_deref(), Some("agent_decision"));
+    }
+
+    #[test]
+    fn only_helper_error_codes_count_as_semantic_refusals() {
+        // Plan §4: a helper that answered is a refusal; a lost response is not.
+        for code in [
+            "stale_observation: node e2 failed refresh",
+            "unsupported_capability: e2 did not advertise set_value",
+            "verification_failed: ACTION_SET_TEXT returned false",
+            "device_locked: device is locked",
+        ] {
+            assert!(is_helper_semantic_error(code), "{code}");
+        }
+        for transport in [
+            "helper accepted the connection but sent no response — the AccessibilityService is probably disabled",
+            "helper not reachable on 127.0.0.1:18765 — enable Accessibility → AnythingUse LAU",
+            "helper response is not JSON: EOF while parsing a string",
+            "adb forward tcp:18765 localabstract:dev.anythinguse.lau.helper failed: device offline",
+        ] {
+            assert!(!is_helper_semantic_error(transport), "{transport}");
+        }
     }
 
     fn empty_inner() -> Inner {
