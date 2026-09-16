@@ -961,7 +961,7 @@ fn spawn_mac_approval(inner: Arc<Mutex<Inner>>, task_id: String, body: String) {
 /// App access gate (plan §5.4, D8): the first control of a package needs a human
 /// decision on the Mac. Returns `Some(response)` when the caller must stop.
 fn ensure_app_access(id: &str, inner: &Arc<Mutex<Inner>>) -> Option<Value> {
-    let (app, serial, allowed, parked, cached) = {
+    let (app, serial, allowed, parked, cached, terminal) = {
         let g = inner.lock().ok()?;
         let t = g.tasks.get(id)?;
         (
@@ -970,8 +970,14 @@ fn ensure_app_access(id: &str, inner: &Arc<Mutex<Inner>>) -> Option<Value> {
             t.app_allowed,
             t.wait_reason.as_deref() == Some("app_access"),
             t.app_key.clone(),
+            t.state == "succeeded" || t.state == "failed" || t.state == "cancelled",
         )
     };
+    // A terminal task must stay terminal: a denied task must never be resurrected
+    // into a fresh gate by a later call (observed live on 2026-09-15).
+    if terminal {
+        return None;
+    }
     if allowed {
         return None;
     }
@@ -1429,6 +1435,26 @@ mod tests {
             base,
             consequence_identity("com.other.app", &invoke_e1, None)
         );
+    }
+
+    #[test]
+    fn a_denied_task_is_not_resurrected_into_a_new_gate() {
+        // Observed live: after app access was denied the task was `failed`, and a
+        // later decide call parked a brand-new gate (and another dialog).
+        let inner = Arc::new(Mutex::new(empty_inner()));
+        {
+            let mut g = inner.lock().unwrap();
+            let mut t = task(1);
+            t.state = "failed".into();
+            t.wait_reason = None;
+            t.app_allowed = false;
+            g.tasks.insert(t.id.clone(), t);
+        }
+        assert!(ensure_app_access("task_test", &inner).is_none());
+        let g = inner.lock().unwrap();
+        let t = g.tasks.get("task_test").unwrap();
+        assert_eq!(t.state, "failed");
+        assert_eq!(t.wait_reason, None);
     }
 
     fn empty_inner() -> Inner {
