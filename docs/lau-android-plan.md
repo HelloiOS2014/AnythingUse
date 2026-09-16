@@ -253,7 +253,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - `lau doctor` / `lau screenshot`（真机验收过：Xiaomi 2211133C / Android 16）。
 - **本轮修复（审查 #13）**：doctor 吞掉 serial 解析错误 → 多设备/无效 serial 现为 blocker（`target_unresolved`），显式 `--serial` 校验存在与授权状态。
 
-### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— 验收已执行：5 通过 / 2 部分；`dispatchGesture` 仍未实现（§0）
+### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— **验收 6/7 通过，仅缺"重启手机"**（`dispatchGesture` 见 D5：已暂缓）
 - 交付：`native/android-helper/` + 安装脚本 + `lau dump / invoke / set_value / scroll / foreground`（CLI 单进程直连；**观察代次状态由 helper 持有**——AccessibilityService 本身设备侧长活）。
 - **验收（确定性断言，非元素计数）**：
   1. doctor 四态 + 未启用时的引导 blocker —— ✅ 真机通过（正常态四态全绿；禁用态给出精确引导 blocker，exit 3）
@@ -264,7 +264,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
   6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒 —— ✅ 真机通过（亮屏解锁/关屏/锁屏三种状态；`mWakefulness` 保持 Asleep，未被唤醒或解锁）
   7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）—— 🟡 前半 ✅（`am crash` 后 PID 17820→32256，≤2s 内 ping 恢复）；**重启手机待验**（且实测发现 HyperOS 可能自行关闭无障碍服务，见 §0 #17）
 
-### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；验收第 3、9 条真机通过；安全模型主要缺口见 §0）
+### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **验收 15/17 通过，2 条受限**（#2 中文搜索仅分项验证；#8 双设备只有单设备）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded` —— ✅ **2026-09-15 真机通过（目标真实达成）**：`在设置里打开蓝牙页面`，两步语义动作（返回 → 蓝牙行，step=4）后重观察确认页面已是蓝牙页，再 `done` → `succeeded`。注意：`succeeded` 只证明「显式 Done + 目标可再次观察」，**不判断目标内容**（与 mac 契约一致，诚实性由 Actor 负责）
