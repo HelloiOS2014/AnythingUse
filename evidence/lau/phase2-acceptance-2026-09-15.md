@@ -437,6 +437,36 @@ app access 门**先把任务复活成 `waiting_actor` 并又弹了一次对话�
 
 **尚未真机验证**：`always_allow` 持久化 + `lau permissions --revoke` 撤销（需要再点两次对话框）。
 
+## 追加：Phase 3 验收 1（全闭环 run→decide→act→done→succeeded）— ✅ 真机通过，目标真实达成
+
+```
+TASK=task_1789534738103122000    goal="在设置里打开蓝牙页面"    app=com.android.settings
+（app access 已持久化 always_allow，本次未再弹窗 —— 验收 14 的持久化路径同时得到验证）
+
+① decide                        → obs 55d5806b:10（页面=指纹页）
+② act invoke e1 (返回)           → {"last_action_summary":"invoke ok","step":1}
+   decide                       → 页面回到设置首页（通知与状态栏 / 桌面 / 显示与亮度 …）✅
+③ act scroll dy=+1 / dy=-1       → scroll ok（step 2）
+   其中一次被拒：stale_observation: node e1 moved or resized since the dump  ← 发现 #25 的现场
+   重新观察后重试成功（step 3）
+④ act invoke e10 ("蓝牙 已开启")  → {"last_action_summary":"invoke ok","step":4}
+   decide                       → obs …:15，页面已是蓝牙页
+                                  （返回 / 蓝牙 / 设备名称 <phone-name> / 蓝牙版本 有新版本）✅ 目标达成
+⑤ act done                      → {"state":"succeeded","summary":"蓝牙设置页面已打开并经重新观察确认"}
+⑥ result                        → {state:succeeded, step:4}
+```
+
+daemon.log 中 act/decide 交替的 op 序列与上述步骤一一对应。
+
+### 顺带确认的两件事
+
+- **持久化 app access**：新任务不再弹窗（`app_allowed:true` 来自 `<数据根>/app_permissions.json`，0600）。
+- **`done` 的诚实边界（重要）**：更早一次闭环里，中间那次 invoke 因**脚本 bug 根本没发出**
+  （daemon.log 无 `op=act`，两次 decide 的响应字节数完全相同、页面未变），但随后的 `done`
+  仍让任务进入 `succeeded`。原因是 daemon 的完成契约只要求「显式 Done + 目标可再次观察」，
+  它**不判断目标内容** —— 这与 mac 执行契约一致（诚实性由 Actor 负责）。
+  含义：**`succeeded` 只证明机制，不证明目标**；上层若要知道"事办成了没"，必须自己核对重新观察到的内容。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。

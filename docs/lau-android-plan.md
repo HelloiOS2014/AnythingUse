@@ -267,7 +267,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 ### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；验收第 3、9 条真机通过；安全模型主要缺口见 §0）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
-  1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded`
+  1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded` —— ✅ **2026-09-15 真机通过（目标真实达成）**：`在设置里打开蓝牙页面`，两步语义动作（返回 → 蓝牙行，step=4）后重观察确认页面已是蓝牙页，再 `done` → `succeeded`。注意：`succeeded` 只证明「显式 Done + 目标可再次观察」，**不判断目标内容**（与 mac 契约一致，诚实性由 Actor 负责）
   2. 中文搜索 + `global_back` 回退（两步）
   3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）—— ✅ 2026-09-15 通过
   4. getevent 断流 → fail closed（暂停并报告，不装共存）
