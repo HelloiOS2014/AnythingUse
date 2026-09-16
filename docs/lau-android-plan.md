@@ -102,7 +102,7 @@
 | 包名 | `dev.anythinguse.lau.helper`（socket 名带包名前缀，见 §4） |
 | 环境变量 | `LAU_ADB_BIN`、`LAU_SERIAL`、`LAU_HELPER_PORT`、`LAU_IDLE_EXIT_SECS`、`LAU_DECIDE_WAIT_SECS` |
 | 数据根 | Mac 侧 `~/.local/share/AnythingUse/lau/`；设备侧无持久化 |
-| Skill | Android 单独出 skill（不塞 `local-computer-use`），Phase 3 末定名 |
+| Skill | 独立 skill：**`skills/local-android-use/`**（不塞进 `local-computer-use`）—— 2026-09-15 定名（D4） |
 
 ## 3. 总体架构（对照 mac 端）
 
@@ -310,7 +310,7 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - **D3** ~~进程内单任务~~ → **按需 daemon + 空闲退出**（已并入 §6）
 - **D5** 坐标兜底 = helper `dispatchGesture`（不经 ADB，受 `semantic_action_required` 约束）（推荐：是；替代项：完全禁止坐标）
 - **D6** 审批 UI = **Mac 对话框**（osascript；`lau approve` 只开会话，不代批）。**禁止手机弹窗（2026-09-15 已确认，见 §0 口径澄清）**。
-- **D4** Android skill 名（Phase 3 末定）
+- **D4** Android skill 名（**已定：`local-android-use`**，2026-09-15；与 `lau` = Local Android Use 对齐，目录 `skills/local-android-use/`，随 Pi 包与 release 包分发）
 - **D7**（2026-09-15 新增，**待定**）bounds 复核的严格度：① 严格相等（最保守，可能因动画/微移把同一元素误判为 stale）；② 归一化容差（**推荐**，如 ≤0.5% 屏宽/高）；③ 只比 `packageName` + `windowId`、不比 bounds
 - **D8**（2026-09-15 新增，**已定：②**）app access 的触发点：**同时拦 `decide`**（读屏也是控制，与 mac 一致）；`dump` / `screenshot` 作为无状态调试命令不受门禁约束。备选 ① 只拦 `act`（更松）、③ 连 `dump` 也拦（会让调试命令不可用）
 - **D9**（2026-09-15 新增，**已定：不重放**）Allow 只给一次性授权，daemon 丢弃提案并强制重新观察（§5.4 已按此写）；helper 的代次/会话校验作为第二道防线保留
@@ -322,6 +322,8 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 crates/anything-core/           # 共享平台中立契约（lau 与 lcu 共用；已抽取）
 crates/lau-cli/                 # lau CLI + daemon
 native/android-helper/          # Gradle Kotlin APK
+skills/local-android-use/       # Android skill（D4 已定名）
 scripts/install-android-helper.sh
 docs/lau-android-plan.md        # 本文档
+evidence/lau/                   # 真机验收证据
 ```

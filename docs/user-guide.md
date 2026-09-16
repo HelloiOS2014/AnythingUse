@@ -110,11 +110,11 @@ Runtime data root override: `LCU_RUNTIME_ROOT` (alias `LCU_RUNTIME_DIR`).
 
 ## Android (`lau`) — source-level work in progress
 
-Android is a **separate** CLI (`lau`, never `lcu`) and is **not productized
-yet**: `./scripts/install-cli.sh` does not install it, `package-release.sh`
-does not package it, and there is no Android Skill. Run it from the checkout
-(`./target/release/lau`) and read the [LAU plan](lau-android-plan.md) §0 for the
-current gaps before relying on it.
+Android is a **separate** CLI (`lau`, never `lcu`) with its own skill
+(`skills/local-android-use/`). `./scripts/install-cli.sh` installs it alongside
+`lcu` when it has been built, and `package-release.sh` ships it with the helper
+APK. It is still **source-level**: read the [LAU plan](lau-android-plan.md) §0 for
+the current gaps before relying on it.
 
 ```bash
 # helper APK: build + install (then enable it on the phone:

@@ -76,7 +76,7 @@ Runtime 常驻时，才需要手动运行 `lcu-desktop`。
 
 ## 以插件方式安装 Skill
 
-`local-computer-use` 技能从这个仓库分发。**安装**（一选）：
+本仓库分发两个技能：**`local-computer-use`**（macOS 应用 + Chrome，走 `lcu`）与 **`local-android-use`**（USB 连接的 Android 设备，走 `lau`）。**安装**（一选）：
 
 ```bash
 # Pi（原生包；全局安装请用绝对路径）
@@ -150,7 +150,8 @@ crates/lcu-chrome/            Chrome 后端适配器
 native/macos-window-service/  Swift 窗口定向服务
 native/chrome-control/        扩展与 Native Messaging 宿主
 native/android-helper/        Kotlin AccessibilityService helper APK（lau）
-skills/local-computer-use/    Agent 技能（目录名沿用历史）
+skills/local-computer-use/    macOS/Chrome 的 Agent 技能（目录名沿用历史）
+skills/local-android-use/     Android 的 Agent 技能（lau）
 scripts/                      模型下载与辅助脚本
 ```
 

@@ -83,7 +83,7 @@ Optional: Chrome surface — run `./native/chrome-control/scripts/install-native
 
 ## Install the Skill as a plugin
 
-The `local-computer-use` skill ships from this repo. **Install** (one of):
+Two skills ship from this repo: **`local-computer-use`** (macOS apps + Chrome, via `lcu`) and **`local-android-use`** (a USB-connected Android device, via `lau`). **Install** (one of):
 
 ```bash
 # Pi (native package; use an absolute path for global install)
@@ -164,7 +164,8 @@ crates/lcu-chrome/            Chrome backend adapter
 native/macos-window-service/  Swift window-targeted service
 native/chrome-control/        Extension and Native Messaging host
 native/android-helper/        Kotlin AccessibilityService helper APK (`lau`)
-skills/local-computer-use/    Agent-facing Skill (directory name historical)
+skills/local-computer-use/    Agent Skill for macOS/Chrome (directory name historical)
+skills/local-android-use/     Agent Skill for Android (`lau`)
 scripts/                      Model download and helper scripts
 ```
 
