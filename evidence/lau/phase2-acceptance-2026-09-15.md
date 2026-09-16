@@ -402,6 +402,41 @@ $ lau act <task> --observation-id e530b0da:12 --action '…invoke e4…'
 **尚未真机验证**：验收 15（把「删除/支付」标签谎报为 navigate 仍要到达正确的门）目前只有单测覆盖；
 验收 14（app access 门）尚未实现。
 
+## 追加：验收 14（app access 门）真机结果 — 主路径通过
+
+```
+# 首次控制 com.android.settings
+$ lau run "查看设置首页" --app com.android.settings --actor agent --json   → waiting_actor
+$ lau decide <task> --json
+{"status":"waiting_user","error":"waiting_user"}                            exit=2
+   task: wait_reason=app_access, app_allowed=false
+         app_key   = com.android.settings#c9009d01ebf9f5d0302bc71b2fe9aa9a47a432bba17308a3111b75d7b2149025
+                     └ 包名 + 签名证书 SHA-256（helper 新增 app_identity op 从真机取得）
+         app_label = 设置
+        ↑ Mac 上弹出三按钮对话框（Deny / Always allow / Allow once）
+
+# 机主点 Allow once
+$ lau status <task> --json → {state:waiting_actor, wait_reason:agent_decision,
+                              app_allowed:true, last_action_summary:"app access: allow_once"}
+$ lau permissions --json   → []                  ← 没有落盘
+app_permissions.json       → 未创建               ← allow_once 只作用于该任务
+$ lau decide <task> --json → {"status":"ok","obs":"55d5806b:1","n":20}   ← 门放行
+
+# 第二个任务（验证 allow_once 不跨任务）
+$ lau run … ; lau decide <task2> --json → {"status":"waiting_user","wait_reason":"app_access"}
+        ↑ 又被拦下并再次弹窗 ✅
+
+# 机主点 Deny
+$ lau status <task2> --json → {state:failed, error:"app access denied by the user"}   ✅
+```
+
+**真机发现并已修的 bug（§0 #26）**：被拒绝的任务处于 `failed`，但对它再调一次 `decide` 时，
+app access 门**先把任务复活成 `waiting_actor` 并又弹了一次对话框**，而不是报终态。
+根因：门（`ensure_app_access`）被放在 `decide`/`act` 的最前面，却没有先检查终态。
+修复：建立门前先判终态（`succeeded`/`failed`/`cancelled` 一律不再产生新门），并加了回归单测。
+
+**尚未真机验证**：`always_allow` 持久化 + `lau permissions --revoke` 撤销（需要再点两次对话框）。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
