@@ -761,7 +761,19 @@ fn helper_op(json: bool, cli_serial: Option<&str>, op: &str, extra: Value) -> Re
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // A malformed command line must not look like exit 2 ("waiting for a human"):
+    // align with `lcu` and the execution contract, which use 64 for usage errors.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            let code = match err.kind() {
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+                _ => 64,
+            };
+            std::process::exit(code);
+        }
+    };
     let code = match &cli.command {
         Commands::Doctor { json } => doctor(*json, cli.serial.as_deref()),
         Commands::Screenshot { out, json } => screenshot(*json, out.clone(), cli.serial.as_deref()),

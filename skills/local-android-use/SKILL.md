@@ -41,7 +41,7 @@ lau result <task-id> --json                 # succeeded / failed / cancelled
 - Executable actions need the closed-set `--effect` object, e.g. `{"kind":"navigate","summary":"open Bluetooth settings"}`. Runtime raises the risk floor from evidence; your claim can never lower it.
 - Actions: `{"kind":"semantic","type":"invoke","element_id":"eN"}`, `set_value` (+`value`), `scroll` (+`element_id`, `delta_x`, `delta_y`), `focus`, and `{"kind":"semantic","type":"global_back"}` for the system back; control actions are `observe`, `wait`, `done`, `fail`, `request_user`.
 - **Coordinates are refused outright** (`semantic_action_required`, exit 3). There is no tap-by-position fallback: use the capability the element advertises.
-- Exit codes: `0` ok · `2` waiting for the human · `3` failed or refused · `64` usage · `69` runtime unavailable · `70` internal.
+- Exit codes (same set as `lcu`, from `anything-core`): `0` ok · `2` waiting for the human · `3` task failed · `4` permission denied · `64` usage error · `69` runtime unavailable · `70` internal.
 
 ## Gates you must never try to bypass
 
