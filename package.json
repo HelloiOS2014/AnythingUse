@@ -2,9 +2,14 @@
   "name": "anythinguse",
   "version": "0.1.1",
   "private": true,
-  "description": "AnythingUse — local-first control plane for real macOS apps, Chrome, and (source-level) Android. Ships the local-computer-use (lcu) and local-android-use (lau) skills for Pi and other CLI agents.",
-  "keywords": ["pi-package"],
+  "description": "AnythingUse — local-first control plane for real macOS apps, Chrome, and (source-level) Android. Ships the local-computer-use (lcu) and local-android-use (lau) skills for Pi, DSH, and other CLI agents.",
+  "keywords": ["pi-package", "dsh-plugin"],
   "pi": {
     "skills": ["./skills"]
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    }
   }
 }

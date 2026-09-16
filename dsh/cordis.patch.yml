@@ -1,0 +1,11 @@
+# Installed as a DSH bundle: `dsh plugin --profile <profile> add -w <this repo>`.
+#
+# Only an insert is needed — index.mjs registers the repository's two Agent
+# skills (local-computer-use for `lcu`, local-android-use for `lau`) with the
+# harness's own filesystem skill provider.
+#
+# The loader anchors a package-relative `name` to THIS patch file's directory, so
+# the path is `./index.mjs`, not `./dsh/index.mjs`.
+- insert:
+    - id: anythinguse-skills
+      name: './index.mjs'
