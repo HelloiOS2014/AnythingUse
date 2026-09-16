@@ -48,6 +48,15 @@ install_one() {
 install_one "$lcu" "lcu"
 install_one "$desktop" "lcu-desktop"
 
+# Android endpoint (`lau`): a separate CLI, never `lcu`. Installed when built.
+lau="$root/target/release/lau"
+if [[ -x "$lau" ]]; then
+  install_one "$lau" "lau"
+else
+  echo "note: lau not built; the Android endpoint stays unavailable until:" >&2
+  echo "  cargo build -p lau-cli --release" >&2
+fi
+
 if [[ -x "$window" ]]; then
   install_one "$window" "macos-window-service"
 else
