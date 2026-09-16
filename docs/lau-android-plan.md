@@ -73,6 +73,8 @@
 | 24 ✅ | ~~服务被禁用后 socket 仍可连接但返回空响应~~ **已修（2026-09-15）**：报错改为可行动指引（指向 `lau doctor --json` + 重新打开无障碍开关） | `helper.rs` | 用户拿到的是下一步动作，而不是 `empty response` |
 | 25 🟡 | **bounds 复核在列表动画期间会拒绝动作**（真机遇到一次：连续滚动时 `stale_observation: node e1 moved or resized since the dump`） | helper | 设计内的 fail-closed，但会带来"重试一次"的操作成本；已写入 troubleshooting。若实测过于频繁，再评估 D7 的容差或对可滚动容器放宽 |
 | 26 ✅ | ~~app access 被拒后，后续 `decide` 会把已 `failed` 的任务**复活**成新的门并再弹一次对话框~~ **已修（2026-09-15，真机发现）**：门在建立前先检查终态，终态任务一律不再产生新门；新增回归单测 | `daemon.rs` | 拒绝是终态，不会被下一次调用推翻 |
+| 27 🟠 | **Spinner / 下拉类控件声称 `scroll` 但 `performAction` 返回 false**（真机：手动添加网络的「安全性」Spinner `[focus,scroll]`，`lau scroll --dy 1` → `verification_failed: scroll returned false`）；无 `invoke`（节点非 clickable）| helper / daemon | D5 暂缓 ⇒ 无坐标兜底 ⇒ **这类控件目前无法语义操作**（安全性选择、下拉筛选等）。候选修法：对不可点击节点沿祖先链寻找可点击行（与 label 归因同源），或为 Spinner 增补能力推导；需先评估"点祖先"的语义歧义 |
+| 28 ✅ | ~~凭证文本会进入观察~~ **已修（2026-09-15，查文档时发现）**：原实现只把密码框**路由到 R4**，但 `value`、自身 label、祖先派生 label、`set_value` 读回与失败信息都可能带出密码明文；另发现**截图是 0644 且被杀 daemon 的遗留文件不清** | helper / daemon | 已修：规则抽到 `PureRules.observationValue` / `labelContribution`（6 个 JVM 单测）；截图改 0600；daemon 启动清扫 >1h 的 `lau-*.png`（实测 104→8）。真机回归：非凭证字段的 `value` 通道不受影响（搜索框写入 `你好全` 重观察可见） |
 
 **✅ = 2026-09-15 本轮修复**（`cargo test -p lau-cli` 5 项通过；`cargo test --workspace` 全绿；#15/#16 的修复另经真机验收第 10–13 条确认）。
 
@@ -176,6 +178,8 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - 灭屏/锁屏/FLAG_SECURE → 显式 `screen_off` / `device_locked` / `secure_capture_unavailable`；**绝不自动唤醒/解锁**；锁屏画面不满足 app 目标 → `target_lost`。
 - **`screenshot` 命令遵循同一条规则（2026-09-15 修订，针对 §0 #23）**：屏幕非交互或已锁屏时**明确失败**（`screen_off` / `device_locked`，exit 3），**不得**返回一张锁屏图却报 `ok`；成功时 JSON 必须带上 `isInteractive` 与 `keyguardLocked`。屏幕状态取自 helper 的 `foreground`（它在任何屏幕状态下都能回答，且不需要唤醒）。
 - **不承诺「安全页识别」**（v1 已删）：`isImportantForAccessibility` 与包名 denylist 只是纵深防御；敏感后果一律靠 app_access + effect guard（对齐 mac：mac 也不猜敏感页）。
+- **凭证文本永不进入观察（2026-09-15 定，隐私条款）**：`password: true` 的字段只输出**标记**；其文本不得出现在 `value`、不得成为该节点自身或任何祖先的 `label`、也不得被 `set_value` 读回或写进错误信息（读回一律 `<redacted>`）；只允许其 `contentDescription`（通常是"密码"这类提示）出现。规则集中在 `PureRules.observationValue` / `PureRules.labelContribution`，有 JVM 单测覆盖（§0 #28）。
+- **截图是私有 0600 文件**，daemon 启动时清扫自己遗留的、超过 1 小时的 `lau-*.png`（daemon 被杀时无法自行清理）。
 
 ### 5.4 审批（受信面）
 

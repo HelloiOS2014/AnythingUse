@@ -173,9 +173,38 @@ Chrome control uses the user's installed browser rather than a separate automati
 
 The extension creates or owns an inactive task tab, while Native Messaging connects it to the local Runtime. Its profile-local stable key, tab lease, and current page scope bind the target. Chrome surface ownership is serial FIFO; unrelated macOS targets may run while a Chrome Agent waits. A tab/debugger lease is released on completion, cancellation, failure, or takeover. The backend does not restore focus by activating another tab.
 
+### Android endpoint (`lau`)
+
+A separate CLI (`crates/lau-cli`, binary `lau`) drives one USB-connected Android
+device. It shares the platform-neutral contracts in `crates/anything-core`
+(actions, effects, risk levels, schema) and **nothing else** with the macOS
+runtime — the two never call each other.
+
+```mermaid
+flowchart LR
+    AGENT["Agent (local-android-use skill)"] --> LAU["lau CLI"]
+    LAU -->|JSON over private Unix socket| DAEMON["lau daemon (on demand, 60s idle exit)"]
+    DAEMON -->|adb forward| HELPER["helper APK: AccessibilityService"]
+    DAEMON -.->|getevent touch watch| HELPER
+    HELPER --> DEVICE["Foreground app node tree"]
+```
+
+- The **daemon** owns task state, the per-device serial queue, the approval gates
+  (application access, consequence, R4 takeover) and the Android evidence layer;
+  it lives only while tasks do and exits after 60 idle seconds.
+- The **helper** is a Kotlin AccessibilityService reachable over an abstract
+  socket on the device. ADB is transport and observation only — never input
+  injection, and coordinate actions are refused outright.
+- Every action is bound to a session-scoped observation token
+  (`<sessionId>:<generation>`) re-verified against seven checks before it runs,
+  and a dead hardware-touch watch fails closed.
+- The Agent surface is the decision loop (`run` / `decide` / `act` / `result`);
+  the stateless commands (`dump`, `invoke`, `set-value`, `scroll`, `screenshot`)
+  carry no task context, so no gate applies to them.
+
 ### Future endpoints
 
-A future endpoint needs to implement the same behavioral responsibilities:
+A further endpoint needs to implement the same behavioral responsibilities:
 
 1. resolve a strict target;
 2. observe it without exposing private raw state to callers;
@@ -183,7 +212,8 @@ A future endpoint needs to implement the same behavioral responsibilities:
 4. report takeover or target loss;
 5. release resources deterministically.
 
-It does not require a new Agent-facing protocol.
+The Android endpoint above implements all five; a new platform does not require
+a new Agent-facing protocol.
 
 ## Security and privacy boundaries
 

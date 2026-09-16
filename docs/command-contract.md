@@ -8,6 +8,15 @@ Product: **AnythingUse** (binary remains `lcu`)
 This is the implemented CLI/interface contract, not a blanket assertion of
 stable runtime behavior across all target applications.
 
+> **Scope.** This document covers `lcu` (macOS windows + Chrome). The Android
+> endpoint is a **separate binary with its own surface**: see the
+> [LAU Android plan](lau-android-plan.md) §2. It shares the `anything-core`
+> action/effect types but not this CLI contract. In short: the Agent surface is
+> `lau run` / `decide` / `act` / `result` / `cancel` / `resume` (gated), while
+> `lau doctor` / `dump` / `invoke` / `set-value` / `scroll` / `screenshot` /
+> `foreground` / `launch` / `permissions` form the **operator** surface and carry
+> no task context, so no gate applies to them.
+
 The target execution semantics are frozen in the
 [Execution Contract](execution-contract.md). Until [Delivery status](status.md)
 records migration completion, this file describes the current wire surface.

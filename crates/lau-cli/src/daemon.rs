@@ -327,6 +327,8 @@ pub fn daemon_main() -> Result<()> {
         fs::create_dir_all(dir)?;
     }
     rotate_log();
+    // Privacy: clean up our own screenshots left behind by a killed daemon.
+    prune_leftover_screenshots();
     let _ = fs::remove_file(&path);
     let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
     listener.set_nonblocking(true)?;
@@ -534,10 +536,48 @@ fn capture(task: &mut Task) -> Result<()> {
     let path = std::env::temp_dir().join(format!("lau-{}-{}.png", nanos, &task.id[5..task.id.len().min(16)]));
     let bytes = run_adb_bytes(Some(&task.serial), &["exec-out", "screencap", "-p"])?;
     if bytes.len() >= 8 && &bytes[..4] == b"\x89PNG" {
-        let _ = fs::write(&path, &bytes);
+        let _ = write_private(&path, &bytes);
         task.image_path = Some(path.display().to_string());
     }
     Ok(())
+}
+
+/// A phone screenshot is a private 0600 file (privacy.md), never world-readable.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
+
+/// Remove our own leftover screenshots — a daemon that was killed cannot run its
+/// own cleanup, so the next start sweeps anything older than an hour.
+fn prune_leftover_screenshots() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("lau-") || !name.ends_with(".png") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age.as_secs() > 3600 {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn task_view(t: &Task) -> Value {
@@ -1494,8 +1534,7 @@ fn spawn_getevent(serial: String, inner: Arc<Mutex<Inner>>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
 
     fn task(touch_epoch: u64) -> Task {
         Task {

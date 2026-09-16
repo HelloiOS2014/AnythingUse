@@ -4,6 +4,12 @@ Status: **frozen contract; source-aligned, concentrated live acceptance passed 2
 Approved: 2026-08-14
 Scope: macOS applications and the existing real-Chrome extension surface
 
+> The Android endpoint (`lau`) is governed by the
+> [LAU Android plan](lau-android-plan.md). It follows this contract's execution
+> loop, gate model and honesty rules on a different platform, adding Android
+> specifics (session-scoped observations, the hardware-touch watch, the Android
+> evidence layer). Nothing here is overridden by that document.
+
 This is the only normative description of how AnythingUse must execute a
 Computer Use task. [Delivery status](status.md) records what the current source
 and live product have actually proved. The reference notes and old realignment

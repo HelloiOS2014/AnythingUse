@@ -275,22 +275,17 @@ class LauAccessibilityService : AccessibilityService() {
             if (bounds.width() > 0 && bounds.height() > 0) {
                 val id = "e${nodes.size + 1}"
                 nodes.add(AccessibilityNodeInfo.obtain(node))
-                val caps = linkedSetOf<String>()
-                if (node.isClickable || hasAction(node, AccessibilityNodeInfo.ACTION_CLICK)) {
-                    caps.add("invoke")
-                }
-                if (node.isEditable || hasAction(node, AccessibilityNodeInfo.ACTION_SET_TEXT)) {
-                    caps.add("set_value")
-                }
-                if (hasAction(node, AccessibilityNodeInfo.ACTION_FOCUS) || node.isFocusable) {
-                    caps.add("focus")
-                }
-                if (node.isScrollable ||
-                    hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ||
-                    hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-                ) {
-                    caps.add("scroll")
-                }
+                val caps = PureRules.capabilities(
+                    clickable = node.isClickable,
+                    hasClickAction = hasAction(node, AccessibilityNodeInfo.ACTION_CLICK),
+                    editable = node.isEditable,
+                    hasSetTextAction = hasAction(node, AccessibilityNodeInfo.ACTION_SET_TEXT),
+                    focusable = node.isFocusable,
+                    hasFocusAction = hasAction(node, AccessibilityNodeInfo.ACTION_FOCUS),
+                    scrollable = node.isScrollable,
+                    hasScrollActions = hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ||
+                        hasAction(node, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD),
+                ).toCollection(linkedSetOf())
                 val nx = bounds.left / sw
                 val ny = bounds.top / sh
                 val nw = bounds.width() / sw
@@ -306,7 +301,12 @@ class LauAccessibilityService : AccessibilityService() {
                 )
                 val capsJson = JSONArray()
                 for (cap in caps) capsJson.put(cap)
-                val ownLabel = node.text?.toString() ?: node.contentDescription?.toString()
+                // A credential field never names itself with its own text.
+                val ownLabel = PureRules.labelContribution(
+                    node.text?.toString(),
+                    node.contentDescription?.toString(),
+                    node.isPassword,
+                ).firstOrNull()
                 // Plan §3 label attribution: a clickable row often has no text of
                 // its own; derive it from the subtree so the target is named.
                 val label = if (ownLabel.isNullOrBlank()) derivedLabel(node) else ownLabel
@@ -320,8 +320,12 @@ class LauAccessibilityService : AccessibilityService() {
                         .put("height", nh))
                     .put("capabilities", capsJson)
                 if (!label.isNullOrBlank()) obj.put("label", label.take(200))
-                if (node.isEditable && node.text != null) obj.put("value", node.text.toString().take(200))
-                // Plan §5.6: password evidence for the Android effect guard.
+                // A credential field is flagged, never read (§5.4 / privacy).
+                PureRules.observationValue(
+                    node.isEditable,
+                    node.isPassword,
+                    node.text?.toString(),
+                )?.let { obj.put("value", it) }
                 if (node.isPassword) obj.put("password", true)
                 out.put(obj)
             }
@@ -355,9 +359,15 @@ class LauAccessibilityService : AccessibilityService() {
         val parts = ArrayList<String>(LABEL_PARTS)
         fun collect(n: AccessibilityNodeInfo, depth: Int) {
             if (parts.size >= LABEL_PARTS || depth > LABEL_DEPTH) return
-            for (v in listOf(n.text?.toString(), n.contentDescription?.toString())) {
-                val s = v?.trim()
-                if (!s.isNullOrBlank() && parts.none { it == s }) parts.add(s)
+            // A credential field contributes no text to any label (not even its
+            // ancestors'): only its contentDescription (usually the hint).
+            for (v in PureRules.labelContribution(
+                n.text?.toString(),
+                n.contentDescription?.toString(),
+                n.isPassword,
+            )) {
+                val s = v.trim()
+                if (s.isNotEmpty() && parts.none { it == s }) parts.add(s)
                 if (parts.size >= LABEL_PARTS) return
             }
             for (i in 0 until n.childCount) {
@@ -398,8 +408,13 @@ class LauAccessibilityService : AccessibilityService() {
         if (text.isNotEmpty() && got != text) {
             throw HelperException(
                 "verification_failed",
-                "set_value did not stick (got ${got.take(40)})"
+                if (node.isPassword) "set_value did not stick (credential field)"
+                else "set_value did not stick (got ${got.take(40)})"
             )
+        }
+        // Never echo a credential back, not even to the operator.
+        if (node.isPassword) {
+            return ok(req, JSONObject().put("performed", "set_value").put("value", "<redacted>"))
         }
         return ok(req, JSONObject().put("performed", "set_value").put("value", got))
     }

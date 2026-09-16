@@ -37,6 +37,79 @@ class PureRulesTest {
     }
 
     @Test
+    fun aCredentialIsFlaggedNeverRead() {
+        // Plan §5.4/§5.6 + privacy: the observation may carry the fact that a
+        // field is a credential, never the credential itself.
+        assertNull(PureRules.observationValue(isEditable = true, isPassword = true, text = "hunter2"))
+        assertEquals(
+            "hunter2",
+            PureRules.observationValue(isEditable = true, isPassword = false, text = "hunter2"),
+        )
+        // Not editable → nothing to report even when text exists.
+        assertNull(PureRules.observationValue(isEditable = false, isPassword = false, text = "x"))
+        assertNull(PureRules.observationValue(isEditable = true, isPassword = false, text = null))
+    }
+
+    @Test
+    fun aCredentialContributesNoLabelText() {
+        // The sneakier leak: a password box's text becoming a row's label.
+        assertEquals(
+            emptyList<String>(),
+            PureRules.labelContribution(text = "hunter2", contentDescription = null, isPassword = true),
+        )
+        // Its hint (contentDescription) is still useful and safe.
+        assertEquals(
+            listOf("密码"),
+            PureRules.labelContribution(text = "hunter2", contentDescription = "密码", isPassword = true),
+        )
+        // A normal field contributes its text, with the description second.
+        assertEquals(
+            listOf("WLAN", "WLAN 设置"),
+            PureRules.labelContribution(text = "WLAN", contentDescription = "WLAN 设置", isPassword = false),
+        )
+    }
+
+    @Test
+    fun capabilitiesAreOnlyWhatTheNodeOffers() {
+        // A read-only label advertises nothing.
+        assertEquals(
+            emptyList<String>(),
+            PureRules.capabilities(
+                clickable = false, hasClickAction = false, editable = false,
+                hasSetTextAction = false, focusable = false, hasFocusAction = false,
+                scrollable = false, hasScrollActions = false,
+            ),
+        )
+        // A clickable row: invoke + focus.
+        assertEquals(
+            listOf("invoke", "focus"),
+            PureRules.capabilities(
+                clickable = true, hasClickAction = true, editable = false,
+                hasSetTextAction = false, focusable = true, hasFocusAction = true,
+                scrollable = false, hasScrollActions = false,
+            ),
+        )
+        // An editable field also worth focusing.
+        assertEquals(
+            listOf("set_value", "focus"),
+            PureRules.capabilities(
+                clickable = false, hasClickAction = false, editable = true,
+                hasSetTextAction = true, focusable = true, hasFocusAction = false,
+                scrollable = false, hasScrollActions = false,
+            ),
+        )
+        // A scrollable list.
+        assertEquals(
+            listOf("focus", "scroll"),
+            PureRules.capabilities(
+                clickable = false, hasClickAction = false, editable = false,
+                hasSetTextAction = false, focusable = true, hasFocusAction = false,
+                scrollable = true, hasScrollActions = true,
+            ),
+        )
+    }
+
+    @Test
     fun scroll_takesOnlyTheDominantAxisAndItsSign() {
         assertEquals(
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD,

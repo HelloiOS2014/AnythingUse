@@ -603,6 +603,46 @@ $ adb reboot
 至此：**Phase 2 验收 7/7 全部真机通过；Phase 3 验收 16/17 真机通过**，
 仅 #8「双设备并行」受硬件限制（手边只有一台设备）。
 
+## 追加：文档审计发现的隐私缺陷及修复（2026-09-15）
+
+起因：核对 `docs/` 时发现 privacy / architecture / command-contract / execution-contract
+**完全没有跟上 Android 端点**。写 privacy 前先核实现状，结果查出三个真缺陷（§0 #28、#27）：
+
+```
+① 凭证文本会进入观察（原实现只把密码框路由到 R4，没有阻止"读"）
+   - dump：`if (node.isEditable && node.text != null) put("value", text)` —— 密码框同样命中
+   - 自身 label：`ownLabel = node.text ?: node.contentDescription` —— 明文可成为该元素标签
+   - 祖先派生 label：derivedLabel 收集子树 text 时不看 isPassword —— 可成为整行的标签
+   - set_value 读回与失败信息：`value: got` / "did not stick (got …)" 会回显
+   修复：规则抽到 PureRules.observationValue / labelContribution，
+        dump / 自身 label / 派生 label / set_value 读回与错误信息五处统一走它；
+        新增 3 个 JVM 单测（credential flagged never read / contributes no label text），
+        套件 3 → 6 个测试全绿。
+
+② 截图是 0644（同机任何用户可读）
+   实测：/var/folders/.../T/lau-*.png 权限 -rw-r--r--
+   修复：write_private() 以 mode(0o600) 创建；实测新截图 -rw------- (600) ✅
+
+③ 被杀 daemon 的遗留截图从不清理
+   实测：清理前遗留 104 个（含 9-15 的）
+   修复：daemon 启动时 prune_leftover_screenshots() 扫 temp 目录，删除 >1h 的 lau-*.png
+   实测：重启 daemon 后 104 → 8（留下的 8 个是最近一小时内的）✅
+
+④ 回归：非凭证字段的值通道不受影响
+   $ lau set-value --observation-id … e8 "你好全" → {"performed":"set_value","value":"你好全"}
+   $ lau dump → e8 password=false value=你好全 ✅
+
+⑤ 顺带发现（§0 #27）：手动添加网络对话框的「安全性」Spinner 声称 [focus,scroll]，
+   `lau scroll --dy 1` → verification_failed: scroll returned false；它也没有 invoke。
+   ⇒ D5 暂缓（无坐标兜底）意味着这类下拉控件目前无法语义操作。
+   因此"给凭证框写入内容再验证脱敏"的真机端到端验证**无法在本机完成**；
+   凭证脱敏规则改由单测覆盖（上述 ①）。
+```
+
+文档同步：`privacy.md` 新增 Android 章节（数据根 / 日志格式 / 权限文件 / 截图生命周期 / 凭证规则 /
+helper 可见与可做范围）；`architecture.md` 新增 Android 端点架构与职责；
+`command-contract.md` 标注 Scope 与 lau 的 Agent/操作者面划分；`execution-contract.md` 增加指向 LAU 规划的说明。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。
