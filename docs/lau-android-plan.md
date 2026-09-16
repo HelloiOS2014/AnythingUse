@@ -256,13 +256,13 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 ### Phase 2 — Helper APK（语义执行；无 Mac daemon）—— 验收已执行：5 通过 / 2 部分；`dispatchGesture` 仍未实现（§0）
 - 交付：`native/android-helper/` + 安装脚本 + `lau dump / invoke / set_value / scroll / foreground`（CLI 单进程直连；**观察代次状态由 helper 持有**——AccessibilityService 本身设备侧长活）。
 - **验收（确定性断言，非元素计数）**：
-  1. doctor 四态 + 未启用时的引导 blocker
-  2. dump：断言**已知 label**（如「设置」内具体条目文案）、能力字段、包/窗口身份
-  3. invoke：语义点开已知条目，断言目标窗口/包切换（同包时断言窗口标题/层级变化），全程无坐标
-  4. set_value：原生/Compose 控件输入 `你好LCU`，重 dump 断言值相等；WebView 不支持时返回 `unsupported_capability`（不静默失败）
-  5. 陈旧 observationId → `stale_observation`；能力未声明 → `unsupported_capability`
-  6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒
-  7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）
+  1. doctor 四态 + 未启用时的引导 blocker —— ✅ 真机通过（正常态四态全绿；禁用态给出精确引导 blocker，exit 3）
+  2. dump：断言**已知 label**（如「设置」内具体条目文案）、能力字段、包/窗口身份 —— ✅ 真机通过（#22 修好后窗口身份齐全）
+  3. invoke：语义点开已知条目，断言目标窗口/包切换（同包时断言窗口标题/层级变化），全程无坐标 —— ✅ 真机通过（设置首页 →「我的设备」详情页，代次 15→16）
+  4. set_value：原生/Compose 控件输入 `你好LCU`，重 dump 断言值相等；WebView 不支持时返回 `unsupported_capability`（不静默失败） —— ✅ 真机通过（搜索框写入 `你好LCU`，重 dump 值相等）
+  5. 陈旧 observationId → `stale_observation`；能力未声明 → `unsupported_capability` —— ✅ 真机通过（两条均 exit 3）
+  6. 锁屏/灭屏 → `device_locked`/`screen_off`，不自动唤醒 —— ✅ 真机通过（亮屏解锁/关屏/锁屏三种状态；`mWakefulness` 保持 Asleep，未被唤醒或解锁）
+  7. 杀 helper 进程 → 系统自动重启服务（开关在）→ ping 恢复；**重启手机** → doctor 全绿（含 HyperOS 自启动指引）—— 🟡 前半 ✅（`am crash` 后 PID 17820→32256，≤2s 内 ping 恢复）；**重启手机待验**（且实测发现 HyperOS 可能自行关闭无障碍服务，见 §0 #17）
 
 ### Phase 3 — `lau` daemon + 任务闭环 + 安全模型 —— **部分交付**（daemon / 闭环 / 接管 / fail-closed 守卫 / resume / `decide --wait` 已有；验收第 3、9 条真机通过；安全模型主要缺口见 §0）
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
