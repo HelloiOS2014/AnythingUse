@@ -467,6 +467,48 @@ daemon.log 中 act/decide 交替的 op 序列与上述步骤一一对应。
   它**不判断目标内容** —— 这与 mac 执行契约一致（诚实性由 Actor 负责）。
   含义：**`succeeded` 只证明机制，不证明目标**；上层若要知道"事办成了没"，必须自己核对重新观察到的内容。
 
+## 追加：Phase 3 批量真机验证（2026-09-15 深夜，一轮跑完 4 条）
+
+同一台设备、同一个任务会话内完成（app access 放行后无需再点击）：
+
+```
+① 观察：obs e89aeae6:1（蓝牙页）
+
+② global_back（验收 2 的后半）
+$ lau act <t> --observation-id e89aeae6:1 --action '{"kind":"semantic","type":"global_back"}' \
+      --effect '{"kind":"navigate","summary":"系统返回"}'
+{"last_action_summary":"global_back ok","step":1}
+$ lau decide → obs e89aeae6:2；页面从蓝牙页退回设置首页 ✅
+
+③ 坐标拒绝（验收 7）
+$ lau act <t> --observation-id e89aeae6:2 \
+      --action '{"kind":"targeted","type":"click","x":0.5,"y":0.5}' \
+      --effect '{"kind":"navigate","summary":"坐标点击"}'
+{"status":"error","err":"semantic_action_required: use invoke/set_value/scroll, not coordinate input"}  exit=3
+   ↑ 立即拒绝、无弹窗
+   ⚠ 修复前：证据层先把它判成 R3 → 弹了后果确认框（机主误点 Allow）。
+     由于 D9「批准不重放」，那次点击**没有执行任何坐标动作**；且修复后 Targeted 在门之前就被拒，
+     该授权永远不会被消费（5 分钟后过期）。已把"坐标一律先拒"提到门之前。
+
+④ per-serial 队列（验收 8 的结构部分）
+$ lau run 第二个任务 → {state:"queued", wait_reason:"device_queue"}
+$ lau decide <t2>  → {"status":"queued","err":"task is queued behind another task on this device"}（无弹窗）
+$ lau cancel <t1>  → 队列清扫：<t2> {state:"waiting_actor", last_action_summary:"promoted from the device queue"} ✅
+
+⑤ getevent 断流 → fail closed（验收 4，故障注入）
+$ pkill -f "getevent -lt"
+$ lau decide <t1> → {"status":"paused","err":"watch_unavailable"}
+$ lau status <t1> → {state:"paused", wait_reason:"watch_unavailable",
+                     watch:{healthy:false, dead_reason:"getevent stream ended"}}   ✅
+$ lau resume <t1> → {state:"waiting_actor"}；watch:{healthy:true, dead_reason:null}  ✅ 监听重建
+```
+
+**过程发现（安全设计问题，已修）**：app access 对话框原先把 `Allow once` 设为**默认按钮**，
+回车/误点即授权（机主两次遇到）。已改为 `default button "Deny"`，与后果门的"默认 Deny"一致。
+注意：**已运行的 daemon 仍持有旧对话框脚本**，需重启 daemon 才生效。
+
+**本批未验**：任务闭环内的中文搜索（Phase 2 P2-4 已单独验过 CJK `set_value`）；真正的双设备并行（只有一台设备）。
+
 ## 未完成项（需机主配合）
 
 1. #17 的复现/定论：需要再来一次受控复现（关屏亮屏各一次 + `am crash` 各一次，分别观察 `enabled`）。

@@ -51,7 +51,7 @@
 | 7 | R4 与 R3 同路：走普通 consequence 对话框，**不是**人工接管 | `daemon.rs` | ✅ **已实现并真机验证（2026-09-15，验收 16）**：R4 → 两步 Mac 对话框（Start takeover → 人自己在手机上做 → Done），**提案被丢弃、从不执行**（密码框 `value` 保持 null）；完成后 `observation_id` 清空，旧令牌 act 被拒为 `stale observation_id` |
 | 8 | consequence 授权无 `GateRequest` / `ConsequenceGrant` 绑定、无一次性消费与过期；批准后**重放**已存动作（helper 侧靠代次兜底） | `daemon.rs` | 与 mac 端「批准不重放」不同，属 Android 特有设计，必须在验收中证明安全 |
 | 9 | 无 `indeterminate`（§4）：动作超时/响应丢失只当普通错误 | `daemon.rs` | 计划要求的「不确定不重放」语义缺失 |
-| 10 | 无 per-serial 队列 / forward 隔离 | `daemon.rs` | 双设备场景不成立 |
+| 10 ✅ | ~~无 per-serial 队列 / forward 隔离~~ **已实现（2026-09-15）**：`serial_is_busy` + `promote_next_for_serial`，每个请求入口做一次 `sweep_queues`；同设备第二个任务进 `queued`，终态后自动提升 | `daemon.rs` | 真机（单设备）验证通过；转发隔离本就按 serial 键控端口。**双设备并行未验**（只有一台设备） |
 | 11 | `dispatchGesture` 坐标兜底未实现（D5）；helper 亦无 `global_back` | helper / daemon | Phase 2 承诺的兜底缺席 |
 | 12 | 无 helper peer 凭据校验（§4 威胁模型承诺项） | helper | 本机其他进程仍可触达 forward 端口 |
 | 13 | 分发与技能：`install-cli.sh` 不装 `lau`、`package-release.sh` 不打包 lau/helper、无 Android Skill | `scripts/` | 未产品化 |
@@ -268,13 +268,13 @@ compact `elements[]`（id/role/label/frame/capabilities）与 `lcu decide` 同�
 - 交付：daemon（§6）+ `lau run --app <package> --actor agent` / `decide --wait --json` / `act` / `result` / `resume` / `cancel` / `approve`；Android 证据层 guard；consequence **Mac 对话框**（§5.4）。
 - **验收**：
   1. 全闭环：`lau run "在设置中打开深色模式" --app com.android.settings --actor agent` → decide → act → done 重观察 → `succeeded` —— ✅ **2026-09-15 真机通过（目标真实达成）**：`在设置里打开蓝牙页面`，两步语义动作（返回 → 蓝牙行，step=4）后重观察确认页面已是蓝牙页，再 `done` → `succeeded`。注意：`succeeded` 只证明「显式 Done + 目标可再次观察」，**不判断目标内容**（与 mac 契约一致，诚实性由 Actor 负责）
-  2. 中文搜索 + `global_back` 回退（两步）
+  2. 中文搜索 + `global_back` 回退（两步）—— 🟡 `global_back` ✅ 2026-09-15 真机通过（`global_back ok`，从蓝牙页退回设置首页）；任务闭环内的"中文搜索"待补（Phase 2 的 P2-4 已单独验证过 CJK `set_value`）
   3. **真机双验**：真实手指触摸 → `paused`；`performAction`/`dispatchGesture` 注入 → **不**触发（getevent 区分）—— ✅ 2026-09-15 通过
-  4. getevent 断流 → fail closed（暂停并报告，不装共存）
+  4. getevent 断流 → fail closed（暂停并报告，不装共存）—— ✅ **2026-09-15 真机故障注入通过**：杀掉 `getevent` 进程后 `decide` → `paused` + `wait_reason=watch_unavailable`，`status` 报告 `watch:{healthy:false, dead_reason:"getevent stream ended"}`；`lau resume` 重建监听后 `healthy:true` 恢复
   5. app_access 首次 → **Mac 对话框**（与 §5.4 / D6 一致；**不是**手机弹窗，避免误触发 getevent 接管）；批准 → 重观察继续；helper 自动化触不到对话框
   6. 破坏性效果声明 → `waiting_user`（CLI exit 2，Agent 停）；**把删除/支付标签谎报为 navigate → 仍要到达正确的门**（证据覆盖低报）
-  7. 有语义能力时提交坐标 → `semantic_action_required`
-  8. 双设备接入：per-serial 队列与 forward 各自独立
+  7. 有语义能力时提交坐标 → `semantic_action_required` —— ✅ **2026-09-15 真机通过**：`act` 提交 `targeted/click` → 立即 `semantic_action_required`（exit 3），**不弹任何门**。注意：曾因证据层先判 R3 而错误地弹出后果确认框，已把"坐标一律先拒"提到门之前（D5 未决期间不得让坐标经审批执行）
+  8. 双设备接入：per-serial 队列与 forward 各自独立 —— 🟡 **per-serial 队列已实现并真机验证（单设备）**：同设备第二个任务 `state=queued`（`wait_reason=device_queue`），`decide` 返回 `queued` 且不弹门；前一个任务终态后自动提升（`promoted from the device queue`）。**真正的双设备并行未验**（当前只有一台设备）
   9. daemon 空闲退出（60s）→ 下次 `run` 重新拉起，任务状态不丢（队列在 daemon 内存，任务跨 daemon 重启不承诺——单任务内完成）
   10. **会话隔离**（2026-09-15 新增，§0 #15）：重建服务实例（关屏/亮屏，或 `am crash`）后，用**旧** `observationId` 提交动作 → 必须 `stale_observation`，**即使代次数值巧合相同** —— ✅ 2026-09-15 通过（旧会话 `65a49aa8:1` vs 新会话 `185f2569:1`，数字相同仅会话不同，被拒；同元素换新令牌则成功）
   11. **节点身份复核**（2026-09-15 新增，§0 #16）：dump 后让 UI 变化到 `eN` 指向别的元素，再用旧 `observationId` 提交 → 必须 `stale_observation`，**不得**点到新元素 —— ✅ 2026-09-15 通过（`node e2 failed refresh`，页面未被改动）
