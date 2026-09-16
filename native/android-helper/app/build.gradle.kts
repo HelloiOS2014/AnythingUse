@@ -28,8 +28,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
     // org.json ships with the Android SDK.
+    testImplementation("junit:junit:4.13.2")
 }
