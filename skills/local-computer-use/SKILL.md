@@ -158,6 +158,16 @@ only from the installer's printed `extension:` path (default:
 `~/Library/Application Support/AnythingUse/chrome-extension`). The repository
 extension directory is not a second load target.
 
+A ChromeTab observation carries DOM-derived elements with `el_N` ids
+(`role` / `label` / `capabilities`), not the macOS `eN` ids, plus a rendered
+screenshot of the task tab. A blank task tab reports zero elements, which is
+expected before the first navigation.
+
+Right after `lcu act`, `lcu decide` can still return the **pre-action**
+observation — same `observation_id`, same screenshot. Compare ids: if the id did
+not change, call `decide` again rather than re-submitting an action against an
+observation you already consumed.
+
 For a Chrome task, express the destination in the high-level goal. When a
 current observation calls for navigation, submit only the shared action JSON
 `{"kind":"semantic","type":"navigate","url":"https://example.com/"}` with
