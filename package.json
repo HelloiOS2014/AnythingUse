@@ -1,7 +1,12 @@
 {
   "name": "anythinguse",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
+  "type": "module",
+  "main": "./dsh/index.mjs",
+  "exports": {
+    ".": "./dsh/index.mjs"
+  },
   "description": "AnythingUse \u2014 local-first control plane for real macOS apps, Chrome, and (source-level) Android. Ships the local-computer-use (lcu) and local-android-use (lau) skills for Pi, DSH, and other CLI agents.",
   "keywords": [
     "pi-package",

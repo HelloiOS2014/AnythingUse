@@ -1,6 +1,6 @@
 {
   "name": "anythinguse",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "AnythingUse \u2014 operate real macOS apps and Chrome with the lcu CLI, and (source-level) a USB-connected Android device with the lau CLI, from any agent (Pi, Claude Code, Grok Build, Codex). Decision maker is pluggable: local VLM or the agent itself (decide/act).",
   "author": {
     "name": "AnythingUse",
